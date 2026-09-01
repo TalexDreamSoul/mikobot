@@ -3161,7 +3161,7 @@ async def test_http_replay_recovers_marked_answer_from_session_after_gateway_res
         Headers([("Authorization", "Bearer tok")]),
     )
 
-    response = restarted_channel.gateway.http._handle_webui_thread_get(
+    response = await restarted_channel.gateway.http._handle_webui_thread_get(
         request,
         encoded_key,
     )
@@ -5264,7 +5264,8 @@ def test_is_valid_chat_id(value: Any, expected: bool) -> None:
     assert _is_valid_chat_id(value) is expected
 
 
-def test_handle_webui_thread_get_returns_json(tmp_path, monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_handle_webui_thread_get_returns_json(tmp_path, monkeypatch) -> None:
     from urllib.parse import quote
 
     from websockets.datastructures import Headers
@@ -5280,7 +5281,7 @@ def test_handle_webui_thread_get_returns_json(tmp_path, monkeypatch) -> None:
     channel.gateway.tokens.api_tokens["tok"] = time.monotonic() + 300.0
     enc = quote(key, safe="")
     req = Request(f"/api/sessions/{enc}/webui-thread", Headers([("Authorization", "Bearer tok")]))
-    resp = channel.gateway.http._handle_webui_thread_get(req, enc)
+    resp = await channel.gateway.http._handle_webui_thread_get(req, enc)
     assert resp.status_code == 200
     body = json.loads(resp.body.decode())
     assert body["sessionKey"] == key
@@ -5341,7 +5342,8 @@ async def test_handle_session_context_get_reads_detached_session() -> None:
     manager.read_session_snapshot.assert_called_once_with(session.key)
 
 
-def test_handle_webui_thread_get_reports_registered_turn_as_pending(
+@pytest.mark.asyncio
+async def test_handle_webui_thread_get_reports_registered_turn_as_pending(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -5377,7 +5379,7 @@ def test_handle_webui_thread_get_reports_registered_turn_as_pending(
     enc = quote(key, safe="")
     req = Request(f"/api/sessions/{enc}/webui-thread", Headers([("Authorization", "Bearer tok")]))
 
-    resp = channel.gateway.http._handle_webui_thread_get(req, enc)
+    resp = await channel.gateway.http._handle_webui_thread_get(req, enc)
 
     assert resp.status_code == 200
     body = json.loads(resp.body.decode())
@@ -5432,7 +5434,7 @@ async def test_idle_registry_stays_pending_until_turn_end_is_persisted(
         await wth.publish_turn_run_status(bus, inbound, "running")
         await wth.publish_turn_run_status(bus, inbound, "idle")
 
-        before_delivery = channel.gateway.http._handle_webui_thread_get(request, enc)
+        before_delivery = await channel.gateway.http._handle_webui_thread_get(request, enc)
         assert json.loads(before_delivery.body.decode())["has_pending_tool_calls"] is True
 
         await channel.send(OutboundMessage(
@@ -5443,7 +5445,7 @@ async def test_idle_registry_stays_pending_until_turn_end_is_persisted(
             event=TurnEndEvent(),
         ))
 
-        after_delivery = channel.gateway.http._handle_webui_thread_get(request, enc)
+        after_delivery = await channel.gateway.http._handle_webui_thread_get(request, enc)
         assert json.loads(after_delivery.body.decode())["has_pending_tool_calls"] is False
         assert wth.websocket_turn_wall_started_at("idle-order") is None
         assert wth.websocket_turn_id("idle-order") is None
@@ -5508,7 +5510,7 @@ async def test_webui_thread_api_restores_older_owner_after_latest_completes() ->
         f"/api/sessions/{enc}/webui-thread",
         Headers([("Authorization", "Bearer tok")]),
     )
-    response = channel.gateway.http._handle_webui_thread_get(request, enc)
+    response = await channel.gateway.http._handle_webui_thread_get(request, enc)
 
     assert response.status_code == 200
     payload = json.loads(response.body.decode())
@@ -5525,7 +5527,8 @@ async def test_webui_thread_api_restores_older_owner_after_latest_completes() ->
         ("turn-next", True),
     ],
 )
-def test_handle_webui_thread_get_reconciles_registered_turn_with_turn_end(
+@pytest.mark.asyncio
+async def test_handle_webui_thread_get_reconciles_registered_turn_with_turn_end(
     tmp_path,
     monkeypatch,
     active_turn_id: str,
@@ -5580,7 +5583,7 @@ def test_handle_webui_thread_get_reconciles_registered_turn_with_turn_end(
     enc = quote(key, safe="")
     req = Request(f"/api/sessions/{enc}/webui-thread", Headers([("Authorization", "Bearer tok")]))
 
-    resp = channel.gateway.http._handle_webui_thread_get(req, enc)
+    resp = await channel.gateway.http._handle_webui_thread_get(req, enc)
 
     assert resp.status_code == 200
     body = json.loads(resp.body.decode())
@@ -5589,7 +5592,8 @@ def test_handle_webui_thread_get_reconciles_registered_turn_with_turn_end(
     assert body["active_turn_id"] == active_turn_id
 
 
-def test_handle_webui_thread_get_accepts_pagination_query(tmp_path, monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_handle_webui_thread_get_accepts_pagination_query(tmp_path, monkeypatch) -> None:
     from urllib.parse import quote
 
     from websockets.datastructures import Headers
@@ -5619,7 +5623,7 @@ def test_handle_webui_thread_get_accepts_pagination_query(tmp_path, monkeypatch)
         Headers([("Authorization", "Bearer tok")]),
     )
 
-    resp = channel.gateway.http._handle_webui_thread_get(req, enc)
+    resp = await channel.gateway.http._handle_webui_thread_get(req, enc)
 
     assert resp.status_code == 200
     body = json.loads(resp.body.decode())
@@ -5628,7 +5632,8 @@ def test_handle_webui_thread_get_accepts_pagination_query(tmp_path, monkeypatch)
     assert body["page"]["before_cursor"]
 
 
-def test_handle_file_preview_returns_workspace_file(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_handle_file_preview_returns_workspace_file(tmp_path) -> None:
     from urllib.parse import quote
 
     from websockets.datastructures import Headers
@@ -5649,7 +5654,7 @@ def test_handle_file_preview_returns_workspace_file(tmp_path) -> None:
         Headers([("Authorization", "Bearer tok")]),
     )
 
-    resp = gateway.http._handle_file_preview(req, enc)
+    resp = await gateway.http._handle_file_preview(req, enc)
 
     assert resp.status_code == 200
     body = json.loads(resp.body.decode())
@@ -5659,7 +5664,8 @@ def test_handle_file_preview_returns_workspace_file(tmp_path) -> None:
     assert body["truncated"] is False
 
 
-def test_handle_file_preview_probe_checks_availability_without_content(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_handle_file_preview_probe_checks_availability_without_content(tmp_path) -> None:
     from urllib.parse import quote
 
     from websockets.datastructures import Headers
@@ -5680,13 +5686,14 @@ def test_handle_file_preview_probe_checks_availability_without_content(tmp_path)
         Headers([("Authorization", "Bearer tok")]),
     )
 
-    resp = gateway.http._handle_file_preview(req, enc)
+    resp = await gateway.http._handle_file_preview(req, enc)
 
     assert resp.status_code == 200
     assert json.loads(resp.body.decode()) == {"available": True}
 
 
-def test_handle_file_preview_probe_reports_missing_file_as_unavailable(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_handle_file_preview_probe_reports_missing_file_as_unavailable(tmp_path) -> None:
     from urllib.parse import quote
 
     from websockets.datastructures import Headers
@@ -5703,13 +5710,14 @@ def test_handle_file_preview_probe_reports_missing_file_as_unavailable(tmp_path)
         Headers([("Authorization", "Bearer tok")]),
     )
 
-    resp = gateway.http._handle_file_preview(req, enc)
+    resp = await gateway.http._handle_file_preview(req, enc)
 
     assert resp.status_code == 200
     assert json.loads(resp.body.decode()) == {"available": False}
 
 
-def test_handle_file_preview_probe_reports_binary_file_as_unavailable(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_handle_file_preview_probe_reports_binary_file_as_unavailable(tmp_path) -> None:
     from urllib.parse import quote
 
     from websockets.datastructures import Headers
@@ -5728,7 +5736,7 @@ def test_handle_file_preview_probe_reports_binary_file_as_unavailable(tmp_path) 
         Headers([("Authorization", "Bearer tok")]),
     )
 
-    resp = gateway.http._handle_file_preview(req, enc)
+    resp = await gateway.http._handle_file_preview(req, enc)
 
     assert resp.status_code == 200
     assert json.loads(resp.body.decode()) == {"available": False}
@@ -5743,7 +5751,8 @@ def test_file_preview_normalizes_windows_file_url() -> None:
     assert _clean_preview_path("file:///tmp/project/app.py") == "/tmp/project/app.py"
 
 
-def test_handle_file_preview_rejects_paths_outside_workspace(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_handle_file_preview_rejects_paths_outside_workspace(tmp_path) -> None:
     from urllib.parse import quote
 
     from websockets.datastructures import Headers
@@ -5767,12 +5776,13 @@ def test_handle_file_preview_rejects_paths_outside_workspace(tmp_path) -> None:
         Headers([("Authorization", "Bearer tok")]),
     )
 
-    resp = gateway.http._handle_file_preview(req, enc)
+    resp = await gateway.http._handle_file_preview(req, enc)
 
     assert resp.status_code == 403
 
 
-def test_handle_file_preview_allows_paths_outside_workspace_in_full_access(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_handle_file_preview_allows_paths_outside_workspace_in_full_access(tmp_path) -> None:
     from urllib.parse import quote
 
     from websockets.datastructures import Headers
@@ -5796,7 +5806,7 @@ def test_handle_file_preview_allows_paths_outside_workspace_in_full_access(tmp_p
         Headers([("Authorization", "Bearer tok")]),
     )
 
-    resp = gateway.http._handle_file_preview(req, enc)
+    resp = await gateway.http._handle_file_preview(req, enc)
 
     assert resp.status_code == 200
     body = json.loads(resp.body.decode())
@@ -5805,7 +5815,8 @@ def test_handle_file_preview_allows_paths_outside_workspace_in_full_access(tmp_p
     assert body["content"].splitlines() == ["value = 42"]
 
 
-def test_handle_webui_thread_get_backfills_legacy_missing_user_rows(
+@pytest.mark.asyncio
+async def test_handle_webui_thread_get_backfills_legacy_missing_user_rows(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -5838,7 +5849,7 @@ def test_handle_webui_thread_get_backfills_legacy_missing_user_rows(
     channel.gateway.tokens.api_tokens["tok"] = time.monotonic() + 300.0
     enc = quote(key, safe="")
     req = Request(f"/api/sessions/{enc}/webui-thread", Headers([("Authorization", "Bearer tok")]))
-    resp = channel.gateway.http._handle_webui_thread_get(req, enc)
+    resp = await channel.gateway.http._handle_webui_thread_get(req, enc)
 
     assert resp.status_code == 200
     body = json.loads(resp.body.decode())
@@ -5849,7 +5860,8 @@ def test_handle_webui_thread_get_backfills_legacy_missing_user_rows(
     ]
 
 
-def test_handle_webui_thread_get_does_not_backfill_cron_internal_prompt(
+@pytest.mark.asyncio
+async def test_handle_webui_thread_get_does_not_backfill_cron_internal_prompt(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -5887,7 +5899,7 @@ def test_handle_webui_thread_get_does_not_backfill_cron_internal_prompt(
     channel.gateway.tokens.api_tokens["tok"] = time.monotonic() + 300.0
     enc = quote(key, safe="")
     req = Request(f"/api/sessions/{enc}/webui-thread", Headers([("Authorization", "Bearer tok")]))
-    resp = channel.gateway.http._handle_webui_thread_get(req, enc)
+    resp = await channel.gateway.http._handle_webui_thread_get(req, enc)
 
     assert resp.status_code == 200
     body = json.loads(resp.body.decode())
@@ -5895,7 +5907,8 @@ def test_handle_webui_thread_get_does_not_backfill_cron_internal_prompt(
     assert [message["content"] for message in body["messages"]] == ["提醒已经到期。"]
 
 
-def test_handle_webui_thread_get_does_not_backfill_trigger_internal_prompt(
+@pytest.mark.asyncio
+async def test_handle_webui_thread_get_does_not_backfill_trigger_internal_prompt(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -5933,7 +5946,7 @@ def test_handle_webui_thread_get_does_not_backfill_trigger_internal_prompt(
     channel.gateway.tokens.api_tokens["tok"] = time.monotonic() + 300.0
     enc = quote(key, safe="")
     req = Request(f"/api/sessions/{enc}/webui-thread", Headers([("Authorization", "Bearer tok")]))
-    resp = channel.gateway.http._handle_webui_thread_get(req, enc)
+    resp = await channel.gateway.http._handle_webui_thread_get(req, enc)
 
     assert resp.status_code == 200
     body = json.loads(resp.body.decode())
@@ -5941,7 +5954,8 @@ def test_handle_webui_thread_get_does_not_backfill_trigger_internal_prompt(
     assert [message["content"] for message in body["messages"]] == ["PR #4502 已经开始 review。"]
 
 
-def test_handle_webui_thread_get_does_not_backfill_hidden_subagent_result(
+@pytest.mark.asyncio
+async def test_handle_webui_thread_get_does_not_backfill_hidden_subagent_result(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -5979,7 +5993,7 @@ def test_handle_webui_thread_get_does_not_backfill_hidden_subagent_result(
     channel.gateway.tokens.api_tokens["tok"] = time.monotonic() + 300.0
     enc = quote(key, safe="")
     req = Request(f"/api/sessions/{enc}/webui-thread", Headers([("Authorization", "Bearer tok")]))
-    resp = channel.gateway.http._handle_webui_thread_get(req, enc)
+    resp = await channel.gateway.http._handle_webui_thread_get(req, enc)
 
     assert resp.status_code == 200
     body = json.loads(resp.body.decode())

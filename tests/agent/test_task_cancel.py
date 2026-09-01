@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
+from nanobot.collaboration import AsyncLocalCollaborationRepository, CollaborationStore
 from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import GenerationSettings
 from nanobot.session.keys import UNIFIED_SESSION_KEY
@@ -23,7 +27,21 @@ def _runtime(provider: MagicMock | None = None) -> LLMRuntime:
     return LLMRuntime.capture(provider, "test-model", context_window_tokens=128_000)
 
 
-def _make_loop(*, tools_config=None):
+@pytest_asyncio.fixture
+async def local_collaboration_repository(
+    tmp_path: Path,
+) -> AsyncIterator[AsyncLocalCollaborationRepository]:
+    repository = AsyncLocalCollaborationRepository(CollaborationStore(tmp_path / "collaboration"))
+    await repository.initialize()
+    try:
+        yield repository
+    finally:
+        await repository.aclose()
+
+
+def _make_loop(
+    workspace: Path, repository: AsyncLocalCollaborationRepository, *, tools_config=None
+):
     """Create a minimal AgentLoop with mocked dependencies."""
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
@@ -31,33 +49,45 @@ def _make_loop(*, tools_config=None):
     bus = MessageBus()
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
-    workspace = MagicMock()
-    workspace.__truediv__ = MagicMock(return_value=MagicMock())
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
          patch("nanobot.agent.loop.SessionManager"), \
          patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
-        loop = AgentLoop(bus=bus, provider=provider, workspace=workspace, tools_config=tools_config)
+        loop = AgentLoop(
+            bus=bus,
+            provider=provider,
+            workspace=workspace,
+            tools_config=tools_config,
+            collaboration_repository=repository,
+        )
     return loop, bus
 
 
 class TestHandleStop:
     @pytest.mark.asyncio
-    async def test_stop_no_active_task(self):
+    async def test_stop_no_active_task(
+        self,
+        tmp_path: Path,
+        local_collaboration_repository: AsyncLocalCollaborationRepository,
+    ):
         from nanobot.bus.events import InboundMessage
         from nanobot.command.builtin import cmd_stop
         from nanobot.command.router import CommandContext
 
-        loop, bus = _make_loop()
+        loop, bus = _make_loop(tmp_path, local_collaboration_repository)
         msg = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="/stop")
         ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw="/stop", loop=loop)
         out = await cmd_stop(ctx)
         assert "No active task" in out.content
 
     @pytest.mark.asyncio
-    async def test_aclose_cancels_active_turn_before_resources(self):
-        loop, _bus = _make_loop()
+    async def test_aclose_cancels_active_turn_before_resources(
+        self,
+        tmp_path: Path,
+        local_collaboration_repository: AsyncLocalCollaborationRepository,
+    ):
+        loop, _bus = _make_loop(tmp_path, local_collaboration_repository)
         events: list[str] = []
 
         async def active_turn():
@@ -82,8 +112,12 @@ class TestHandleStop:
         assert task.cancelled()
 
     @pytest.mark.asyncio
-    async def test_aclose_serializes_duplicate_cleanup(self):
-        loop, _bus = _make_loop()
+    async def test_aclose_serializes_duplicate_cleanup(
+        self,
+        tmp_path: Path,
+        local_collaboration_repository: AsyncLocalCollaborationRepository,
+    ):
+        loop, _bus = _make_loop(tmp_path, local_collaboration_repository)
         entered = asyncio.Event()
         release = asyncio.Event()
         concurrent = 0
@@ -110,12 +144,16 @@ class TestHandleStop:
         assert max_concurrent == 1
 
     @pytest.mark.asyncio
-    async def test_stop_cancels_active_task(self):
+    async def test_stop_cancels_active_task(
+        self,
+        tmp_path: Path,
+        local_collaboration_repository: AsyncLocalCollaborationRepository,
+    ):
         from nanobot.bus.events import InboundMessage
         from nanobot.command.builtin import cmd_stop
         from nanobot.command.router import CommandContext
 
-        loop, bus = _make_loop()
+        loop, bus = _make_loop(tmp_path, local_collaboration_repository)
         cancelled = asyncio.Event()
 
         async def slow_task():
@@ -139,12 +177,16 @@ class TestHandleStop:
         assert "stopped" in out.content.lower()
 
     @pytest.mark.asyncio
-    async def test_stop_cancels_multiple_tasks(self):
+    async def test_stop_cancels_multiple_tasks(
+        self,
+        tmp_path: Path,
+        local_collaboration_repository: AsyncLocalCollaborationRepository,
+    ):
         from nanobot.bus.events import InboundMessage
         from nanobot.command.builtin import cmd_stop
         from nanobot.command.router import CommandContext
 
-        loop, bus = _make_loop()
+        loop, bus = _make_loop(tmp_path, local_collaboration_repository)
         events = [asyncio.Event(), asyncio.Event()]
 
         async def slow(idx):
@@ -168,8 +210,13 @@ class TestHandleStop:
 
 class TestDispatch:
     @pytest.mark.asyncio
-    async def test_run_logs_and_continues_after_leaked_cancelled_error(self, monkeypatch):
-        loop, bus = _make_loop()
+    async def test_run_logs_and_continues_after_leaked_cancelled_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        local_collaboration_repository: AsyncLocalCollaborationRepository,
+    ):
+        loop, bus = _make_loop(tmp_path, local_collaboration_repository)
         loop.aclose = AsyncMock()
         loop.auto_compact.check_expired = MagicMock()
         warnings: list[str] = []
@@ -194,19 +241,31 @@ class TestDispatch:
         assert calls == 2
         assert any("Ignoring leaked CancelledError" in warning for warning in warnings)
 
-    def test_exec_tool_not_registered_when_disabled(self):
+    def test_exec_tool_not_registered_when_disabled(
+        self,
+        tmp_path: Path,
+        local_collaboration_repository: AsyncLocalCollaborationRepository,
+    ):
         from nanobot.agent.tools.shell import ExecToolConfig
         from nanobot.config.schema import ToolsConfig
 
-        loop, _bus = _make_loop(tools_config=ToolsConfig(exec=ExecToolConfig(enable=False)))
+        loop, _bus = _make_loop(
+            tmp_path,
+            local_collaboration_repository,
+            tools_config=ToolsConfig(exec=ExecToolConfig(enable=False)),
+        )
 
         assert loop.tools.get("exec") is None
 
     @pytest.mark.asyncio
-    async def test_dispatch_processes_and_publishes(self):
+    async def test_dispatch_processes_and_publishes(
+        self,
+        tmp_path: Path,
+        local_collaboration_repository: AsyncLocalCollaborationRepository,
+    ):
         from nanobot.bus.events import InboundMessage, OutboundMessage
 
-        loop, bus = _make_loop()
+        loop, bus = _make_loop(tmp_path, local_collaboration_repository)
         msg = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="hello")
         loop._process_message = AsyncMock(
             return_value=OutboundMessage(channel="test", chat_id="c1", content="hi")
@@ -216,11 +275,15 @@ class TestDispatch:
         assert out.content == "hi"
 
     @pytest.mark.asyncio
-    async def test_dispatch_streaming_preserves_message_metadata(self):
+    async def test_dispatch_streaming_preserves_message_metadata(
+        self,
+        tmp_path: Path,
+        local_collaboration_repository: AsyncLocalCollaborationRepository,
+    ):
         from nanobot.bus.events import InboundMessage
         from nanobot.bus.outbound_events import StreamDeltaEvent, StreamEndEvent
 
-        loop, bus = _make_loop()
+        loop, bus = _make_loop(tmp_path, local_collaboration_repository)
         msg = InboundMessage(
             channel="matrix",
             sender_id="u1",
@@ -254,10 +317,14 @@ class TestDispatch:
         assert isinstance(second.event, StreamEndEvent)
 
     @pytest.mark.asyncio
-    async def test_same_session_dispatches_serialize(self):
+    async def test_same_session_dispatches_serialize(
+        self,
+        tmp_path: Path,
+        local_collaboration_repository: AsyncLocalCollaborationRepository,
+    ):
         from nanobot.bus.events import InboundMessage, OutboundMessage
 
-        loop, bus = _make_loop()
+        loop, bus = _make_loop(tmp_path, local_collaboration_repository)
         order = []
         first_started = asyncio.Event()
         release_first = asyncio.Event()

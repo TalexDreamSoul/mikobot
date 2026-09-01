@@ -7,6 +7,27 @@ import type {
   ChannelValidationPayload,
   ChatSummary,
   CliAppsPayload,
+  CollaborationContextSource,
+  CollaborationEditableContextSourceKind,
+  CollaborationExtensionProfile,
+  CollaborationExtensionSettings,
+  CollaborationOrganization,
+  CollaborationOrganizationMember,
+  CollaborationOrganizationPayload,
+  CollaborationOrganizationRole,
+  CollaborationOrganizationsPayload,
+  CollaborationPayload,
+  CollaborationProject,
+  CollaborationProjectMember,
+  CollaborationProjectPayload,
+  CollaborationProjectRole,
+  CollaborationTask,
+  CollaborationTaskList,
+  CollaborationTaskStatus,
+  PersonalAssistantPayload,
+  PersonalTask,
+  PersonalTaskReviewState,
+  PersonalVault,
   FilePreviewPayload,
   ImageGenerationSettingsUpdate,
   McpPresetsPayload,
@@ -498,6 +519,321 @@ export async function fetchWorkspaces(
     token,
     undefined,
     API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchCollaboration(
+  token: string,
+  base: string = "",
+): Promise<CollaborationPayload> {
+  return request<CollaborationPayload>(`${base}/api/collaboration`, token, undefined, API_READ_TIMEOUT_MS);
+}
+
+export async function fetchCollaborationOrganizations(
+  token: string,
+  base: string = "",
+): Promise<CollaborationOrganizationsPayload> {
+  return request<CollaborationOrganizationsPayload>(
+    `${base}/api/collaboration/organizations`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchCollaborationOrganization(
+  token: string,
+  organizationId: string,
+  base: string = "",
+): Promise<CollaborationOrganizationPayload> {
+  return request<CollaborationOrganizationPayload>(
+    `${base}/api/collaboration/organizations/${encodeURIComponent(organizationId)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchCollaborationProject(
+  token: string,
+  projectId: string,
+  base: string = "",
+): Promise<CollaborationProjectPayload> {
+  return request<CollaborationProjectPayload>(
+    `${base}/api/collaboration/projects/${encodeURIComponent(projectId)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function createCollaborationOrganization(
+  transport: WebUIMutationTransport,
+  name: string,
+): Promise<{ organization: CollaborationOrganization }> {
+  return mutation<{ organization: CollaborationOrganization }>(
+    transport,
+    "collaboration.organization.create",
+    { name },
+  );
+}
+
+export async function updateCollaborationOrganization(
+  transport: WebUIMutationTransport,
+  organizationId: string,
+  name: string,
+): Promise<{ organization: CollaborationOrganization }> {
+  return mutation<{ organization: CollaborationOrganization }>(
+    transport,
+    "collaboration.organization.update",
+    { organization_id: organizationId, name },
+  );
+}
+
+export async function deleteCollaborationOrganization(
+  transport: WebUIMutationTransport,
+  organizationId: string,
+): Promise<{ deleted: boolean }> {
+  return mutation<{ deleted: boolean }>(
+    transport,
+    "collaboration.organization.delete",
+    { organization_id: organizationId },
+  );
+}
+
+export async function addCollaborationOrganizationMember(
+  transport: WebUIMutationTransport,
+  organizationId: string,
+  memberUserId: string,
+  role: CollaborationOrganizationRole,
+): Promise<{ member: CollaborationOrganizationMember }> {
+  return mutation<{ member: CollaborationOrganizationMember }>(
+    transport,
+    "collaboration.organization.member.add",
+    { organization_id: organizationId, member_user_id: memberUserId, role },
+  );
+}
+
+export async function removeCollaborationOrganizationMember(
+  transport: WebUIMutationTransport,
+  organizationId: string,
+  memberUserId: string,
+): Promise<{ deleted: boolean }> {
+  return mutation<{ deleted: boolean }>(
+    transport,
+    "collaboration.organization.member.remove",
+    { organization_id: organizationId, member_user_id: memberUserId },
+  );
+}
+
+export async function createCollaborationProject(
+  transport: WebUIMutationTransport,
+  name: string,
+  organizationId?: string | null,
+): Promise<{ project: CollaborationProject }> {
+  return mutation<{ project: CollaborationProject }>(
+    transport,
+    "collaboration.project.create",
+    { name, ...(organizationId ? { organization_id: organizationId } : {}) },
+  );
+}
+
+export async function addCollaborationProjectMember(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  memberUserId: string,
+  role: CollaborationProjectRole,
+): Promise<{ member: CollaborationProjectMember }> {
+  return mutation<{ member: CollaborationProjectMember }>(
+    transport,
+    "collaboration.project.member.add",
+    { project_id: projectId, member_user_id: memberUserId, role },
+  );
+}
+
+export async function removeCollaborationProjectMember(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  memberUserId: string,
+): Promise<{ deleted: boolean }> {
+  return mutation<{ deleted: boolean }>(
+    transport,
+    "collaboration.project.member.remove",
+    { project_id: projectId, member_user_id: memberUserId },
+  );
+}
+
+export async function createCollaborationTaskList(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  name: string,
+): Promise<{ task_list: CollaborationTaskList }> {
+  return mutation<{ task_list: CollaborationTaskList }>(transport, "collaboration.task_list.create", {
+    project_id: projectId,
+    name,
+  });
+}
+
+export async function createCollaborationTask(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  taskListId: string,
+  title: string,
+): Promise<{ task: CollaborationTask }> {
+  return mutation<{ task: CollaborationTask }>(transport, "collaboration.task.create", {
+    project_id: projectId,
+    task_list_id: taskListId,
+    title,
+  });
+}
+
+export async function updateCollaborationTask(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  taskId: string,
+  values: { status: CollaborationTaskStatus },
+): Promise<{ task: CollaborationTask }> {
+  return mutation<{ task: CollaborationTask }>(transport, "collaboration.task.update", {
+    project_id: projectId,
+    task_id: taskId,
+    values,
+  });
+}
+
+export async function deleteCollaborationTask(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  taskId: string,
+): Promise<{ deleted: true }> {
+  return mutation<{ deleted: true }>(transport, "collaboration.task.delete", {
+    project_id: projectId,
+    task_id: taskId,
+  });
+}
+
+export async function updateCollaborationExtensions(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  expectedRevision: number,
+  settings: CollaborationExtensionSettings,
+): Promise<{ extension_profile: CollaborationExtensionProfile }> {
+  return mutation<{ extension_profile: CollaborationExtensionProfile }>(transport, "collaboration.extensions.update", {
+    project_id: projectId,
+    revision: expectedRevision,
+    settings,
+  });
+}
+
+export async function createCollaborationContextSource(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  values: {
+    name: string;
+    kind: CollaborationEditableContextSourceKind;
+    config: Record<string, string>;
+    enabled: boolean;
+  },
+): Promise<{ context_source: CollaborationContextSource }> {
+  return mutation<{ context_source: CollaborationContextSource }>(transport, "collaboration.context_source.create", {
+    project_id: projectId,
+    ...values,
+  });
+}
+
+export async function updateCollaborationContextSource(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  sourceId: string,
+  values: { enabled: boolean },
+): Promise<{ context_source: CollaborationContextSource }> {
+  return mutation<{ context_source: CollaborationContextSource }>(transport, "collaboration.context_source.update", {
+    project_id: projectId,
+    source_id: sourceId,
+    values,
+  });
+}
+
+export async function deleteCollaborationContextSource(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  sourceId: string,
+): Promise<{ deleted: true }> {
+  return mutation<{ deleted: true }>(transport, "collaboration.context_source.delete", {
+    project_id: projectId,
+    source_id: sourceId,
+  });
+}
+
+export async function fetchPersonalAssistant(
+  token: string,
+  base: string = "",
+): Promise<PersonalAssistantPayload> {
+  return request<PersonalAssistantPayload>(`${base}/api/personal`, token, undefined, API_READ_TIMEOUT_MS);
+}
+
+export async function createPersonalTask(
+  transport: WebUIMutationTransport,
+  values: {
+    vault_id: string;
+    title: string;
+    note?: string;
+    due_at_ms?: number;
+    priority?: number;
+    review_state?: PersonalTaskReviewState;
+  },
+): Promise<{ task: PersonalTask }> {
+  return mutation<{ task: PersonalTask }>(transport, "personal.task.create", values);
+}
+
+export async function updatePersonalTask(
+  transport: WebUIMutationTransport,
+  taskId: string,
+  values: {
+    status?: PersonalTask["status"];
+    review_state?: PersonalTaskReviewState;
+    priority?: number;
+  },
+): Promise<{ task: PersonalTask }> {
+  return mutation<{ task: PersonalTask }>(transport, "personal.task.update", {
+    task_id: taskId,
+    ...values,
+  });
+}
+
+export async function deletePersonalTask(
+  transport: WebUIMutationTransport,
+  taskId: string,
+): Promise<{ deleted: boolean }> {
+  return mutation<{ deleted: boolean }>(transport, "personal.task.delete", { task_id: taskId });
+}
+
+export async function createPersonalVault(
+  transport: WebUIMutationTransport,
+  name: string,
+  kind: PersonalVault["kind"],
+): Promise<{ vault: PersonalVault }> {
+  return mutation<{ vault: PersonalVault }>(transport, "personal.vault.create", { name, kind });
+}
+
+export async function createPersonalPersona(
+  transport: WebUIMutationTransport,
+  values: { name: string; vault_id: string; instructions?: string },
+): Promise<{ persona: { id: string; name: string; default_vault_id: string } }> {
+  return mutation<{ persona: { id: string; name: string; default_vault_id: string } }>(
+    transport,
+    "personal.persona.create",
+    values,
+  );
+}
+
+export async function setDefaultPersonalPersona(
+  transport: WebUIMutationTransport,
+  personaId: string,
+): Promise<{ default_persona_id: string }> {
+  return mutation<{ default_persona_id: string }>(
+    transport,
+    "personal.persona.default",
+    { persona_id: personaId },
   );
 }
 

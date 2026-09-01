@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.runtime_control import RuntimeControl
     from nanobot.bus.queue import MessageBus
     from nanobot.bus.runtime_events import RuntimeEventBus
+    from nanobot.collaboration import CollaborationRepository
     from nanobot.config.schema import ProviderConfig, ToolsConfig
     from nanobot.cron.service import CronService
     from nanobot.providers.factory import ProviderSnapshot
@@ -91,4 +92,5 @@ class ToolContext:
     timezone: str = "UTC"
     workspace_sandbox: WorkspaceSandboxStatus | None = None
     runtime_events: RuntimeEventBus | None = None
+    collaboration_repository: CollaborationRepository | None = None
     runtime_control: RuntimeControl | None = None

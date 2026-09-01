@@ -182,9 +182,12 @@ class SkillsLoader:
     def build_explicit_skill_runtime_context(
         self,
         text: str,
+        allowed_skills: set[str] | None = None,
     ) -> RuntimeContextBlock | None:
         """Load non-always skills explicitly invoked by the current message."""
         skill_names = self.get_explicitly_invoked_skills(text)
+        if allowed_skills is not None:
+            skill_names = [name for name in skill_names if name in allowed_skills]
         if not skill_names:
             return None
         always_active = set(self.get_always_skills())
@@ -206,6 +209,7 @@ class SkillsLoader:
         exclude: set[str] | None = None,
         *,
         workspace: Path | None = None,
+        include: set[str] | None = None,
     ) -> str:
         """
         Build a summary of all skills (name, description, path, availability).
@@ -221,6 +225,8 @@ class SkillsLoader:
             Markdown-formatted skills summary.
         """
         all_skills = self.list_skills(filter_unavailable=False)
+        if include is not None:
+            all_skills = [entry for entry in all_skills if entry["name"] in include]
         if not all_skills:
             return ""
 

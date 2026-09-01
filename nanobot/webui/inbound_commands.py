@@ -43,6 +43,7 @@ from nanobot.webui.metadata import WEBSOCKET_TURN_OWNER_METADATA_KEY
 from nanobot.webui.session_access import (
     SessionMention,
     WebuiSessionAccess,
+    normalize_session_mentions_metadata,
     session_mentions_runtime_context,
 )
 from nanobot.webui.session_identity import is_valid_webui_chat_id, webui_session_key
@@ -107,6 +108,7 @@ class WebUICommandTransport(Protocol):
         self,
         *,
         sender_id: str,
+        authorization_id: str,
         chat_id: str,
         content: str,
         media: list[str] | None,
@@ -283,6 +285,8 @@ class WebUICommandRouter:
         connection: ServerConnection,
         client_id: str,
         envelope: dict[str, Any],
+        *,
+        trusted_principal: str | None = None,
     ) -> None:
         """Execute one typed WebUI command."""
         command_type = envelope.get("type")
@@ -375,6 +379,16 @@ class WebUICommandRouter:
                     chat_id=chat_id,
                 )
                 return
+            if not await self.gateway.can_access_webui_session(
+                connection, webui_session_key(chat_id)
+            ):
+                await self._transport.webui_send_event(
+                    connection,
+                    "error",
+                    detail="session_not_found",
+                    chat_id=chat_id,
+                )
+                return
             self._transport.webui_attach(connection, chat_id)
             await self._transport.webui_send_event(
                 connection,
@@ -459,7 +473,12 @@ class WebUICommandRouter:
             await self._transport.webui_send_event(connection, event, **payload)
             return
         if command_type == "message":
-            await self._dispatch_message(connection, client_id, envelope)
+            await self._dispatch_message(
+                connection,
+                client_id,
+                envelope,
+                trusted_principal=trusted_principal,
+            )
             return
         await self._transport.webui_send_event(
             connection,
@@ -472,6 +491,8 @@ class WebUICommandRouter:
         connection: ServerConnection,
         client_id: str,
         envelope: dict[str, Any],
+        *,
+        trusted_principal: str | None = None,
     ) -> None:
         chat_id = envelope.get("chat_id")
         content = envelope.get("content")
@@ -489,6 +510,22 @@ class WebUICommandRouter:
                 connection,
                 "error",
                 detail="access_denied",
+                **rejection_fields,
+            )
+            return
+        # A verified proxy principal is confined to sessions it has already
+        # attached through an authorized command, or owns persistently. This
+        # runs before attachment, transcript hydration, or message routing.
+        if trusted_principal is not None and (
+            chat_id not in self._transport.webui_connection_chats(connection)
+            and not await self.gateway.can_access_webui_session(
+                connection, webui_session_key(chat_id)
+            )
+        ):
+            await self._transport.webui_send_event(
+                connection,
+                "error",
+                detail="session_not_found",
                 **rejection_fields,
             )
             return
@@ -625,9 +662,15 @@ class WebUICommandRouter:
             metadata["mcp_presets"] = mcp_presets
         session_mentions: list[SessionMention] = []
         if trusted_webui and self._session_access is not None:
+            permitted_mentions: list[dict[str, str]] = []
+            for mention in normalize_session_mentions_metadata(envelope.get("session_mentions")):
+                if await self.gateway.can_access_webui_session(
+                    connection, mention["session_key"]
+                ):
+                    permitted_mentions.append(mention)
             session_mentions = await asyncio.to_thread(
                 self._session_access.normalize_mentions,
-                envelope.get("session_mentions"),
+                permitted_mentions,
                 exclude_session_key=webui_session_key(chat_id),
             )
             if session_mentions:
@@ -667,7 +710,12 @@ class WebUICommandRouter:
                 if context_blocks:
                     metadata[RUNTIME_CONTEXT_INPUT_META] = context_blocks
             await self._transport.webui_dispatch_message(
-                sender_id=client_id,
+                sender_id=(
+                    trusted_principal
+                    if trusted_principal is not None
+                    else client_id
+                ),
+                authorization_id=client_id,
                 chat_id=chat_id,
                 content=dispatch_content,
                 media=media_paths or None,

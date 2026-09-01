@@ -13,6 +13,7 @@ import {
   Settings,
   SquarePen,
   Blocks,
+  FolderKanban,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -61,12 +62,14 @@ interface SidebarProps {
   onRequestRenameProject: (projectKey: string, label: string) => void;
   onNewChatInProject: (projectPath: string, projectName: string) => void;
   onOpenSettings: () => void;
+  onOpenProjects: () => void;
   onOpenApps: () => void;
   onOpenSkills: () => void;
   onOpenAutomations: () => void;
+  onProjectsIntent?: () => void;
   onSettingsIntent?: () => void;
   onOpenSearch: () => void;
-  activeUtility?: "apps" | "skills" | "automations" | null;
+  activeUtility?: "projects" | "apps" | "skills" | "automations" | null;
   onToggleArchived: () => void;
   onCollapse: () => void;
   onExpand?: () => void;
@@ -194,6 +197,15 @@ export function Sidebar(props: SidebarProps) {
           label={t("sidebar.searchAria")}
           onClick={props.onOpenSearch}
           icon={<Search className="h-4 w-4" />}
+        />
+        <SidebarActionButton
+          collapsed={collapsed}
+          label="Projects"
+          onClick={props.onOpenProjects}
+          onIntent={props.onProjectsIntent}
+          active={props.activeUtility === "projects"}
+          selectionRef={activeActionRef}
+          icon={<FolderKanban className="h-4 w-4" />}
         />
         <SidebarActionButton
           collapsed={collapsed}

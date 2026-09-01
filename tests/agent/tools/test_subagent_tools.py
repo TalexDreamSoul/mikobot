@@ -761,9 +761,14 @@ async def test_terminal_drain_reuses_one_timeout_budget(tmp_path):
         timeouts.append(timeout)
         return InboundMessage(
             sender_id="subagent",
-            channel="test",
+            channel="system",
             chat_id="c1",
             content="result",
+            session_key_override=session.key,
+            metadata={
+                "injected_event": "subagent_result",
+                "subagent_task_id": "sub-deadline-1",
+            },
         )
 
     fake_loop = SimpleNamespace(time=clock)

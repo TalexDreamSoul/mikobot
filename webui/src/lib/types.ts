@@ -415,6 +415,186 @@ export interface WorkspacesPayload {
   };
 }
 
+export interface CollaborationUser {
+  id: string;
+  display_name: string;
+  default_vault_id?: string | null;
+  default_persona_id?: string | null;
+}
+
+export type CollaborationOrganizationRole = "owner" | "admin" | "member";
+
+export interface CollaborationOrganization {
+  id: string;
+  name: string;
+  created_by_user_id: string;
+  is_personal: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface CollaborationOrganizationMember {
+  organization_id: string;
+  user_id: string;
+  role: CollaborationOrganizationRole;
+  created_at_ms: number;
+}
+
+export interface CollaborationOrganizationsPayload {
+  organizations: CollaborationOrganization[];
+}
+
+export interface CollaborationOrganizationPayload {
+  organization: CollaborationOrganization;
+  members: CollaborationOrganizationMember[];
+}
+
+export interface CollaborationProject {
+  id: string;
+  name: string;
+  organization_id: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export type CollaborationProjectRole = "owner" | "member";
+
+export interface CollaborationProjectMember {
+  project_id: string;
+  user_id: string;
+  role: CollaborationProjectRole;
+  created_at_ms: number;
+}
+
+export interface CollaborationTaskList {
+  id: string;
+  project_id: string;
+  name: string;
+  position: number;
+  created_at_ms?: number;
+  updated_at_ms?: number;
+}
+
+export type CollaborationTaskStatus = "todo" | "in_progress" | "done" | "cancelled";
+
+export interface CollaborationTask {
+  id: string;
+  project_id: string;
+  task_list_id: string;
+  title: string;
+  status: CollaborationTaskStatus;
+  description: string;
+  assignee_user_id: string | null;
+  position: number;
+  created_at_ms?: number;
+  updated_at_ms?: number;
+}
+
+export interface CollaborationExtensionSettings {
+  skills?: string[];
+  mcpServers?: string[];
+  plugins?: string[];
+  contextMaxTokens?: number;
+  [key: string]: unknown;
+}
+
+export interface CollaborationExtensionProfile {
+  revision: number;
+  settings: CollaborationExtensionSettings;
+}
+
+export interface CollaborationAvailableSkill {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface CollaborationAvailableMcpServer {
+  id: string;
+  name: string;
+}
+
+export type CollaborationContextSourceKind = "skill" | "mcp" | "plugin" | "document" | "custom";
+export type CollaborationEditableContextSourceKind = Extract<
+  CollaborationContextSourceKind,
+  "document" | "custom"
+>;
+
+export interface CollaborationContextSource {
+  id: string;
+  project_id: string;
+  name: string;
+  kind: CollaborationContextSourceKind;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  created_at_ms?: number;
+  updated_at_ms?: number;
+}
+
+export interface CollaborationPayload {
+  user: CollaborationUser;
+  projects: CollaborationProject[];
+  organizations: CollaborationOrganization[];
+  active_project_id: string | null;
+}
+
+export interface CollaborationProjectPayload {
+  project: CollaborationProject;
+  members: CollaborationProjectMember[];
+  task_lists: CollaborationTaskList[];
+  tasks: CollaborationTask[];
+  extension_profile: CollaborationExtensionProfile;
+  available: {
+    skills: CollaborationAvailableSkill[];
+    mcp_servers: CollaborationAvailableMcpServer[];
+  };
+  context_sources: CollaborationContextSource[];
+}
+
+export type PersonalTaskReviewState = "confirmed" | "proposed" | "dismissed";
+
+export interface PersonalVault {
+  id: string;
+  name: string;
+  kind: "private" | "work" | "life";
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface PersonalPersona {
+  id: string;
+  name: string;
+  default_vault_id: string;
+  instructions: string;
+}
+
+export interface PersonalTask {
+  id: string;
+  vault_id: string;
+  title: string;
+  note: string;
+  status: CollaborationTaskStatus;
+  priority: number;
+  due_at_ms: number | null;
+  timezone: string | null;
+  recurrence_rule: string | null;
+  source_type: string;
+  source_ref: string | null;
+  external_provider: string | null;
+  review_state: PersonalTaskReviewState;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface PersonalAssistantPayload {
+  user: CollaborationUser;
+  default_vault_id: string | null;
+  default_persona_id: string | null;
+  vaults: PersonalVault[];
+  personas: PersonalPersona[];
+  tasks: PersonalTask[];
+}
+
 export type SidebarDensity = "comfortable" | "compact";
 export type SidebarSortMode = "updated_desc" | "created_desc" | "title_asc" | "manual";
 export type WorkbenchLayout = "columns" | "rows" | "grid" | "bsp" | "main-stack";
@@ -455,6 +635,24 @@ export interface SidebarStatePayload {
   updated_at?: string | null;
 }
 
+export interface BootstrapOidcAuthChallenge {
+  mode: "oidc";
+  login_url: string;
+  password_enabled: boolean;
+}
+
+export interface BootstrapOidcUser {
+  name: string;
+  email?: string;
+}
+
+export interface BootstrapOidcAuth {
+  mode: "oidc";
+  logout_url: string;
+  logout_csrf_token: string;
+  user: BootstrapOidcUser;
+}
+
 export interface BootstrapResponse {
   token?: string;
   api_token?: string;
@@ -465,6 +663,7 @@ export interface BootstrapResponse {
   model_name?: string | null;
   runtime_surface?: RuntimeSurface;
   runtime_capabilities?: RuntimeCapabilities;
+  auth?: BootstrapOidcAuth;
 }
 
 interface WebUITransportLimits {

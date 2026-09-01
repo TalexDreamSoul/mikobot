@@ -118,6 +118,7 @@ class ContextBuilder:
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         unified_session: bool = False,
+        allowed_skills: set[str] | None = None,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         root = workspace or self.workspace
@@ -143,6 +144,8 @@ class ContextBuilder:
                 parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
 
         active_skills = self.skills.get_always_skills()
+        if allowed_skills is not None:
+            active_skills = [name for name in active_skills if name in allowed_skills]
         if active_skills:
             active_content = self.skills.load_skills_for_context(active_skills)
             if active_content:
@@ -151,6 +154,7 @@ class ContextBuilder:
         skills_summary = self.skills.build_skills_summary(
             exclude=set(active_skills),
             workspace=root,
+            include=allowed_skills,
         )
         if skills_summary:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
@@ -298,6 +302,7 @@ class ContextBuilder:
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         unified_session: bool = False,
+        allowed_skills: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Compatibility wrapper for callers that need merged adjacent roles."""
         messages = self.build_transcript(
@@ -315,6 +320,7 @@ class ContextBuilder:
             include_memory_recent_history=include_memory_recent_history,
             session_key=session_key,
             unified_session=unified_session,
+            allowed_skills=allowed_skills,
         )
         current = messages[-1]
         if len(messages) < 2 or messages[-2].get("role") != current.get("role"):
@@ -342,6 +348,7 @@ class ContextBuilder:
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         unified_session: bool = False,
+        allowed_skills: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Build a model transcript while preserving the fresh-turn boundary."""
         root = workspace or self.workspace
@@ -356,6 +363,7 @@ class ContextBuilder:
                     include_memory_recent_history=include_memory_recent_history,
                     session_key=session_key,
                     unified_session=unified_session,
+                    allowed_skills=allowed_skills,
                 ),
             },
             *transcript.history,
@@ -368,6 +376,7 @@ class ContextBuilder:
             media=list(transcript.media) if transcript.media else None,
             current_role=transcript.current_role,
             runtime_context_blocks=transcript.runtime_context_blocks,
+            allowed_skills=allowed_skills,
         )
         messages.append(current)
         return messages
@@ -379,13 +388,17 @@ class ContextBuilder:
         media: list[str] | None = None,
         current_role: str = "user",
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
+        allowed_skills: set[str] | None = None,
     ) -> dict[str, Any]:
         """Build only the fresh turn message without merging it into history."""
         content = self.build_user_content(current_message, image_paths=media)
         blocks: list[RuntimeContextBlock] = []
         if current_role == "user":
             blocks.extend(runtime_context_blocks or ())
-            skill_context = self.skills.build_explicit_skill_runtime_context(current_message)
+            skill_context = self.skills.build_explicit_skill_runtime_context(
+                current_message,
+                allowed_skills=allowed_skills,
+            )
             if skill_context is not None and skill_context not in blocks:
                 blocks.append(skill_context)
         merged, runtime_context_meta = append_runtime_context(content, blocks)

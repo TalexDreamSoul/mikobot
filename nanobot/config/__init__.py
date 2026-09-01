@@ -14,10 +14,11 @@ from nanobot.config.paths import (
     get_workspace_path,
     is_default_workspace,
 )
-from nanobot.config.schema import Config
+from nanobot.config.schema import CollaborationConfig, Config
 
 __all__ = [
     "Config",
+    "CollaborationConfig",
     "ConfigIssue",
     "ConfigLoadError",
     "load_config",

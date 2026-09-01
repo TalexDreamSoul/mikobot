@@ -10,14 +10,17 @@ See: https://github.com/HKUDS/nanobot/issues/2966
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
+from nanobot.collaboration import AsyncLocalCollaborationRepository, CollaborationStore
 from nanobot.session.recovery import RUNTIME_CHECKPOINT_KEY
 
 
@@ -31,7 +34,21 @@ def _make_provider():
     return provider
 
 
-def _make_loop(tmp_path: Path) -> AgentLoop:
+@pytest_asyncio.fixture
+async def local_collaboration_repository(
+    tmp_path: Path,
+) -> AsyncIterator[AsyncLocalCollaborationRepository]:
+    repository = AsyncLocalCollaborationRepository(CollaborationStore(tmp_path / "collaboration"))
+    await repository.initialize()
+    try:
+        yield repository
+    finally:
+        await repository.aclose()
+
+
+def _make_loop(
+    tmp_path: Path, repository: AsyncLocalCollaborationRepository
+) -> AgentLoop:
     """Create a real AgentLoop with mocked provider — avoids patching __init__."""
     bus = MessageBus()
     provider = _make_provider()
@@ -39,11 +56,19 @@ def _make_loop(tmp_path: Path) -> AgentLoop:
          patch("nanobot.agent.loop.SessionManager"), \
          patch("nanobot.agent.loop.SubagentManager") as mock_subagent_manager:
         mock_subagent_manager.return_value.cancel_by_session = AsyncMock(return_value=0)
-        return AgentLoop(bus=bus, provider=provider, workspace=tmp_path)
+        return AgentLoop(
+            bus=bus,
+            provider=provider,
+            workspace=tmp_path,
+            collaboration_repository=repository,
+        )
 
 
 @pytest.mark.asyncio
-async def test_dispatch_cancellation_restores_checkpoint():
+async def test_dispatch_cancellation_restores_checkpoint(
+    tmp_path: Path,
+    local_collaboration_repository: AsyncLocalCollaborationRepository,
+) -> None:
     """Regression for #2966: /stop interrupting _dispatch must materialize the
     in-flight runtime checkpoint into session.messages before the cancellation
     unwinds, so the next turn can see the partial work.
@@ -58,14 +83,19 @@ async def test_dispatch_cancellation_restores_checkpoint():
     bus = MessageBus()
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
-    workspace = MagicMock()
-    workspace.__truediv__ = MagicMock(return_value=MagicMock())
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
          patch("nanobot.agent.loop.SessionManager"), \
          patch("nanobot.agent.loop.SubagentManager") as mock_subagent_manager:
         mock_subagent_manager.return_value.cancel_by_session = AsyncMock(return_value=0)
-        loop = AgentLoop(bus=bus, provider=provider, workspace=workspace)
+        loop = AgentLoop(
+            bus=bus,
+            provider=provider,
+            workspace=workspace,
+            collaboration_repository=local_collaboration_repository,
+        )
 
     checkpoint_key = RUNTIME_CHECKPOINT_KEY
     session = SimpleNamespace(
@@ -119,9 +149,12 @@ async def test_dispatch_cancellation_restores_checkpoint():
 
 
 @pytest.mark.asyncio
-async def test_dispatch_cancellation_keeps_checkpoint_for_gateway_shutdown(tmp_path: Path) -> None:
+async def test_dispatch_cancellation_keeps_checkpoint_for_gateway_shutdown(
+    tmp_path: Path,
+    local_collaboration_repository: AsyncLocalCollaborationRepository,
+) -> None:
     """Gateway shutdown preserves the checkpoint; an explicit stop restores it."""
-    loop = _make_loop(tmp_path)
+    loop = _make_loop(tmp_path, local_collaboration_repository)
     loop.preserve_inflight_turns_on_shutdown()
     checkpoint_key = RUNTIME_CHECKPOINT_KEY
     checkpoint = {

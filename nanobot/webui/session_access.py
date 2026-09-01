@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import cache
 from typing import Any, TypedDict, cast
 
@@ -112,11 +112,11 @@ class WebuiSessionAccess:
         session_key: str,
         *,
         exclude_session_key: str | None,
+        can_access: Callable[[str], bool] | None = None,
     ) -> dict[str, Any] | None:
-        if session_key == exclude_session_key:
+        if session_key == exclude_session_key or (can_access is not None and not can_access(session_key)):
             return None
         return self._sessions.read_session_metadata(session_key)
-
     def _messages(self, session_key: str) -> list[SessionMessage]:
         @cache
         def load_session_messages() -> list[dict[str, Any]] | None:
@@ -224,6 +224,7 @@ class WebuiSessionAccess:
         raw: object,
         *,
         exclude_session_key: str | None = None,
+        can_access: Callable[[str], bool] | None = None,
     ) -> list[SessionMention]:
         normalized: list[SessionMention] = []
         seen_keys: set[str] = set()
@@ -231,7 +232,11 @@ class WebuiSessionAccess:
         for raw_mention in normalize_session_mentions_metadata(raw):
             mention = raw_mention
             key = mention["session_key"]
-            payload = self._metadata(key, exclude_session_key=exclude_session_key)
+            payload = self._metadata(
+                key,
+                exclude_session_key=exclude_session_key,
+                can_access=can_access,
+            )
             if payload is None or key in seen_keys:
                 continue
             handle = self._handles.handle_for_session(key)

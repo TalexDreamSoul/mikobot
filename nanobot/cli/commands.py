@@ -3,6 +3,7 @@
 # pyright: reportConstantRedefinition=false, reportMissingTypeStubs=false, reportPrivateUsage=false, reportUnusedFunction=false, reportUnusedImport=false
 
 import asyncio
+import json
 import os
 import sys
 from contextlib import suppress
@@ -59,6 +60,7 @@ from nanobot.cli.log_control import _set_nanobot_logs  # noqa: E402
 from nanobot.cli.process_identity import set_cli_process_identity  # noqa: E402
 from nanobot.cli.provider import provider_app  # noqa: E402
 from nanobot.cli.runtime_config import (  # noqa: E402
+    _load_config_for_cli,
     _load_inspection_config,
     _load_runtime_config,
     _model_display,
@@ -639,6 +641,141 @@ def plugins_disable(
 
     message = payload.get("last_action", {}).get("message") or f"Disabled channel '{name}'"
     console.print(f"[green]{escape(message)}[/green] in {resolved_config_path}")
+
+# ============================================================================
+# MCP Interoperability Commands
+# ============================================================================
+
+
+mcp_app = typer.Typer(help="Export and inspect MCP configuration without writing Codex files")
+app.add_typer(mcp_app, name="mcp")
+
+
+@mcp_app.command("codex-config")
+def mcp_codex_config(
+    server: list[str] = typer.Option([], "--server", "-s", help="Only export this MCP server (repeatable)"),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Project path to use as exported stdio server CWD",
+    ),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to nanobot config file"),
+    include_nanobot: bool = typer.Option(
+        False,
+        "--include-nanobot",
+        help="Also export nanobot's project/task/context stdio MCP server",
+    ),
+    project_id: str | None = typer.Option(
+        None,
+        "--project-id",
+        help="Project id pinned into the exported nanobot MCP server",
+    ),
+) -> None:
+    """Print a Codex MCP config fragment; never writes a Codex config file."""
+    from nanobot.agent.plugins import agent_plugin_mcp_servers
+    from nanobot.config.loader import set_config_path
+    from nanobot.mcp_interop import codex_mcp_config
+
+    config_path = Path(config).expanduser().resolve(strict=False) if config else None
+    if config_path is not None:
+        set_config_path(config_path)
+    loaded = _load_config_for_cli(config_path, resolve_env=False)
+    servers = agent_plugin_mcp_servers(loaded.workspace_path, loaded.tools.mcp_servers)
+    if include_nanobot:
+        from nanobot.config.schema import MCPServerConfig
+
+        bridge_name = "nanobot-project"
+        if bridge_name in servers:
+            console.print("[red]MCP server name 'nanobot-project' is already configured[/red]")
+            raise typer.Exit(1)
+        bridge_args = ["-m", "nanobot", "mcp", "serve"]
+        if config_path is not None:
+            bridge_args.extend(["--config", str(config_path)])
+        if project_id:
+            bridge_args.extend(["--project-id", project_id])
+        servers[bridge_name] = MCPServerConfig(
+            type="stdio",
+            command=sys.executable,
+            args=bridge_args,
+            enabled_tools=[
+                "nanobot_projects",
+                "nanobot_task_lists",
+                "nanobot_tasks",
+                "nanobot_task_create",
+                "nanobot_task_update",
+                "nanobot_context_sources",
+                "nanobot_context_read",
+            ],
+        )
+    if server:
+        unknown = sorted(set(server) - servers.keys())
+        if unknown:
+            console.print(f"[red]Unknown MCP server(s): {escape(', '.join(unknown))}[/red]")
+            raise typer.Exit(1)
+        servers = {name: servers[name] for name in server}
+
+    project_path = Path(project).expanduser().resolve(strict=False) if project else None
+    exported = codex_mcp_config(servers, project=project_path)
+    placement = (
+        project_path / ".codex" / "config.toml"
+        if project_path is not None
+        else Path.home() / ".codex" / "config.toml"
+    )
+    typer.echo(f"# Recommended placement: {placement}")
+    if project_path is not None:
+        typer.echo("# Codex loads project configuration only after the project is trusted.")
+    if exported.toml:
+        typer.echo(exported.toml, nl=False)
+    for warning in exported.warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+
+
+@mcp_app.command("import-codex")
+def mcp_import_codex(
+    path: str = typer.Option(..., "--path", help="Path to a Codex config.toml file"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Explicitly confirm this is output-only"),
+) -> None:
+    """Print WebUI-compatible nanobot MCP JSON; this command never writes config."""
+    from nanobot.mcp_interop import read_codex_toml
+
+    try:
+        imported = read_codex_toml(path)
+    except (TypeError, ValueError) as exc:
+        console.print(f"[red]Error: {escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps(imported, indent=2, ensure_ascii=False))
+
+@mcp_app.command("serve")
+def mcp_serve(
+    project_id: str | None = typer.Option(
+        None,
+        "--project-id",
+        help="Local-owner project id to expose; defaults to the owner's default project",
+    ),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to nanobot config file"),
+) -> None:
+    """Serve project tasks and bounded context to local MCP clients over stdio."""
+    from nanobot.collaboration import build_collaboration_repository
+    from nanobot.collaboration.mcp_server import run_collaboration_mcp
+    from nanobot.config.loader import load_config, set_config_path
+
+    if config:
+        set_config_path(Path(config).expanduser().resolve(strict=False))
+    loaded = load_config()
+    collaboration = build_collaboration_repository(loaded.collaboration)
+
+    async def _serve() -> None:
+        try:
+            await collaboration.initialize()
+            await run_collaboration_mcp(
+                collaboration,
+                workspace_path=loaded.workspace_path,
+                project_id=project_id,
+            )
+        finally:
+            await collaboration.aclose()
+
+    asyncio.run(_serve())
 
 
 # ============================================================================

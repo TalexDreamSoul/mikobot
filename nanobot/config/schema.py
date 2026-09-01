@@ -361,6 +361,59 @@ class GatewayConfig(Base):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
+class CollaborationConfig(Base):
+    """Persistence backend settings for collaboration state."""
+
+    backend: Literal["local", "postgres"] = "local"
+    postgres_dsn: str | None = Field(
+        default=None,
+        repr=False,
+        exclude=True,
+        validation_alias=AliasChoices("postgresDsn", "postgres_dsn"),
+    )
+    postgres_migration_dsn: str | None = Field(
+        default=None,
+        repr=False,
+        exclude=True,
+        validation_alias=AliasChoices("postgresMigrationDsn", "postgres_migration_dsn"),
+    )
+    postgres_min_pool_size: int = Field(
+        default=1,
+        ge=1,
+        le=64,
+        validation_alias=AliasChoices("postgresMinPoolSize", "postgres_min_pool_size"),
+    )
+    postgres_max_pool_size: int = Field(
+        default=4,
+        ge=1,
+        le=64,
+        validation_alias=AliasChoices("postgresMaxPoolSize", "postgres_max_pool_size"),
+    )
+    command_timeout_ms: int = Field(
+        default=30_000,
+        ge=100,
+        le=600_000,
+        validation_alias=AliasChoices("commandTimeoutMs", "command_timeout_ms"),
+    )
+    auto_migrate: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("autoMigrate", "auto_migrate"),
+    )
+
+    @model_validator(mode="after")
+    def validate_postgres_settings(self) -> "CollaborationConfig":
+        if self.postgres_min_pool_size > self.postgres_max_pool_size:
+            raise ValueError("postgres minimum pool size cannot exceed maximum pool size")
+        if self.backend == "postgres" and not self.postgres_dsn:
+            raise ValueError("postgres collaboration backend requires a DSN")
+        if self.backend == "postgres" and self.auto_migrate:
+            if not self.postgres_migration_dsn:
+                raise ValueError("postgres auto-migrate requires a migration DSN")
+            if self.postgres_migration_dsn == self.postgres_dsn:
+                raise ValueError("postgres migration DSN must differ from runtime DSN")
+        return self
+
+
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""
 
@@ -432,6 +485,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    collaboration: CollaborationConfig = Field(default_factory=CollaborationConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     model_presets: dict[str, ModelPresetConfig] = Field(
         default_factory=dict,

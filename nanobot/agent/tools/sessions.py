@@ -14,6 +14,7 @@ from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import ToolContext, current_request_session_key
 from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
 from nanobot.session.manager import SessionManager
+from nanobot.session.privacy import same_privacy_scope, session_privacy_scope
 from nanobot.session.session_handles import (
     SessionHandleResolver,
     normalize_session_handle,
@@ -105,11 +106,12 @@ class SearchSessionsTool(_SessionTool):
         query = query.strip()
         if not query:
             return ToolResult.error("Error: search query must not be empty")
+        current_key = current_request_session_key()
         matches = await asyncio.to_thread(
             self._access.search,
             query,
             _SEARCH_LIMIT,
-            exclude_session_key=current_request_session_key(),
+            exclude_session_key=current_key,
         )
         needle = query.casefold()
         result = {
@@ -133,6 +135,7 @@ class SearchSessionsTool(_SessionTool):
                     ],
                 }
                 for match in matches
+                if same_privacy_scope(current_key, match["session_key"])
             ],
         }
         return json.dumps(result, ensure_ascii=False)
@@ -194,6 +197,12 @@ class ReadSessionTool(_SessionTool):
                 return ToolResult.error(f"Error: session @{handle_name} was not found")
             session_handle = f"@{handle_name}"
             session_key = handle.session_key
+        current_key = current_request_session_key()
+        if current_key is None:
+            if session_privacy_scope(session_key) is not None:
+                return ToolResult.error("Error: scoped session access requires a request context")
+        elif not same_privacy_scope(current_key, session_key):
+            return ToolResult.error("Error: cross-vault session access is not authorized")
         query_text = query.strip() if query else ""
         if query_text in _UNSUPPORTED_MATCH_ALL_QUERIES:
             return ToolResult.error(

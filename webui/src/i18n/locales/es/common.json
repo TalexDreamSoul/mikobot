@@ -14,6 +14,12 @@
       "showPassword": "Mostrar contraseña",
       "hidePassword": "Ocultar contraseña",
       "submit": "Conectar",
+      "signIn": "Iniciar sesión en nanobot",
+      "continueWithSso": "Continuar con SSO",
+      "orPassword": "o usar una contraseña",
+      "invalidLoginUrl": "El inicio de sesión único no está disponible porque el servidor devolvió una dirección de acceso no válida.",
+      "invalidLogoutUrl": "El cierre de sesión se bloqueó porque el servidor devolvió una dirección no válida.",
+      "logoutFailed": "No se pudo cerrar la sesión. Inténtalo de nuevo.",
       "required": "Introduce la contraseña.",
       "invalid": "Contraseña incorrecta. Inténtalo de nuevo."
     },

@@ -14,6 +14,12 @@
       "showPassword": "Hiện mật khẩu",
       "hidePassword": "Ẩn mật khẩu",
       "submit": "Kết nối",
+      "signIn": "Đăng nhập vào nanobot",
+      "continueWithSso": "Tiếp tục với SSO",
+      "orPassword": "hoặc dùng mật khẩu",
+      "invalidLoginUrl": "Không thể dùng đăng nhập một lần vì máy chủ trả về địa chỉ đăng nhập không hợp lệ.",
+      "invalidLogoutUrl": "Đăng xuất đã bị chặn vì máy chủ trả về địa chỉ không hợp lệ.",
+      "logoutFailed": "Đăng xuất không thành công. Hãy thử lại.",
       "required": "Nhập mật khẩu.",
       "invalid": "Mật khẩu không đúng. Hãy thử lại."
     },

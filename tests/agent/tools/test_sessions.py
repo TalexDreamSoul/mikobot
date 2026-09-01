@@ -14,6 +14,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.sessions import ReadSessionTool, SearchSessionsTool
 from nanobot.runtime_context import RuntimeContextBlock, append_runtime_context
 from nanobot.session.manager import SessionManager
+from nanobot.session.privacy import same_privacy_scope
 from nanobot.session.session_handles import SessionHandleResolver
 from nanobot.webui.transcript import append_transcript_object
 
@@ -368,3 +369,49 @@ async def test_session_tools_work_without_request_context(tmp_path, monkeypatch)
 
     assert [row["session_key"] for row in result["results"]] == ["custom:history"]
     assert read["session_key"] == "custom:history"
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "expected"),
+    [
+        ("vault:alice:private:telegram:one", "unified:alice:private", True),
+        ("vault:alice:private:telegram:one", "vault:bob:private:telegram:two", False),
+        ("vault:alice:private:telegram:one", "vault:alice:work:telegram:two", False),
+        ("vault:alice:private:telegram:one", "telegram:two", False),
+    ],
+)
+def test_session_privacy_scope_requires_matching_user_and_vault(
+    source: str, target: str, expected: bool
+) -> None:
+    """Only session keys scoped to the same user-owned vault can interact."""
+    assert same_privacy_scope(source, target) is expected
+
+
+@pytest.mark.asyncio
+async def test_read_session_rejects_a_session_from_another_vault(tmp_path) -> None:
+    """Read access cannot cross vault boundaries even for the same user."""
+    manager = SessionManager(tmp_path)
+    _save_session(
+        manager,
+        "vault:alice:private:telegram:history",
+        title="Private history",
+        messages=[{"role": "user", "content": "private decision"}],
+    )
+    _save_session(
+        manager,
+        "vault:alice:work:telegram:history",
+        title="Work history",
+        messages=[{"role": "user", "content": "work secret"}],
+    )
+
+    with _webui_request("vault:alice:private:telegram:current"):
+        allowed = _decode(await ReadSessionTool(manager).execute(
+            session_key="vault:alice:private:telegram:history"
+        ))
+        rejected = await ReadSessionTool(manager).execute(
+            session_key="vault:alice:work:telegram:history"
+        )
+
+    assert [message["content"] for message in allowed["messages"]] == ["private decision"]
+    assert rejected.is_error
+    assert "cross-vault session access" in str(rejected)

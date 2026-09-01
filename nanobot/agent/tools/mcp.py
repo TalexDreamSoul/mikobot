@@ -1696,6 +1696,13 @@ def _tool_belongs_to_server(tool: Tool | None, tool_name: str, server_name: str)
         return getattr(tool, "_server_name", None) == server_name
     return tool_name.startswith(_tool_prefix(server_name))
 
+def mcp_tool_server_name(tool: Tool | None) -> str | None:
+    """Return the configured MCP server owning a wrapped tool, if any."""
+    if isinstance(tool, _MCPWrapperBase):
+        server_name = getattr(tool, "_server_name", None)
+        return server_name if isinstance(server_name, str) and server_name else None
+    return None
+
 
 def _unregister_server_tools(registry: ToolRegistry, server_name: str) -> int:
     removed = 0

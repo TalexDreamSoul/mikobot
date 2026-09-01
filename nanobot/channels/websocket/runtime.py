@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 import json
 import socket
@@ -10,7 +11,7 @@ import ssl
 import uuid
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, Literal, Self, TypeGuard, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import Field, PrivateAttr, field_validator, model_validator
@@ -101,6 +102,11 @@ _ROUTING_ASSERTION_HEADERS = frozenset(
     }
 )
 
+async def _await_if_needed(value: object) -> None:
+    """Await lifecycle hooks while tolerating legacy synchronous gateway adapters."""
+    if inspect.isawaitable(value):
+        await value
+
 
 def _is_routing_assertion_header(value: str) -> bool:
     normalized = value.casefold()
@@ -112,6 +118,9 @@ class TrustedProxyAuthConfig(Base):
 
     trusted_peer_cidrs: list[str] = Field(min_length=1)
     assertion_header: str = Field(min_length=1)
+    # When configured, this proxy-generated header supplies a stable upstream
+    # subject. Its value is only used to derive an opaque sender identity.
+    subject_header: str = ""
     _trusted_peer_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = PrivateAttr(
         default=()
     )
@@ -149,6 +158,32 @@ class TrustedProxyAuthConfig(Base):
             )
         return value
 
+    @field_validator("subject_header")
+    @classmethod
+    def validate_subject_header(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return ""
+        if any(char.isspace() or ord(char) < 0x21 for char in value):
+            raise ValueError("subject_header must be a valid HTTP header name")
+        if _is_routing_assertion_header(value):
+            raise ValueError(
+                "subject_header must identify a proxy-generated authentication subject, "
+                "not a routing or client metadata header"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def subject_header_is_distinct_from_credentials(self) -> Self:
+        if not self.subject_header:
+            return self
+        subject_header = self.subject_header.casefold()
+        if subject_header in {"authorization", "cookie", self.assertion_header.casefold()}:
+            raise ValueError(
+                "subject_header must differ from Authorization, Cookie, and assertion_header"
+            )
+        return self
+
     @model_validator(mode="after")
     def compile_trusted_peer_networks(self) -> Self:
         self._trusted_peer_networks = tuple(
@@ -157,27 +192,90 @@ class TrustedProxyAuthConfig(Base):
         return self
 
 
-class WebSocketConfig(Base):
-    """WebSocket server channel configuration.
 
-    Clients connect with URLs like ``ws://{host}:{port}{path}?client_id=...&token=...``.
-    - ``client_id``: Used for ``allow_from`` authorization; if omitted, a value is generated and logged.
-    - ``token``: If non-empty, the ``token`` query param may match this static secret; short-lived tokens
-      from ``token_issue_path`` are also accepted.
-    - ``token_issue_path``: If non-empty, **GET** (HTTP/1.1) to this path returns JSON
-      ``{"token": "...", "expires_in": <seconds>}``; use ``?token=...`` when opening the WebSocket.
-      Must differ from ``path`` (the WS upgrade path). If the client runs in the **same process** as
-      nanobot and shares the asyncio loop, use a thread or async HTTP client for GET—do not call
-      blocking ``urllib`` or synchronous ``httpx`` from inside a coroutine.
-    - ``token_issue_secret``: If non-empty, token requests must send ``Authorization: Bearer <secret>`` or
-      ``X-Nanobot-Auth: <secret>``.
-    - ``public_ws_url``: Optional public WebSocket endpoint returned by WebUI bootstrap instead of
-      deriving one from proxy request headers. Its path must match ``path``.
-    - ``websocket_requires_token``: If True, the handshake must include a valid token (static or issued and not expired).
-    - Each connection has its own session: a unique ``chat_id`` maps to the agent session internally.
-    - ``media`` field in outbound messages contains local filesystem paths; remote clients need a
-      shared filesystem or an HTTP file server to access these files.
-    """
+
+
+class OidcAuthConfig(Base):
+    """OIDC Authorization Code + PKCE settings for the embedded WebUI."""
+
+    enabled: bool = False
+    issuer: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    redirect_uri: str = ""
+    scopes: list[str] = Field(default_factory=lambda: ["openid", "profile", "email"])
+    token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"] = "none"
+    session_ttl_s: int = Field(default=3600, ge=60, le=86_400)
+    flow_ttl_s: int = Field(default=300, ge=30, le=600)
+    session_capacity: int = Field(default=1_000, ge=1, le=10_000)
+    flow_capacity: int = Field(default=1_000, ge=1, le=10_000)
+
+    @field_validator("issuer", "redirect_uri")
+    @classmethod
+    def secure_url(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return ""
+        parsed = urlsplit(value)
+        host = parsed.hostname or ""
+        if (parsed.scheme not in {"https", "http"} or not parsed.netloc
+                or parsed.username is not None or parsed.password is not None
+                or parsed.fragment):
+            raise ValueError("OIDC URLs must be absolute HTTP(S) URLs without credentials or fragments")
+        if parsed.scheme == "http":
+            try:
+                loopback = host.lower() == "localhost" or ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                loopback = False
+            if not loopback:
+                raise ValueError("OIDC HTTP URLs are allowed only for loopback hosts")
+        return value
+
+    @field_validator("issuer")
+    @classmethod
+    def issuer_has_no_query(cls, value: str) -> str:
+        if value and urlsplit(value).query:
+            raise ValueError("OIDC issuer URL must not contain a query")
+        return value
+
+    @field_validator("client_id", "client_secret")
+    @classmethod
+    def strip_client_credentials(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) > 4_096 or any(ord(char) < 0x21 for char in value):
+            raise ValueError("OIDC client credentials must be bounded visible text")
+        return value
+
+    @field_validator("scopes")
+    @classmethod
+    def validate_scopes(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            scope = value.strip()
+            if not scope or len(scope) > 128 or any(char.isspace() or ord(char) < 0x21 for char in scope):
+                raise ValueError("OIDC scopes must be bounded tokens")
+            if scope not in normalized:
+                normalized.append(scope)
+        if "openid" not in normalized:
+            raise ValueError("OIDC scopes must include openid")
+        return normalized
+
+    @model_validator(mode="after")
+    def enabled_fields_are_complete(self) -> Self:
+        if not self.enabled:
+            return self
+        if not self.issuer or not self.client_id or not self.redirect_uri:
+            raise ValueError("enabled OIDC requires issuer, client_id, and redirect_uri")
+        if self.token_endpoint_auth_method == "none":
+            if self.client_secret:
+                raise ValueError("OIDC public clients must not configure client_secret")
+        elif not self.client_secret:
+            raise ValueError("confidential OIDC clients require client_secret")
+        return self
+
+
+class WebSocketConfig(Base):
+    """WebSocket server configuration and embedded WebUI authentication settings."""
 
     enabled: bool = True
     host: str = "127.0.0.1"
@@ -189,14 +287,11 @@ class WebSocketConfig(Base):
     token_issue_path: str = ""
     token_issue_secret: str = ""
     trusted_proxy_auth: TrustedProxyAuthConfig | None = None
+    oidc_auth: OidcAuthConfig = Field(default_factory=OidcAuthConfig)
     token_ttl_s: int = Field(default=300, ge=30, le=86_400)
     websocket_requires_token: bool = True
     allow_from: list[str] = Field(default_factory=lambda: ["*"])
     streaming: bool = True
-    # Default 36 MB, upper 40 MB: supports up to 4 images at ~6 MB each after
-    # client-side Worker normalization (see webui Composer). 4 × 6 MB × 1.37
-    # (base64 overhead) + envelope framing stays under 36 MB; the 40 MB ceiling
-    # leaves a small margin for sender slop without opening a DoS avenue.
     max_message_bytes: int = Field(default=37_748_736, ge=1024, le=41_943_040)
     ping_interval_s: float = Field(default=20.0, ge=5.0, le=300.0)
     ping_timeout_s: float = Field(default=20.0, ge=5.0, le=300.0)
@@ -240,18 +335,11 @@ class WebSocketConfig(Base):
         if not value:
             return ""
         parsed = urlsplit(value)
-        if (
-            parsed.scheme not in {"ws", "wss"}
-            or not parsed.netloc
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-        ):
+        if (parsed.scheme not in {"ws", "wss"} or not parsed.netloc
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment):
             raise ValueError("public_ws_url must be an absolute ws:// or wss:// URL without credentials")
-        return urlunsplit(
-            (parsed.scheme, parsed.netloc, _normalize_config_path(parsed.path or "/"), "", "")
-        )
+        return urlunsplit((parsed.scheme, parsed.netloc, _normalize_config_path(parsed.path or "/"), "", ""))
 
     @model_validator(mode="after")
     def public_ws_url_matches_path(self) -> Self:
@@ -261,9 +349,7 @@ class WebSocketConfig(Base):
 
     @model_validator(mode="after")
     def token_issue_path_differs_from_ws_path(self) -> Self:
-        if not self.token_issue_path:
-            return self
-        if _normalize_config_path(self.token_issue_path) == _normalize_config_path(self.path):
+        if self.token_issue_path and _normalize_config_path(self.token_issue_path) == _normalize_config_path(self.path):
             raise ValueError("token_issue_path must differ from path (the WebSocket upgrade path)")
         return self
 
@@ -271,11 +357,11 @@ class WebSocketConfig(Base):
     def wildcard_host_requires_auth(self) -> Self:
         if self.host not in ("0.0.0.0", "::"):
             return self
-        if self.token.strip() or self.token_issue_secret.strip() or self.trusted_proxy_auth is not None:
+        if self.token.strip() or self.token_issue_secret.strip() or self.trusted_proxy_auth is not None or self.oidc_auth.enabled:
             return self
         raise ValueError(
             "host is 0.0.0.0 (all interfaces) but neither token, token_issue_secret, "
-            "nor trusted_proxy_auth is set — set one to prevent unauthenticated access"
+            "trusted_proxy_auth, nor enabled oidc_auth is set — set one to prevent unauthenticated access"
         )
 
 
@@ -419,6 +505,7 @@ class WebSocketChannel(BaseChannel):
         self,
         *,
         sender_id: str,
+        authorization_id: str,
         chat_id: str,
         content: str,
         media: list[str] | None,
@@ -429,6 +516,7 @@ class WebSocketChannel(BaseChannel):
     ) -> None:
         await self._handle_message(
             sender_id=sender_id,
+            authorization_id=authorization_id,
             chat_id=chat_id,
             content=content,
             media=media,
@@ -613,6 +701,7 @@ class WebSocketChannel(BaseChannel):
             )
 
     async def start(self) -> None:
+        await _await_if_needed(self.gateway.initialize())
         from nanobot.utils.logging_bridge import redirect_lib_logging
 
         redirect_lib_logging("websockets", level="WARNING")
@@ -739,26 +828,38 @@ class WebSocketChannel(BaseChannel):
         elif len(client_id) > 128:
             self.logger.warning("client_id too long ({} chars), truncating", len(client_id))
             client_id = client_id[:128]
+        trusted_principal = self.gateway.endpoint.trusted_proxy_principal(connection)
+        oidc_principal = self.gateway.endpoint.oidc_principal(connection)
+        # The browser-controlled client_id remains the allowFrom subject. Trusted
+        # proxy and OIDC verification supply durable opaque sender identities.
+        principal_key = trusted_principal or oidc_principal
+        sender_id = principal_key or client_id
+        oidc_expiry_task = (
+            asyncio.create_task(self.gateway.endpoint.close_oidc_at_deadline(connection))
+            if oidc_principal is not None
+            else None
+        )
 
         default_chat_id = str(uuid.uuid4())
 
         try:
-            await connection.send(
-                json.dumps(
-                    {
-                        "event": "ready",
-                        "chat_id": default_chat_id,
-                        "client_id": client_id,
-                    },
-                    ensure_ascii=False,
-                )
-            )
+            ready: dict[str, Any] = {
+                "event": "ready",
+                "chat_id": default_chat_id,
+                "client_id": client_id,
+            }
+            if principal_key is not None:
+                ready["principal"] = True
+            await connection.send(json.dumps(ready, ensure_ascii=False))
             # Register only after ready is successfully sent to avoid out-of-order sends
             self._conn_default[connection] = default_chat_id
             self._attach(connection, default_chat_id)
             await self._hydrate_after_subscribe(default_chat_id)
 
             async for raw in connection:
+                if oidc_principal is not None and not self.gateway.endpoint.oidc_connection_active(connection):
+                    await self.gateway.endpoint.close_oidc_connection(connection, "OIDC credential expired")
+                    break
                 if isinstance(raw, bytes):
                     try:
                         raw = raw.decode("utf-8")
@@ -768,7 +869,12 @@ class WebSocketChannel(BaseChannel):
 
                 envelope = _parse_envelope(raw)
                 if envelope is not None:
-                    await self._dispatch_envelope(connection, client_id, envelope)
+                    await self._dispatch_envelope(
+                        connection,
+                        client_id,
+                        envelope,
+                        trusted_principal=principal_key,
+                    )
                     continue
 
                 content = _parse_inbound_payload(raw)
@@ -778,7 +884,8 @@ class WebSocketChannel(BaseChannel):
                 # so pairing is not applicable. Treat as non-DM to avoid
                 # sending pairing codes to an already-authenticated client.
                 await self._handle_message(
-                    sender_id=client_id,
+                    sender_id=sender_id,
+                    authorization_id=client_id,
                     chat_id=default_chat_id,
                     content=content,
                     metadata={"remote": getattr(connection, "remote_address", None)},
@@ -787,6 +894,10 @@ class WebSocketChannel(BaseChannel):
         except Exception as e:
             self.logger.debug("connection ended: {}", e)
         finally:
+            if oidc_expiry_task is not None:
+                oidc_expiry_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await oidc_expiry_task
             await self._cleanup_connection(connection)
 
     # -- Inbound WebSocket envelopes ---------------------------------------
@@ -796,9 +907,16 @@ class WebSocketChannel(BaseChannel):
         connection: ServerConnection,
         client_id: str,
         envelope: dict[str, Any],
+        *,
+        trusted_principal: str | None = None,
     ) -> None:
         """Delegate one typed envelope to the WebUI application router."""
-        await self._commands.dispatch(connection, client_id, envelope)
+        await self._commands.dispatch(
+            connection,
+            client_id,
+            envelope,
+            trusted_principal=trusted_principal,
+        )
 
     def _prune_webui_request_operations(self) -> None:
         """Compatibility hook for request-cache boundary tests."""
@@ -809,6 +927,7 @@ class WebSocketChannel(BaseChannel):
     async def stop(self) -> None:
         server_task = self._server_task
         if not self._running and server_task is None:
+            await _await_if_needed(self.gateway.aclose())
             return
         self._running = False
         if self._stop_event:
@@ -829,6 +948,7 @@ class WebSocketChannel(BaseChannel):
         self._subs.clear()
         self._conn_chats.clear()
         self._conn_default.clear()
+        await _await_if_needed(self.gateway.aclose())
 
     async def _safe_send_to(
         self,

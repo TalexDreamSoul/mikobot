@@ -3232,11 +3232,16 @@ async def _webui_mutate(
     request_headers = {"Host": "127.0.0.1:8765", **(headers or {})}
     mutation_connection = _FakeConn(connection.remote_address)
     mutation_connection.request = _FakeReq(request_headers)
-    response = await channel.gateway.http.dispatch_webui_mutation(
-        mutation_connection,
-        action,
-        payload or {},
-    )
+    webui_connections = channel.gateway.endpoint.webui_connections
+    webui_connections.add(mutation_connection)
+    try:
+        response = await channel.gateway.http.dispatch_webui_mutation(
+            mutation_connection,
+            action,
+            payload or {},
+        )
+    finally:
+        webui_connections.discard(mutation_connection)
     request = httpx.Request("GET", "http://127.0.0.1/webui-mutation")
     return httpx.Response(
         response.status_code,

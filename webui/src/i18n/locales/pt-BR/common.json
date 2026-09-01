@@ -14,6 +14,12 @@
       "showPassword": "Mostrar senha",
       "hidePassword": "Ocultar senha",
       "submit": "Conectar",
+      "signIn": "Entrar no nanobot",
+      "continueWithSso": "Continuar com SSO",
+      "orPassword": "ou usar uma senha",
+      "invalidLoginUrl": "O login único está indisponível porque o servidor retornou um endereço de acesso inválido.",
+      "invalidLogoutUrl": "A saída foi bloqueada porque o servidor retornou um endereço inválido.",
+      "logoutFailed": "Não foi possível sair. Tente novamente.",
       "required": "Digite a senha.",
       "invalid": "Senha incorreta. Tente novamente."
     },

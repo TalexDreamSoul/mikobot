@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  BootstrapAuthRequiredError,
   consumeUrlBootstrapSecret,
   deriveWsUrl,
   fetchBootstrap,
+  normalizeSameOriginAuthUrl,
 } from "@/lib/bootstrap";
 
 describe("bootstrap helpers", () => {
@@ -87,6 +89,56 @@ describe("bootstrap helpers", () => {
       ws_path: "/",
       ws_url: "wss://proxy.example/",
     });
+  });
+
+  it("surfaces the OIDC challenge from an authentication-required bootstrap response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 401,
+        headers: new Headers({ "content-length": "140" }),
+        text: async () => JSON.stringify({
+          error: "authentication_required",
+          auth: {
+            mode: "oidc",
+            login_url: "/auth/login?return_to=%2F",
+            password_enabled: false,
+          },
+        }),
+      })),
+    );
+
+    try {
+      await fetchBootstrap();
+      throw new Error("expected bootstrap to require authentication");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BootstrapAuthRequiredError);
+      expect(error).toMatchObject({
+        message: "bootstrap failed: HTTP 401",
+        auth: {
+          mode: "oidc",
+          login_url: "/auth/login?return_to=%2F",
+          password_enabled: false,
+        },
+      });
+    }
+  });
+
+  it("permits only same-origin relative OIDC navigation paths", () => {
+    expect(normalizeSameOriginAuthUrl("/auth/login?return_to=%2Fsettings#continue")).toBe(
+      "/auth/login?return_to=%2Fsettings#continue",
+    );
+
+    for (const value of [
+      "https://identity.example/authorize",
+      "//identity.example/authorize",
+      "https://user:password@localhost:3000/auth/login",
+      "/auth\\login",
+      "http://identity.example/logout",
+    ]) {
+      expect(normalizeSameOriginAuthUrl(value)).toBeNull();
+    }
   });
 
   it("consumes bootstrap secrets from the URL fragment", () => {

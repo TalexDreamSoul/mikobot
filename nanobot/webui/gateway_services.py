@@ -9,11 +9,16 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger as default_logger
 
+from nanobot.collaboration import (
+    AsyncLocalCollaborationRepository,
+    CollaborationRepository,
+)
 from nanobot.config.loader import get_config_path
 from nanobot.webui.gateway_endpoint import WebUIGatewayEndpoint
 from nanobot.webui.gateway_tokens import GatewayTokenStore
 from nanobot.webui.ingress_policy import DEFAULT_WEBUI_INGRESS_POLICY, WebUIIngressPolicy
 from nanobot.webui.media_gateway import WebUIMediaGateway
+from nanobot.webui.oidc_auth import OidcAuthenticator
 from nanobot.webui.session_projection import WebUISessionProjection
 from nanobot.webui.settings_services import WebUISettingsServices
 from nanobot.webui.temporary_chats import WebUITemporaryChats
@@ -22,6 +27,8 @@ from nanobot.webui.workspaces import WebUIWorkspaceController
 from nanobot.webui.ws_http import GatewayHTTPHandler
 
 if TYPE_CHECKING:
+    from websockets.asyncio.server import ServerConnection
+
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.websocket.runtime import WebSocketConfig
     from nanobot.cron.service import CronService
@@ -36,6 +43,7 @@ class GatewayServices:
     http: GatewayHTTPHandler
     endpoint: WebUIGatewayEndpoint
     settings: WebUISettingsServices
+    collaboration: CollaborationRepository
     tokens: GatewayTokenStore
     media: WebUIMediaGateway
     ingress: WebUIIngressPolicy
@@ -48,6 +56,19 @@ class GatewayServices:
     local_trigger_store: LocalTriggerStore | None
     cron_pending_job_ids: Callable[[str], set[str]] | None
     local_trigger_pending_ids: Callable[[str], set[str]] | None
+    async def initialize(self) -> None:
+        """Initialize the selected collaboration repository exactly once."""
+        await self.http.initialize_collaboration()
+
+    async def aclose(self) -> None:
+        """Release the collaboration repository at gateway shutdown."""
+        await self.http.aclose_collaboration()
+
+    async def can_access_webui_session(
+        self, connection: Any, session_key: str
+    ) -> bool:
+        """Authorize a WebSocket connection to access one persisted WebUI session."""
+        return await self.http.can_access_webui_session(connection, session_key)
 
 
 def build_gateway_services(
@@ -74,8 +95,10 @@ def build_gateway_services(
     mcp_reload: Callable[[], Awaitable[dict[str, Any]]] | None = None,
     skill_state_action: Callable[[set[str]], None] | None = None,
     recovery_action: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    collaboration: CollaborationRepository | None = None,
     logger: Any = default_logger,
 ) -> GatewayServices:
+    collaboration = collaboration or AsyncLocalCollaborationRepository()
     settings = WebUISettingsServices.create(
         config_path or get_config_path(),
         rename_model_preset=(
@@ -86,6 +109,7 @@ def build_gateway_services(
         refresh_runtime_config=refresh_runtime_config,
     )
     tokens = GatewayTokenStore()
+    oidc = OidcAuthenticator(config.oidc_auth)
     ingress = DEFAULT_WEBUI_INGRESS_POLICY
     minimum_frame_bytes = ingress.minimum_full_policy_frame_bytes()
     if config.max_message_bytes < minimum_frame_bytes:
@@ -113,8 +137,10 @@ def build_gateway_services(
         logger=logger,
     )
     session_projection = WebUISessionProjection(session_manager, log=logger)
+    webui_connections: set[ServerConnection] = set()
     http = GatewayHTTPHandler(
         config=config,
+        webui_connections=webui_connections,
         session_manager=session_manager,
         static_dist_path=static_dist_path,
         runtime_model_name=runtime_model_name,
@@ -127,6 +153,7 @@ def build_gateway_services(
         workspaces=workspaces,
         settings=settings,
         skills_workspace_path=workspace_path,
+        collaboration=collaboration,
         disabled_skills=disabled_skills,
         cron_service=cron_service,
         local_trigger_store=local_trigger_store,
@@ -138,14 +165,22 @@ def build_gateway_services(
         mcp_reload=mcp_reload,
         skill_state_action=skill_state_action,
         recovery_action=recovery_action,
+        oidc=oidc,
         log=logger,
     )
-    endpoint = WebUIGatewayEndpoint(config=config, http=http, tokens=tokens)
+    endpoint = WebUIGatewayEndpoint(
+        config=config,
+        http=http,
+        tokens=tokens,
+        webui_connections=webui_connections,
+    )
+    http.set_oidc_connection_revoker(endpoint.close_oidc_principal)
     return GatewayServices(
         http=http,
         endpoint=endpoint,
         settings=settings,
         tokens=tokens,
+        collaboration=collaboration,
         media=media,
         ingress=ingress,
         transcripts=transcripts,

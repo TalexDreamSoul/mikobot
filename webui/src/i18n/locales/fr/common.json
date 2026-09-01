@@ -14,6 +14,12 @@
       "showPassword": "Afficher le mot de passe",
       "hidePassword": "Masquer le mot de passe",
       "submit": "Se connecter",
+      "signIn": "Se connecter à nanobot",
+      "continueWithSso": "Continuer avec le SSO",
+      "orPassword": "ou utiliser un mot de passe",
+      "invalidLoginUrl": "L’authentification unique est indisponible car le serveur a renvoyé une adresse de connexion non valide.",
+      "invalidLogoutUrl": "La déconnexion a été bloquée car le serveur a renvoyé une adresse non valide.",
+      "logoutFailed": "La déconnexion a échoué. Réessayez.",
       "required": "Saisissez le mot de passe.",
       "invalid": "Mot de passe incorrect. Réessayez."
     },

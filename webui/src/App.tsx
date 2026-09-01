@@ -53,6 +53,8 @@ import {
   deriveWsUrl,
   fetchBootstrap,
   loadSavedSecret,
+  logoutOidcSession,
+  normalizeSameOriginAuthUrl,
   saveSecret,
 } from "@/lib/bootstrap";
 import { displayTitle, sortSessions } from "@/lib/chat-groups";
@@ -60,6 +62,7 @@ import { deriveTitle } from "@/lib/format";
 import { NanobotClient } from "@/lib/nanobot-client";
 import { ClientProvider, useClient } from "@/providers/ClientProvider";
 import type {
+  BootstrapOidcAuthChallenge,
   BootstrapResponse,
   ChatSummary,
   RuntimeSurface,
@@ -90,7 +93,11 @@ import {
 type BootState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "auth"; failed?: boolean }
+  | {
+      status: "auth";
+      failed?: boolean;
+      auth?: BootstrapOidcAuthChallenge;
+    }
   | {
       status: "ready";
       client: NanobotClient;
@@ -99,6 +106,7 @@ type BootState =
       modelName: string | null;
       ingressLimits: BootstrapResponse["limits"] | null;
       runtimeSurface: RuntimeSurface;
+      auth: BootstrapResponse["auth"] | null;
     };
 
 const SIDEBAR_STORAGE_KEY = "nanobot-webui.sidebar";
@@ -115,13 +123,18 @@ const TOKEN_REFRESH_MIN_DELAY_MS = 5_000;
 const PAIRING_POLL_INTERVAL_MS = 5_000;
 const PAIRING_IDLE_POLL_INTERVAL_MS = 15_000;
 const PAIRING_DISMISS_SNOOZE_MS = 30_000;
-type ShellView = "chat" | "settings" | "apps" | "automations" | "skills";
+type ShellView = "chat" | "projects" | "settings" | "apps" | "automations" | "skills";
 type ShellRoute = {
   view: ShellView;
   activeKey: string | null;
   settingsSection: SettingsSectionKey;
   temporary?: boolean;
 };
+const loadProjectsView = () => import("@/components/projects/ProjectsView");
+const ProjectsView = lazy(async () => {
+  const module = await loadProjectsView();
+  return { default: module.ProjectsView };
+});
 const loadSettingsView = () => import("@/components/settings/SettingsView");
 const SettingsView = lazy(async () => {
   const module = await loadSettingsView();
@@ -242,6 +255,9 @@ function readShellRoute(): ShellRoute {
       settingsSection,
     };
   }
+  if (path === "/projects") {
+    return { view: "projects", activeKey, settingsSection: "overview" };
+  }
   if (path === "/apps") {
     return { view: "apps", activeKey, settingsSection: "apps" };
   }
@@ -330,9 +346,11 @@ function tokenRefreshDelayMs(expiresAt: number): number {
 
 function AuthForm({
   failed,
+  auth,
   onSecret,
 }: {
   failed: boolean;
+  auth?: BootstrapOidcAuthChallenge;
   onSecret: (secret: string) => void;
 }) {
   const { t } = useTranslation();
@@ -357,68 +375,107 @@ function AuthForm({
     onSecret(secret);
   };
 
-  return (
-    <div className="flex h-full w-full items-center justify-center px-6">
-      <form
-        onSubmit={handleSubmit}
-        className="flex w-full max-w-sm flex-col gap-4"
-      >
-        <div className="space-y-2">
-          <h1 className="text-sm font-medium text-foreground">
-            <label htmlFor="webui-access-password">{t("app.auth.label")}</label>
-          </h1>
-          <div className="relative">
-            <Input
-              ref={inputRef}
-              id="webui-access-password"
-              name="webui-access-password"
-              type={passwordVisible ? "text" : "password"}
-              autoComplete="current-password"
-              value={value}
-              onChange={(e) => {
-                setValue(e.target.value);
-                setValidationError(null);
-              }}
-              disabled={submitting}
-              aria-invalid={validationError ? true : undefined}
-              aria-describedby={validationError ? "webui-auth-error" : undefined}
-              className="pr-10"
-              autoFocus
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              disabled={submitting}
-              aria-label={t(
-                passwordVisible ? "app.auth.hidePassword" : "app.auth.showPassword",
-              )}
-              aria-controls="webui-access-password"
-              onClick={() => setPasswordVisible((visible) => !visible)}
-              className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-            >
-              {passwordVisible ? (
-                <EyeOff className="h-4 w-4" strokeWidth={1.75} aria-hidden />
-              ) : (
-                <Eye className="h-4 w-4" strokeWidth={1.75} aria-hidden />
-              )}
-            </Button>
-          </div>
-          {errorMessage ? (
-            <p id="webui-auth-error" role="alert" className="text-sm text-destructive">
-              {errorMessage}
-            </p>
-          ) : null}
+  const passwordForm = (
+    <form
+      onSubmit={handleSubmit}
+      className="flex w-full max-w-sm flex-col gap-4"
+    >
+      <div className="space-y-2">
+        <h1 className="text-sm font-medium text-foreground">
+          <label htmlFor="webui-access-password">{t("app.auth.label")}</label>
+        </h1>
+        <div className="relative">
+          <Input
+            ref={inputRef}
+            id="webui-access-password"
+            name="webui-access-password"
+            type={passwordVisible ? "text" : "password"}
+            autoComplete="current-password"
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              setValidationError(null);
+            }}
+            disabled={submitting}
+            aria-invalid={validationError ? true : undefined}
+            aria-describedby={validationError ? "webui-auth-error" : undefined}
+            className="pr-10"
+            autoFocus={!auth}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            disabled={submitting}
+            aria-label={t(
+              passwordVisible ? "app.auth.hidePassword" : "app.auth.showPassword",
+            )}
+            aria-controls="webui-access-password"
+            onClick={() => setPasswordVisible((visible) => !visible)}
+            className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+          >
+            {passwordVisible ? (
+              <EyeOff className="h-4 w-4" strokeWidth={1.75} aria-hidden />
+            ) : (
+              <Eye className="h-4 w-4" strokeWidth={1.75} aria-hidden />
+            )}
+          </Button>
         </div>
-        <Button
-          type="submit"
-          className="w-full"
-          disabled={submitting}
-        >
-          {t("app.auth.submit")}
-        </Button>
-      </form>
-    </div>
+        {errorMessage ? (
+          <p id="webui-auth-error" role="alert" className="text-sm text-destructive">
+            {errorMessage}
+          </p>
+        ) : null}
+      </div>
+      <Button
+        type="submit"
+        className="w-full"
+        disabled={submitting}
+      >
+        {t("app.auth.submit")}
+      </Button>
+    </form>
+  );
+
+  if (!auth) {
+    return (
+      <div className="flex h-full w-full items-center justify-center px-6">
+        {passwordForm}
+      </div>
+    );
+  }
+
+  const loginUrl = normalizeSameOriginAuthUrl(auth.login_url);
+  return (
+    <main
+      aria-label={t("app.auth.signIn")}
+      className="flex h-full w-full items-center justify-center px-6 py-8"
+    >
+      <div className="flex w-full max-w-sm flex-col gap-5">
+        {loginUrl ? (
+          <Button asChild size="lg" className="w-full">
+            <a href={loginUrl}>{t("app.auth.continueWithSso")}</a>
+          </Button>
+        ) : (
+          <p role="alert" className="text-sm text-destructive">
+            {t("app.auth.invalidLoginUrl")}
+          </p>
+        )}
+        {auth.password_enabled ? (
+          <>
+            <div
+              role="separator"
+              className="flex items-center gap-3 text-xs text-muted-foreground"
+            >
+              <span className="h-px flex-1 bg-border" aria-hidden />
+              <span>{t("app.auth.orPassword")}</span>
+              <span className="h-px flex-1 bg-border" aria-hidden />
+            </div>
+            {passwordForm}
+          </>
+        ) : null}
+      </div>
+    </main>
   );
 }
 
@@ -836,6 +893,7 @@ export default function App() {
               modelName: boot.model_name ?? current.modelName,
               ingressLimits: boot.limits ?? current.ingressLimits,
               runtimeSurface,
+              auth: boot.auth ?? current.auth,
             }
           : current,
       );
@@ -881,11 +939,16 @@ export default function App() {
             modelName: boot.model_name ?? null,
             ingressLimits: boot.limits ?? null,
             runtimeSurface,
+            auth: boot.auth ?? null,
           });
         } catch (e) {
           if (cancelled) return;
           if (isBootstrapAuthRequired(e)) {
-            setState({ status: "auth", failed: !!secret });
+            setState({
+              status: "auth",
+              failed: !!secret,
+              auth: e instanceof BootstrapAuthRequiredError ? e.auth : undefined,
+            });
           } else {
             setState({
               status: "error",
@@ -909,7 +972,11 @@ export default function App() {
         await refreshReadyClient(client, state.runtimeSurface);
       } catch (e) {
         if (isBootstrapAuthRequired(e)) {
-          setState({ status: "auth", failed: !!bootstrapSecretRef.current });
+          setState({
+            status: "auth",
+            failed: !!bootstrapSecretRef.current,
+            auth: e instanceof BootstrapAuthRequiredError ? e.auth : undefined,
+          });
         }
       }
     }, tokenRefreshDelayMs(state.tokenExpiresAt));
@@ -940,6 +1007,7 @@ export default function App() {
     return (
       <AuthForm
         failed={!!state.failed}
+        auth={state.auth}
         onSecret={(s) => bootstrapWithSecret(s)}
       />
     );
@@ -964,11 +1032,35 @@ export default function App() {
     );
   };
 
-  const handleLogout = () => {
-    if (state.status === "ready") {
-      state.client.close();
-    }
+  const handleLogout = async () => {
+    state.client.close();
     clearSavedSecret();
+    bootstrapSecretRef.current = "";
+
+    if (state.auth?.mode === "oidc") {
+      const logoutUrl = normalizeSameOriginAuthUrl(state.auth.logout_url);
+      if (!logoutUrl) {
+        setState({
+          status: "error",
+          message: t("app.auth.invalidLogoutUrl"),
+        });
+        return;
+      }
+
+      const csrfToken = state.auth.logout_csrf_token;
+      setState({ status: "loading" });
+      try {
+        await logoutOidcSession(logoutUrl, csrfToken);
+        window.location.assign("/");
+      } catch {
+        setState({
+          status: "error",
+          message: t("app.auth.logoutFailed"),
+        });
+      }
+      return;
+    }
+
     setState({ status: "auth" });
   };
 
@@ -1991,6 +2083,16 @@ function Shell({
     void loadSettingsView();
   }, []);
 
+  const onOpenProjects = useCallback(() => {
+    setSessionSearchOpen(false);
+    navigate({ view: "projects", activeKey, settingsSection: "overview" });
+    setMobileSidebarOpen(false);
+  }, [activeKey, navigate]);
+
+  const onProjectsIntent = useCallback(() => {
+    void loadProjectsView();
+  }, []);
+
   const onOpenModelSettings = useCallback(() => {
     onOpenSettings("models");
   }, [onOpenSettings]);
@@ -2481,6 +2583,10 @@ function Shell({
       });
       return;
     }
+    if (view === "projects") {
+      document.title = t("app.documentTitle.chat", { title: "Projects" });
+      return;
+    }
     if (view === "apps") {
       document.title = t("app.documentTitle.chat", {
         title: t("settings.nav.apps", { defaultValue: "Apps" }),
@@ -2551,12 +2657,14 @@ function Shell({
     onRequestRenameProject,
     onNewChatInProject,
     onOpenSettings,
+    onOpenProjects,
     onOpenApps,
     onOpenAutomations,
     onOpenSkills,
     onSettingsIntent,
+    onProjectsIntent,
     onOpenSearch: onOpenSessionSearch,
-    activeUtility: view === "apps" || view === "automations" || view === "skills" ? view : null,
+    activeUtility: view === "projects" || view === "apps" || view === "automations" || view === "skills" ? view : null,
     onToggleArchived,
     pinnedKeys: sidebarPinnedTabKeys,
     archivedKeys: sidebarArchivedTabKeys,
@@ -2856,7 +2964,16 @@ function Shell({
                 }}
               />
             </div>
-            {view !== "chat" && (
+            {view === "projects" ? (
+              <div className="absolute inset-0 flex flex-col">
+                <Suspense fallback={<SurfaceLoadingFallback />}>
+                  <ProjectsView
+                    onToggleSidebar={toggleSidebar}
+                    hostChromeInset={showHostChrome}
+                  />
+                </Suspense>
+              </div>
+            ) : view !== "chat" ? (
               <div className="absolute inset-0 flex flex-col">
                 <Suspense fallback={<SurfaceLoadingFallback />}>
                   <SettingsView
@@ -2878,7 +2995,7 @@ function Shell({
                   />
                 </Suspense>
               </div>
-            )}
+            ) : null}
           </main>
         </div>
 

@@ -106,6 +106,16 @@ async def handle_webui_fork_chat(
     if session_manager is None:
         await channel.send_webui_protocol_error(connection, "session_manager_unavailable")
         return
+    can_access = getattr(channel.gateway, "can_access_webui_session", None)
+    if can_access is None:
+        # Legacy in-process hosts have no transport request. Network hosts must
+        # expose the ownership check and fail closed when they do not.
+        allowed = getattr(connection, "request", None) is None
+    else:
+        allowed = await can_access(connection, webui_session_key(source_chat_id))
+    if not allowed:
+        await channel.send_webui_protocol_error(connection, "fork source not found")
+        return
 
     try:
         forked = create_webui_chat_fork(

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import email.utils
 import gzip
+import hashlib
 import hmac
 import http
 import ipaddress
 import json
 import re
+import unicodedata
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
@@ -19,6 +21,7 @@ QueryParams = dict[str, list[str]]
 
 _JSON_GZIP_MIN_BYTES = 4 * 1024
 _JSON_GZIP_LEVEL = 5
+_MAX_TRUSTED_PROXY_SUBJECT_CHARS = 512
 
 
 def strip_trailing_slash(path: str) -> str:
@@ -214,6 +217,35 @@ def is_trusted_proxy_authenticated_request(
         return False
     assertion_header = getattr(trusted_proxy_auth, "assertion_header", "")
     return bool(case_insensitive_header(headers, assertion_header))
+
+
+def trusted_proxy_principal_key(
+    connection: Any,
+    headers: Any,
+    config: Any,
+) -> str | None:
+    """Return a stable opaque principal key for a trusted proxy subject.
+
+    The subject is considered only after the peer and separate authentication
+    assertion pass validation.  It is deliberately never returned or logged.
+    """
+    if not is_trusted_proxy_authenticated_request(connection, headers, config):
+        return None
+    trusted_proxy_auth = getattr(config, "trusted_proxy_auth", None)
+    subject_header = str(getattr(trusted_proxy_auth, "subject_header", "") or "").strip()
+    if not subject_header:
+        return None
+    subject = case_insensitive_header(headers, subject_header)
+    if (
+        not subject
+        or len(subject) > _MAX_TRUSTED_PROXY_SUBJECT_CHARS
+        or any(unicodedata.category(char) == "Cc" for char in subject)
+    ):
+        return None
+    # The header name is an issuer namespace: deployments with distinct
+    # upstream issuers must use distinct subject header names.
+    material = f"nanobot/trusted-proxy-principal/v1\0{subject_header.casefold()}\0{subject}"
+    return f"proxy:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
 def _host_without_port(value: str) -> str:

@@ -14,6 +14,12 @@
       "showPassword": "顯示密碼",
       "hidePassword": "隱藏密碼",
       "submit": "連線",
+      "signIn": "登入 nanobot",
+      "continueWithSso": "使用 SSO 繼續",
+      "orPassword": "或使用密碼",
+      "invalidLoginUrl": "伺服器傳回無效的登入位址，無法使用單一登入。",
+      "invalidLogoutUrl": "伺服器傳回無效位址，已阻止登出。",
+      "logoutFailed": "登出失敗，請再試一次。",
       "required": "請輸入密碼。",
       "invalid": "密碼錯誤，請再試一次。"
     },

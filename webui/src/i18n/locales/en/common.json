@@ -14,6 +14,12 @@
       "showPassword": "Show password",
       "hidePassword": "Hide password",
       "submit": "Connect",
+      "signIn": "Sign in to nanobot",
+      "continueWithSso": "Continue with SSO",
+      "orPassword": "or use a password",
+      "invalidLoginUrl": "Single sign-on is unavailable because the server returned an invalid login address.",
+      "invalidLogoutUrl": "Sign out was blocked because the server returned an invalid address.",
+      "logoutFailed": "Sign out failed. Try again.",
       "required": "Enter your password.",
       "invalid": "Incorrect password. Try again."
     },

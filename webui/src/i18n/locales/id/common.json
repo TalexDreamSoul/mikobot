@@ -14,6 +14,12 @@
       "showPassword": "Tampilkan kata sandi",
       "hidePassword": "Sembunyikan kata sandi",
       "submit": "Hubungkan",
+      "signIn": "Masuk ke nanobot",
+      "continueWithSso": "Lanjutkan dengan SSO",
+      "orPassword": "atau gunakan kata sandi",
+      "invalidLoginUrl": "Akses menyeluruh tidak tersedia karena server mengembalikan alamat masuk yang tidak valid.",
+      "invalidLogoutUrl": "Keluar diblokir karena server mengembalikan alamat yang tidak valid.",
+      "logoutFailed": "Gagal keluar. Coba lagi.",
       "required": "Masukkan kata sandi.",
       "invalid": "Kata sandi salah. Coba lagi."
     },

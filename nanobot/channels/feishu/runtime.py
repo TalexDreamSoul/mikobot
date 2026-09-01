@@ -2804,6 +2804,7 @@ class FeishuChannel(BaseChannel):
                 metadata={
                     "message_id": message_id,
                     "chat_type": chat_type,
+                    "source_chat_id": chat_id,
                     "msg_type": msg_type,
                     "parent_id": parent_id,
                     "root_id": root_id,

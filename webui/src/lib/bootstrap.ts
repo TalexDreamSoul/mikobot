@@ -1,13 +1,20 @@
-import type { BootstrapResponse } from "./types";
+import type { BootstrapOidcAuthChallenge, BootstrapResponse } from "./types";
 import { fetchWithTimeout } from "./http";
 
 const SECRET_STORAGE_KEY = "nanobot-webui.bootstrap-secret";
 const URL_SECRET_PARAM = "bootstrapSecret";
+const MAX_AUTH_CHALLENGE_CHARS = 16_384;
 
 export class BootstrapAuthRequiredError extends Error {
-  constructor(message = "bootstrap authentication required") {
+  readonly auth?: BootstrapOidcAuthChallenge;
+
+  constructor(
+    message = "bootstrap authentication required",
+    auth?: BootstrapOidcAuthChallenge,
+  ) {
     super(message);
     this.name = "BootstrapAuthRequiredError";
+    this.auth = auth;
   }
 }
 
@@ -62,6 +69,67 @@ export function consumeUrlBootstrapSecret(): string {
   return secret;
 }
 
+function parseOidcAuthChallenge(body: unknown): BootstrapOidcAuthChallenge | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const response = body as Record<string, unknown>;
+  if (response.error !== "authentication_required") return undefined;
+  const auth = response.auth;
+  if (!auth || typeof auth !== "object") return undefined;
+  const challenge = auth as Record<string, unknown>;
+  if (
+    challenge.mode !== "oidc"
+    || typeof challenge.login_url !== "string"
+    || typeof challenge.password_enabled !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    mode: "oidc",
+    login_url: challenge.login_url,
+    password_enabled: challenge.password_enabled,
+  };
+}
+
+async function readOidcAuthChallenge(
+  response: Response,
+): Promise<BootstrapOidcAuthChallenge | undefined> {
+  try {
+    const contentLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > MAX_AUTH_CHALLENGE_CHARS) {
+      return undefined;
+    }
+    const text = await response.text();
+    if (text.length > MAX_AUTH_CHALLENGE_CHARS) return undefined;
+    return parseOidcAuthChallenge(JSON.parse(text));
+  } catch {
+    return undefined;
+  }
+}
+
+export function normalizeSameOriginAuthUrl(value: string): string | null {
+  if (
+    typeof window === "undefined"
+    || !value.startsWith("/")
+    || value.startsWith("//")
+    || value.includes("\\")
+  ) {
+    return null;
+  }
+  try {
+    const parsed = new URL(value, window.location.origin);
+    if (
+      parsed.origin !== window.location.origin
+      || parsed.username
+      || parsed.password
+    ) {
+      return null;
+    }
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Fetch a short-lived token + the WebSocket path from the gateway's
  * ``/webui/bootstrap`` endpoint.
@@ -82,7 +150,11 @@ export async function fetchBootstrap(
   }, timeoutMs);
   if (!res.ok) {
     if (res.status === 401 || res.status === 403) {
-      throw new BootstrapAuthRequiredError(`bootstrap failed: HTTP ${res.status}`);
+      const auth = await readOidcAuthChallenge(res);
+      throw new BootstrapAuthRequiredError(
+        `bootstrap failed: HTTP ${res.status}`,
+        auth,
+      );
     }
     throw new Error(`bootstrap failed: HTTP ${res.status}`);
   }
@@ -91,6 +163,25 @@ export async function fetchBootstrap(
     throw new Error("bootstrap response missing ws_path");
   }
   return body;
+}
+
+export async function logoutOidcSession(
+  logoutUrl: string,
+  csrfToken: string,
+  timeoutMs?: number,
+): Promise<void> {
+  const url = normalizeSameOriginAuthUrl(logoutUrl);
+  if (!url) throw new Error("OIDC logout URL is not same-origin relative");
+  if (!csrfToken) throw new Error("OIDC logout CSRF token is missing");
+
+  const response = await fetchWithTimeout(url, {
+    method: "GET",
+    credentials: "same-origin",
+    headers: { "X-Nanobot-OIDC-CSRF": csrfToken },
+  }, timeoutMs);
+  if (!response.ok) {
+    throw new Error(`OIDC logout failed: HTTP ${response.status}`);
+  }
 }
 
 /** Derive a WebSocket URL from the current window location and the server-provided path.

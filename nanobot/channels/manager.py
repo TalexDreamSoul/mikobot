@@ -174,6 +174,7 @@ class ChannelManager:
         kwargs: dict[str, Any] = {}
         if cls.name == "websocket":
             from nanobot.channels.websocket.runtime import WebSocketConfig
+            from nanobot.collaboration import build_collaboration_repository
             from nanobot.webui.gateway_services import build_gateway_services
 
             parsed = WebSocketConfig.model_validate(section)
@@ -202,6 +203,7 @@ class ChannelManager:
                 mcp_reload=self._webui_mcp_reload,
                 skill_state_action=self._webui_skill_state_action,
                 recovery_action=self._webui_recovery_action,
+                collaboration=build_collaboration_repository(self.config.collaboration),
                 logger=logger,
             )
             kwargs["gateway"] = gateway
@@ -363,16 +365,40 @@ class ChannelManager:
         return value if isinstance(value, bool) else default
 
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
-        """Start a channel and log any exceptions."""
+        """Start a channel and clean up failed gateway initialization."""
         errors = getattr(self, "_channel_errors", None)
         if errors is None:
             errors = self._channel_errors = {}
         errors.pop(name, None)
+        gateway: Any | None = None
+        collaboration_initialization_failed = False
         try:
+            gateway = getattr(channel, "gateway", None)
+            initialize = getattr(gateway, "initialize", None)
+            if initialize is not None:
+                try:
+                    await initialize()
+                except Exception:
+                    collaboration_initialization_failed = True
+                    raise
             await channel.start()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            try:
+                await channel.stop()
+            except Exception:
+                logger.error("Failed to clean up channel {} after start failure", name)
+            aclose = getattr(gateway, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:
+                    logger.error("WebUI collaboration repository shutdown failed")
+            if collaboration_initialization_failed:
+                errors[name] = "Channel failed to start. Check gateway logs."
+                logger.error("WebUI collaboration repository initialization failed")
+                return
             public_error = channel.start_error_message(exc)
             errors[name] = public_error or "Channel failed to start. Check gateway logs."
             if public_error:
@@ -403,6 +429,14 @@ class ChannelManager:
             logger.debug("Channel {} stop task was already cancelled", name)
         except Exception:
             logger.exception("Error stopping {}", name)
+
+        gateway = getattr(channel, "gateway", None)
+        aclose = getattr(gateway, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                logger.error("WebUI collaboration repository shutdown failed")
 
         if task is not None and not task.done():
             task.cancel()

@@ -22,6 +22,7 @@ from loguru import logger
 
 from nanobot.llm_usage.context import llm_usage_source
 from nanobot.runtime_context import public_history_messages
+from nanobot.session.keys import UNIFIED_SESSION_KEY
 from nanobot.session.manager import (
     MIN_COMPACTED_REPLAY_MESSAGES,
     Session,
@@ -408,19 +409,35 @@ class MemoryStore:
         session_key: str | None,
         unified_session: bool = False,
     ) -> list[dict[str, Any]]:
-        """Return unprocessed history entries safe to inject into a turn prompt."""
+        """Return history visible to one durable session.
+
+        Vault-scoped sessions remain exact-match only. The legacy local unified
+        session keeps its historical cross-channel view while excluding cron
+        and Dream internals; a cron turn sees only itself plus that local
+        unified context.
+        """
         entries = self.read_unprocessed_history(since_cursor=since_cursor)
         if session_key is None:
-            return entries
+            return [entry for entry in entries if entry.get("session_key") is None]
         if not unified_session:
-            return [e for e in entries if e.get("session_key") == session_key]
-
-        return [
-            entry
-            for entry in entries
-            if (entry_session := entry.get("session_key")) == session_key
-            or not self._is_internal_history_session(entry_session)
-        ]
+            return [entry for entry in entries if entry.get("session_key") == session_key]
+        if session_key == UNIFIED_SESSION_KEY:
+            visible: list[dict[str, Any]] = []
+            for entry in entries:
+                raw_key = entry.get("session_key")
+                if raw_key is None or (
+                    isinstance(raw_key, str)
+                    and not self._is_internal_history_session(raw_key)
+                ):
+                    visible.append(entry)
+            return visible
+        if self._is_internal_history_session(session_key):
+            return [
+                entry
+                for entry in entries
+                if entry.get("session_key") in {UNIFIED_SESSION_KEY, session_key}
+            ]
+        return [entry for entry in entries if entry.get("session_key") == session_key]
 
     def compact_history(self) -> None:
         """Drop oldest processed entries without discarding pending Dream input."""

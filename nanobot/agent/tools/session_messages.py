@@ -25,6 +25,7 @@ from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.runtime_context import RuntimeContextBlock
 from nanobot.session.manager import SessionManager
+from nanobot.session.privacy import same_privacy_scope
 from nanobot.session.session_handles import (
     SessionHandleResolver,
     normalize_session_handle,
@@ -92,6 +93,7 @@ class ListSessionsTool(Tool):
                 f"@{handle.name}"
                 for handle in handles
                 if handle.session_key != request.session_key
+                and same_privacy_scope(request.session_key, handle.session_key)
             ],
             ensure_ascii=True,
         )
@@ -227,6 +229,8 @@ class SendSessionMessageTool(Tool):
         )
         if source is None:
             raise SessionMessageError("source session was not found")
+        if not same_privacy_scope(source.session_key, target.session_key):
+            raise SessionMessageError("cross-vault session messaging is not authorized")
         envelope: SessionMessageEnvelope = {
             "message_id": uuid4().hex,
             "created_at_ms": int(time.time() * 1000),

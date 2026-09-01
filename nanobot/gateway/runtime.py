@@ -521,6 +521,13 @@ class GatewayClientLease:
         """Release this client, optionally leaving last-client shutdown to the monitor."""
         if not self._acquired:
             return False
+        if not wait_for_stop:
+            with self.transition_lock, self.lifecycle_lock, self.lock:
+                state = self._read_state()
+                self._clients(state).pop(self.token, None)
+                self._acquired = False
+                self._write_or_clear(state)
+            return False
         while True:
             self.wait_for_shutdown()
             with self.transition_lock:

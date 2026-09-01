@@ -304,6 +304,8 @@ class BaseChannel(ABC):
             return
 
         meta = metadata or {}
+        if is_dm:
+            meta = {**meta, "is_direct": True}
         if self.supports_streaming:
             meta = {**meta, "_wants_stream": True}
 

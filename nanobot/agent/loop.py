@@ -52,9 +52,23 @@ from nanobot.bus.events import INBOUND_META_USER_SHELL, InboundMessage, Outbound
 from nanobot.bus.outbound_events import StreamedResponseEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import RuntimeEventBus
+from nanobot.collaboration import (
+    COLLABORATION_BINDING_METADATA_KEY,
+    COLLABORATION_PROJECT_METADATA_KEY,
+    COLLABORATION_USER_METADATA_KEY,
+    COLLABORATION_VAULT_METADATA_KEY,
+    AsyncLocalCollaborationRepository,
+    CollaborationRepository,
+    ConversationScope,
+    build_collaboration_repository,
+)
+from nanobot.collaboration.context import collaboration_runtime_context
+from nanobot.collaboration.conversation import canonical_conversation_id
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
+from nanobot.config.paths import get_media_dir, get_runtime_subdir
 from nanobot.config.schema import AgentDefaults, ModelPresetConfig
 from nanobot.llm_usage.context import source_from_request
+from nanobot.personal.digests import RecordingJournal, RecordingNote
 from nanobot.providers.base import LLMProvider, LLMUsage, ProviderConversationState
 from nanobot.providers.factory import ProviderSnapshot
 from nanobot.runtime_context import (
@@ -66,9 +80,12 @@ from nanobot.runtime_context import (
     resolve_runtime_context,
     runtime_context_blocks_from_metadata,
 )
+from nanobot.security.vault_media import relocate_media_to_vault
 from nanobot.security.workspace_access import (
+    WorkspaceScope,
     WorkspaceScopeResolver,
     bind_workspace_scope,
+    build_workspace_scope,
     reset_workspace_scope,
 )
 from nanobot.session import turn_continuation
@@ -117,6 +134,16 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 _SUBAGENT_PROVIDER_TASK_META = "subagent_provider_task_id"
 _SUBAGENT_TERMINAL_WAIT_SECONDS = 300.0
+_PENDING_REAUTH_DISPATCH_KEY = "pending_reauthorization_dispatch"
+
+def _public_turn_attributes(attributes: Mapping[str, Any]) -> dict[str, Any]:
+    """Hide authorization state while preserving caller-supplied SDK attributes."""
+    return {key: value for key, value in attributes.items() if key != "collaboration_scope"}
+
+async def _resolved_conversation_scope(value: object) -> ConversationScope | None:
+    """Normalize synchronous and asynchronous scope resolver results."""
+    resolved = await value if inspect.isawaitable(value) else value
+    return resolved if isinstance(resolved, ConversationScope) else None
 
 
 class TurnKind(Enum):
@@ -295,6 +322,8 @@ class AgentLoop:
         local_trigger_store: LocalTriggerStore | None = None,
         idle_compact_check_interval_seconds: int = 0,
         recovery_admission: RecoveryAdmission | None = None,
+        collaboration_repository: CollaborationRepository | None = None,
+        owns_collaboration_repository: bool | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -305,10 +334,7 @@ class AgentLoop:
         if turn_delivery_factory is not None:
             if turn_delivery_factory.bus is not bus:
                 raise ValueError("turn delivery factory must use the agent message bus")
-            if (
-                runtime_events is not None
-                and turn_delivery_factory.runtime_events is not runtime_events
-            ):
+            if runtime_events is not None and turn_delivery_factory.runtime_events is not runtime_events:
                 raise ValueError("turn delivery factory must use the agent runtime event bus")
             self.turn_delivery_factory = turn_delivery_factory
             self.runtime_events = turn_delivery_factory.runtime_events
@@ -320,137 +346,80 @@ class AgentLoop:
         self.restart_mode = restart_mode
         self._runtime_model_publisher = runtime_model_publisher
         self.workspace = workspace
+        self._canonical_workspace = workspace.expanduser().resolve(strict=False)
+        self.collaboration = collaboration_repository or AsyncLocalCollaborationRepository()
+        self._owns_collaboration_repository = (
+            collaboration_repository is None
+            if owns_collaboration_repository is None
+            else owns_collaboration_repository
+        )
+        self._collaboration_initialized = False
+        self._collaboration_initialize_lock = asyncio.Lock()
+        self.recordings = RecordingJournal()
         initial_model = model or provider.get_default_model()
-        self.max_iterations = (
-            max_iterations if max_iterations is not None else defaults.max_tool_iterations
-        )
-        initial_context_window = (
-            context_window_tokens
-            if context_window_tokens is not None
-            else defaults.context_window_tokens
-        )
-        configured_presets = model_presets or {}
+        self.max_iterations = max_iterations if max_iterations is not None else defaults.max_tool_iterations
+        initial_context_window = context_window_tokens if context_window_tokens is not None else defaults.context_window_tokens
         self.runtime_resolver = ModelRuntimeResolver(
-            LLMRuntime.capture(
-                provider,
-                initial_model,
-                context_window_tokens=initial_context_window,
-                snapshot_signature=provider_signature,
-            ),
-            model_presets=configured_presets,
-            preset_catalog_loader=preset_catalog_loader,
-            configured_default_preset=model_preset,
-            provider_snapshot_loader=provider_snapshot_loader,
+            LLMRuntime.capture(provider, initial_model, context_window_tokens=initial_context_window, snapshot_signature=provider_signature),
+            model_presets=model_presets or {}, preset_catalog_loader=preset_catalog_loader,
+            configured_default_preset=model_preset, provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
         )
         self.dream_model_preset = dream_model_preset
         self.context_block_limit = context_block_limit
-        self.max_tool_result_chars = (
-            max_tool_result_chars
-            if max_tool_result_chars is not None
-            else defaults.max_tool_result_chars
-        )
+        self.max_tool_result_chars = max_tool_result_chars if max_tool_result_chars is not None else defaults.max_tool_result_chars
         self.provider_retry_mode = provider_retry_mode
-        self.tool_hint_max_length = (
-            tool_hint_max_length if tool_hint_max_length is not None
-            else defaults.tool_hint_max_length
-        )
+        self.tool_hint_max_length = tool_hint_max_length if tool_hint_max_length is not None else defaults.tool_hint_max_length
         self.tools_config = _tc
         self.web_config = _tc.web
         self.exec_config = _tc.exec
         self._image_generation_provider_configs = dict(image_generation_provider_configs or {})
-        if (
-            image_generation_provider_config is not None
-            and "openrouter" not in self._image_generation_provider_configs
-        ):
+        if image_generation_provider_config is not None and "openrouter" not in self._image_generation_provider_configs:
             self._image_generation_provider_configs["openrouter"] = image_generation_provider_config
         self.cron_service = cron_service
         self.local_trigger_store = local_trigger_store
         self.restrict_to_workspace = restrict_to_workspace
-        self.workspace_scopes = WorkspaceScopeResolver(
-            default_workspace=workspace,
-            default_restrict_to_workspace=restrict_to_workspace,
-        )
+        self.workspace_scopes = WorkspaceScopeResolver(default_workspace=workspace, default_restrict_to_workspace=restrict_to_workspace)
         self._start_time = time.time()
         self._extra_hooks: list[AgentHook] = hooks or []
         self._hook_factories: list[AgentTurnHookFactory] = hook_factories or []
-
         self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
         self.sessions = session_manager or SessionManager(workspace)
-        # One file-read/write tracker per logical session. The tool registry is
-        # shared by this loop, so tools resolve the active state via contextvars.
         self._file_state_store = FileStateStore(max_sessions=SESSION_CACHE_MAX_SIZE)
-        # SessionManager owns every durable deletion entrypoint, including the
-        # WebUI and fork rollback paths.  Observe that boundary once instead of
-        # duplicating cleanup in each consumer.
         self.sessions.set_delete_observer(self._file_state_store.discard)
         self.tools = tool_registry if tool_registry is not None else ToolRegistry()
         self._exec_session_manager = ExecSessionManager()
         self.runner = AgentRunner()
         self.subagents = SubagentManager(
-            workspace=workspace,
-            bus=bus,
-            tools_config=_tc,
-            max_tool_result_chars=self.max_tool_result_chars,
-            restrict_to_workspace=restrict_to_workspace,
-            disabled_skills=disabled_skills,
-            max_iterations=self.max_iterations,
+            workspace=workspace, bus=bus, tools_config=_tc, max_tool_result_chars=self.max_tool_result_chars,
+            restrict_to_workspace=restrict_to_workspace, disabled_skills=disabled_skills, max_iterations=self.max_iterations,
             max_concurrent_subagents=max_concurrent_subagents,
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
         )
         self._unified_session = unified_session
         self._running = False
+        self._collaboration_context_provider: RuntimeContextProvider = partial(
+            collaboration_runtime_context, self.collaboration
+        )
         self._runtime_context_providers: list[RuntimeContextProvider] = []
         self._active_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._discarding_sessions: set[str] = set()
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._close_lock = asyncio.Lock()
-        self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
-            weakref.WeakValueDictionary()
-        )
-        # Per-session pending queues for mid-turn message injection.
-        # When a session has an active task, new messages for that session
-        # are routed here instead of creating a new task.
+        self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._pending_queues: dict[str, asyncio.Queue[InboundMessage]] = {}
         self._preserve_inflight_turns_on_shutdown = False
         self._deferred_automation_turns: dict[str, list[InboundMessage]] = {}
-        self._cron_turns = CronTurnCoordinator(
-            publish_inbound=self.bus.publish_inbound,
-            dispatch=self._dispatch,
-            is_running=lambda: self._running,
-            deferred_queues=self._deferred_automation_turns,
-        )
-        self._local_trigger_turns = LocalTriggerTurnCoordinator(
-            publish_inbound=self.bus.publish_inbound,
-            dispatch=self._dispatch,
-            is_running=lambda: self._running,
-            deferred_queues=self._deferred_automation_turns,
-        )
-        self._automation_turn_coordinators = (
-            ("cron", self._cron_turns),
-            ("local trigger", self._local_trigger_turns),
-        )
-        # NANOBOT_MAX_CONCURRENT_REQUESTS: unset or <=0 means unlimited.
+        self._cron_turns = CronTurnCoordinator(publish_inbound=self.bus.publish_inbound, dispatch=self._dispatch, is_running=lambda: self._running, deferred_queues=self._deferred_automation_turns)
+        self._local_trigger_turns = LocalTriggerTurnCoordinator(publish_inbound=self.bus.publish_inbound, dispatch=self._dispatch, is_running=lambda: self._running, deferred_queues=self._deferred_automation_turns)
+        self._automation_turn_coordinators = (("cron", self._cron_turns), ("local trigger", self._local_trigger_turns))
         _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "0"))
-        self._concurrency_gate: asyncio.Semaphore | None = (
-            asyncio.Semaphore(_max) if _max > 0 else None
-        )
+        self._concurrency_gate: asyncio.Semaphore | None = asyncio.Semaphore(_max) if _max > 0 else None
         self.consolidator = Consolidator(
-            store=self.context.memory,
-            sessions=self.sessions,
-            build_messages=self.context.build_messages,
-            get_tool_definitions=self.tools.get_definitions,
-            resolve_prompt_context=PersistedPromptContextResolver(
-                workspace_scopes=self.workspace_scopes,
-                unified_session=unified_session,
-            ),
-            unified_session=unified_session,
+            store=self.context.memory, sessions=self.sessions, build_messages=self.context.build_messages, get_tool_definitions=self.tools.get_definitions,
+            resolve_prompt_context=PersistedPromptContextResolver(workspace_scopes=self.workspace_scopes, unified_session=unified_session), unified_session=unified_session,
         )
-        self.auto_compact = AutoCompact(
-            sessions=self.sessions,
-            consolidator=self.consolidator,
-            session_ttl_minutes=session_ttl_minutes,
-        )
+        self.auto_compact = AutoCompact(sessions=self.sessions, consolidator=self.consolidator, session_ttl_minutes=session_ttl_minutes)
         self._idle_compact_check_interval_s = idle_compact_check_interval_seconds
         self._next_idle_compact_check_at = time.monotonic()
         if model_preset:
@@ -458,6 +427,21 @@ class AgentLoop:
         self._register_default_tools(provider_snapshot_loader=provider_snapshot_loader)
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
+
+    async def _ensure_collaboration_initialized(self) -> None:
+        if getattr(self, "_collaboration_initialized", False):
+            return
+        if not hasattr(self, "collaboration") or not hasattr(self, "workspace"):
+            return
+        initialize_lock = getattr(self, "_collaboration_initialize_lock", None)
+        if initialize_lock is None:
+            initialize_lock = self._collaboration_initialize_lock = asyncio.Lock()
+        async with initialize_lock:
+            if getattr(self, "_collaboration_initialized", False):
+                return
+            await self.collaboration.initialize()
+            await self.collaboration.ensure_local_owner(self.workspace)
+            self._collaboration_initialized = True
 
     @classmethod
     def from_config(
@@ -488,6 +472,11 @@ class AgentLoop:
                 config.workspace_path,
                 sessions_root=data_dir / "sessions" if data_dir is not None else None,
             )
+        if "collaboration_repository" not in extra:
+            extra["collaboration_repository"] = build_collaboration_repository(
+                config.collaboration
+            )
+            extra.setdefault("owns_collaboration_repository", True)
         provider = extra.pop("provider", None) or make_provider(config)
         resolved = config.resolve_preset()
         model = extra.pop("model", None) or resolved.model
@@ -640,6 +629,7 @@ class AgentLoop:
             timezone=self.context.timezone or "UTC",
             workspace_sandbox=self.workspace_scopes.sandbox_status,
             runtime_events=self.runtime_events,
+            collaboration_repository=self.collaboration,
             runtime_control=AgentRuntimeControl(self),
         )
         loader = ToolLoader()
@@ -735,12 +725,13 @@ class AgentLoop:
             runtime_context_blocks=ctx.runtime_context_blocks,
         )
 
-    def _request_context_for_turn(self, ctx: TurnContext) -> RequestContext:
+    async def _request_context_for_turn(self, ctx: TurnContext) -> RequestContext:
         assert ctx.session is not None
-        scope = self.workspace_scopes.for_turn(
+        scope = await self._effective_workspace_scope(
             channel=ctx.delivery.route.channel,
             message_metadata=ctx.msg.metadata,
             session_metadata=ctx.session.metadata,
+            attributes=ctx.attributes,
         )
         return RequestContext(
             channel=ctx.delivery.route.channel,
@@ -771,14 +762,24 @@ class AgentLoop:
         request: RequestContext,
         tools: ToolRegistry,
     ) -> list[RuntimeContextBlock]:
-        providers = [
+        internal_providers = [
             *tools.get_runtime_context_providers(),
-            *self._runtime_context_providers,
+            self._collaboration_context_provider,
         ]
         blocks = runtime_context_blocks_from_metadata(request.metadata)
-        blocks.extend(await resolve_runtime_context(providers, request))
+        blocks.extend(await resolve_runtime_context(internal_providers, request))
+        if self._runtime_context_providers:
+            public_request = dataclasses.replace(
+                request,
+                attributes=_public_turn_attributes(request.attributes),
+            )
+            blocks.extend(
+                await resolve_runtime_context(self._runtime_context_providers, public_request)
+            )
+        collaboration_scope = self._conversation_scope_from_attributes(request.attributes)
         skill_context = self.context.skills.build_explicit_skill_runtime_context(
-            request.original_user_text or ""
+            request.original_user_text or "",
+            allowed_skills=self._profile_selection(collaboration_scope, "skills"),
         )
         if skill_context is not None and skill_context not in blocks:
             blocks.append(skill_context)
@@ -815,11 +816,28 @@ class AgentLoop:
             content = "Shell execution is disabled in this nanobot configuration."
         else:
             session = ctx.session or self.sessions.get_or_create(ctx.key)
-            scope = self.workspace_scopes.for_turn(
-                channel=ctx.msg.channel,
-                message_metadata=metadata,
-                session_metadata=session.metadata,
+            collaboration_scope = await _resolved_conversation_scope(
+                self._conversation_scope_for_message(ctx.msg)
             )
+            attributes = (
+                {"collaboration_scope": collaboration_scope}
+                if collaboration_scope is not None
+                else {}
+            )
+            if collaboration_scope is None:
+                scope = self.workspace_scopes.for_turn(
+                    channel=ctx.msg.channel,
+                    message_metadata=metadata,
+                    session_metadata=session.metadata,
+                )
+            else:
+                scope = await AgentLoop._effective_workspace_scope(
+                    self,
+                    channel=ctx.msg.channel,
+                    message_metadata=metadata,
+                    session_metadata=session.metadata,
+                    attributes=attributes,
+                )
             request_token = bind_request_context(RequestContext(
                 channel=ctx.msg.channel,
                 chat_id=ctx.msg.chat_id,
@@ -828,6 +846,7 @@ class AgentLoop:
                 original_user_text=f"!{ctx.args.strip()}",
                 runtime=ctx.runtime,
                 metadata=metadata,
+                attributes=attributes,
                 sender_id=ctx.msg.sender_id,
                 turn_id=metadata.get("webui_turn_id"),
                 workspace=scope.project_path,
@@ -881,9 +900,220 @@ class AgentLoop:
         """Forget ephemeral file-read state for a reset or removed session."""
         self._file_state_store.discard(key)
 
-    def _effective_session_key(self, msg: InboundMessage) -> str:
-        """Return the session key used for task routing and mid-turn injections."""
-        if self._unified_session and not msg.session_key_override:
+    async def _conversation_scope_for_message(self, msg: InboundMessage) -> ConversationScope:
+        local_owner = msg.channel in {"cli", "websocket"} and not msg.sender_id.startswith(
+            "proxy:"
+        )
+        user, _default_project = await self.collaboration.ensure_identity_user(
+            msg.channel,
+            msg.sender_id,
+            self.workspace,
+            local_owner=local_owner,
+        )
+        metadata = dict(msg.metadata or {})
+        conversation_id = canonical_conversation_id(msg.chat_id, metadata)
+        if local_owner:
+            raw_workspace = metadata.get("workspace_scope")
+            workspace_scope = (
+                cast(Mapping[str, object], raw_workspace)
+                if isinstance(raw_workspace, Mapping)
+                else None
+            )
+            raw_project_path = (
+                workspace_scope.get("project_path")
+                if workspace_scope is not None
+                else None
+            )
+            if isinstance(raw_project_path, str) and raw_project_path.strip():
+                selected_path = await asyncio.to_thread(
+                    lambda: Path(raw_project_path).expanduser().resolve(strict=False)
+                )
+                project = None
+                for item in await self.collaboration.list_projects(user.id):
+                    project_workspace = item.workspace_path
+                    item_path = await asyncio.to_thread(
+                        lambda: Path(project_workspace).resolve(strict=False)
+                    )
+                    if item_path == selected_path:
+                        project = item
+                        break
+                if project is None:
+                    project = await self.collaboration.create_project(
+                        user.id,
+                        selected_path.name or str(selected_path),
+                        selected_path,
+                    )
+                await self.collaboration.bind_conversation(
+                    msg.channel,
+                    conversation_id,
+                    project.id,
+                    user.id,
+                )
+        if msg.channel in {"cli", "websocket"}:
+            metadata["direct"] = True
+        return await self.collaboration.resolve_scope(
+            msg.channel,
+            msg.sender_id,
+            conversation_id,
+            metadata,
+            self.workspace,
+        )
+
+    @staticmethod
+    def _conversation_scope_from_attributes(
+        attributes: Mapping[str, Any] | None,
+    ) -> ConversationScope | None:
+        if not attributes:
+            return None
+        value = attributes.get("collaboration_scope")
+        return value if isinstance(value, ConversationScope) else None
+
+    async def _effective_workspace_scope(
+        self,
+        *,
+        channel: str,
+        message_metadata: Mapping[str, Any] | None,
+        session_metadata: Mapping[str, Any] | None,
+        attributes: Mapping[str, Any] | None,
+    ) -> WorkspaceScope:
+        collaboration_scope = self._conversation_scope_from_attributes(attributes)
+        if collaboration_scope is not None:
+            if collaboration_scope.workspace_path is not None:
+                return build_workspace_scope(
+                    collaboration_scope.workspace_path,
+                    "restricted",
+                    source_channel=channel,
+                )
+            if collaboration_scope.is_isolated:
+                return build_workspace_scope(
+                    await self._isolated_workspace_path(collaboration_scope),
+                    "restricted",
+                    source_channel=channel,
+                )
+        return self.workspace_scopes.for_turn(
+            channel=channel,
+            message_metadata=message_metadata,
+            session_metadata=session_metadata,
+        )
+
+    async def _isolated_workspace_path(self, scope: ConversationScope) -> Path:
+        """Return a bounded, private workspace for an unbound conversation."""
+        if not scope.session_suffix or Path(scope.session_suffix).name != scope.session_suffix:
+            raise ValueError("isolated conversation has an invalid workspace suffix")
+        isolated_root = await asyncio.to_thread(
+            lambda: (get_runtime_subdir("collaboration") / "workspaces" / "isolated").resolve(strict=False)
+        )
+        workspace = await asyncio.to_thread(
+            lambda: (isolated_root / scope.session_suffix).resolve(strict=False)
+        )
+        try:
+            workspace.relative_to(isolated_root)
+        except ValueError as exc:
+            raise ValueError("isolated conversation workspace escapes its root") from exc
+        await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
+        with suppress(OSError):
+            await asyncio.to_thread(workspace.chmod, 0o700)
+        return workspace
+
+    async def _pending_message_matches_active_turn(
+        self,
+        pending_msg: InboundMessage,
+        request: RequestContext,
+        session: Session | None,
+    ) -> bool:
+        """Whether a queued user message may inherit this turn's scope."""
+        if not pending_msg.is_user_input:
+            return True
+        active_scope = self._conversation_scope_from_attributes(request.attributes)
+        pending_metadata = dict(pending_msg.metadata or {})
+        if (
+            pending_msg.channel != request.channel
+            or canonical_conversation_id(pending_msg.chat_id, pending_metadata)
+            != canonical_conversation_id(request.chat_id, request.metadata)
+        ):
+            return False
+        # Direct callers and internal subagent follow-ups have no collaboration
+        # scope to inherit. Same-conversation default-local injections retain the
+        # longstanding behavior; scoped turns continue with full authorization.
+        if active_scope is None:
+            return True
+        if pending_msg.sender_id != request.sender_id:
+            return False
+        pending_scope = await self._conversation_scope_for_message(pending_msg)
+        if (
+            pending_scope.kind != active_scope.kind
+            or pending_scope.user_id != active_scope.user_id
+            or pending_scope.project_id != active_scope.project_id
+            or pending_scope.profile != active_scope.profile
+            or pending_scope.profile_revision != active_scope.profile_revision
+            or pending_scope.workspace_path != active_scope.workspace_path
+        ):
+            return False
+        active_workspace = await self._effective_workspace_scope(
+            channel=request.channel,
+            message_metadata=request.metadata,
+            session_metadata=session.metadata if session is not None else None,
+            attributes=request.attributes,
+        )
+        pending_workspace = await self._effective_workspace_scope(
+            channel=pending_msg.channel,
+            message_metadata=pending_metadata,
+            session_metadata=session.metadata if session is not None else None,
+            attributes={"collaboration_scope": pending_scope},
+        )
+        return pending_workspace.project_path == active_workspace.project_path
+    @staticmethod
+    def _profile_selection(
+        scope: ConversationScope | None,
+        key: str,
+    ) -> set[str] | None:
+        if scope is None or scope.profile is None or key not in scope.profile.settings:
+            return None
+        raw = scope.profile.settings.get(key)
+        if not isinstance(raw, tuple):
+            return set()
+        return {item for item in raw if isinstance(item, str) and item}
+
+    def _tools_for_conversation_scope(
+        self,
+        tools: ToolRegistry,
+        scope: ConversationScope | None,
+    ) -> ToolRegistry:
+        allowed_servers = self._profile_selection(scope, "mcpServers")
+        if allowed_servers is None:
+            return tools
+        from nanobot.agent.tools.mcp import mcp_tool_server_name
+
+        restricted = ToolRegistry()
+        for name in tools.tool_names:
+            tool = tools.get(name)
+            if tool is None:
+                continue
+            server_name = mcp_tool_server_name(tool)
+            if server_name is None or server_name in allowed_servers:
+                restricted.register(tool)
+        return restricted
+
+    async def _effective_session_key(self, msg: InboundMessage) -> str:
+        """Return the durable key appropriate for the message principal.
+
+        Local CLI and direct WebSocket owners retain their legacy session keys
+        for compatibility with synchronous pending/recovery queues. Trusted
+        proxy principals and all multi-tenant channels are principal-scoped.
+        """
+        if msg.session_key_override:
+            return msg.session_key
+        local_owner = msg.channel in {"cli", "websocket"} and not msg.sender_id.startswith(
+            "proxy:"
+        )
+        if local_owner:
+            return UNIFIED_SESSION_KEY if self._unified_session else msg.session_key
+        scope = await self._conversation_scope_for_message(msg)
+        if scope.user_id and scope.vault_id:
+            if self._unified_session:
+                return f"unified:{scope.user_id}:{scope.vault_id}"
+            return f"vault:{scope.user_id}:{scope.vault_id}:{msg.session_key}"
+        if self._unified_session:
             return UNIFIED_SESSION_KEY
         return msg.session_key
 
@@ -977,11 +1207,34 @@ class AgentLoop:
             if pending_queue is None:
                 return []
 
-            async def _to_user_message(pending_msg: InboundMessage) -> dict[str, Any]:
+            async def _to_user_message(pending_msg: InboundMessage) -> dict[str, Any] | None:
+                if not await self._pending_message_matches_active_turn(
+                    pending_msg,
+                    request_ctx,
+                    session,
+                ):
+                    followup_id = pending_msg.metadata.get(PENDING_FOLLOWUP_ID_KEY)
+                    if session is not None and isinstance(followup_id, str) and followup_id:
+                        acknowledge_pending_followups(session, [followup_id])
+                        self.sessions.save(session)
+                    self.schedule_background(
+                        self._dispatch(
+                            dataclasses.replace(
+                                pending_msg,
+                                session_key_override=None,
+                                metadata={
+                                    **pending_msg.metadata,
+                                    _PENDING_REAUTH_DISPATCH_KEY: True,
+                                },
+                            )
+                        )
+                    )
+                    return None
                 content = pending_msg.content
                 image_paths = pending_msg.media if pending_msg.media else None
                 if image_paths:
-                    content, image_paths = reference_non_image_attachments(
+                    content, image_paths = await asyncio.to_thread(
+                        reference_non_image_attachments,
                         content,
                         image_paths,
                     )
@@ -998,10 +1251,11 @@ class AgentLoop:
                     else {}
                 )
                 if pending_msg.is_user_input:
-                    scope = self.workspace_scopes.for_turn(
+                    scope = await self._effective_workspace_scope(
                         channel=pending_msg.channel,
                         message_metadata=metadata,
                         session_metadata=session.metadata if session is not None else None,
+                        attributes=request_ctx.attributes,
                     )
                     pending_request = RequestContext(
                         channel=pending_msg.channel,
@@ -1046,12 +1300,16 @@ class AgentLoop:
 
             items: list[dict[str, Any]] = []
             if first_msg is not None:
-                items.append(await _to_user_message(first_msg))
+                item = await _to_user_message(first_msg)
+                if item is not None:
+                    items.append(item)
             while len(items) < limit:
                 try:
-                    items.append(await _to_user_message(pending_queue.get_nowait()))
+                    item = await _to_user_message(pending_queue.get_nowait())
                 except asyncio.QueueEmpty:
                     break
+                if item is not None:
+                    items.append(item)
 
             return items
 
@@ -1099,26 +1357,37 @@ class AgentLoop:
         )
         active_session_key = session.key if session else request_ctx.session_key
         request_metadata = request_ctx.metadata
-        effective_scope = self.workspace_scopes.for_turn(
+        collaboration_scope = self._conversation_scope_from_attributes(request_ctx.attributes)
+        effective_scope = await self._effective_workspace_scope(
             channel=request_ctx.channel,
             message_metadata=request_metadata,
             session_metadata=session.metadata if session is not None else None,
+            attributes=request_ctx.attributes,
+        )
+        include_agent_memory = (
+            (session.policy.persist if session is not None else True)
+            and (collaboration_scope is None or not collaboration_scope.is_isolated)
+            and effective_scope.project_path == self._canonical_workspace
         )
         transcript_builder = partial(
             self.context.build_transcript,
             channel=request_ctx.channel,
             workspace=effective_scope.project_path,
-            include_memory=session.policy.persist if session is not None else True,
-            include_memory_recent_history=not ephemeral,
+            include_memory=include_agent_memory,
+            include_memory_recent_history=not ephemeral and include_agent_memory,
             session_key=session.key if session is not None else request_ctx.session_key,
             unified_session=self._unified_session,
+            allowed_skills=self._profile_selection(collaboration_scope, "skills"),
         )
         if request_context is None:
             request_ctx = dataclasses.replace(
                 request_ctx,
                 workspace=effective_scope.project_path,
             )
-        effective_tools = tools or self.tools
+        effective_tools = self._tools_for_conversation_scope(
+            tools or self.tools,
+            collaboration_scope,
+        )
         file_state_token = bind_file_states(self._file_state_store.for_session(active_session_key))
         request_token = bind_request_context(request_ctx)
         workspace_token = bind_workspace_scope(effective_scope)
@@ -1147,7 +1416,7 @@ class AgentLoop:
                 chat_id=request_ctx.chat_id,
                 message_id=request_ctx.message_id,
                 metadata=request_metadata,
-                attributes=dict(request_ctx.attributes),
+                attributes=_public_turn_attributes(request_ctx.attributes),
                 session_key=active_session_key,
                 workspace=effective_scope.project_path,
                 tool_hint_max_length=self.tool_hint_max_length,
@@ -1240,6 +1509,7 @@ class AgentLoop:
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
+        await self._ensure_collaboration_initialized()
         self._running = True
         try:
             logger.info("Agent loop started")
@@ -1264,7 +1534,7 @@ class AgentLoop:
                     continue
 
                 raw = msg.content.strip()
-                effective_key = self._effective_session_key(msg)
+                effective_key = await self._effective_session_key(msg)
                 if await agent_context.handle_runtime_control(self, msg, self.tools):
                     continue
                 if (
@@ -1375,7 +1645,8 @@ class AgentLoop:
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message: per-session serial, cross-session concurrent."""
-        session_key = self._effective_session_key(msg)
+        await self._ensure_collaboration_initialized()
+        session_key = await self._effective_session_key(msg)
         if session_key != msg.session_key:
             msg = dataclasses.replace(msg, session_key_override=session_key)
         recovery_task_registered = False
@@ -1446,7 +1717,7 @@ class AgentLoop:
                     ):
                         raise
                     try:
-                        key = self._effective_session_key(msg)
+                        key = await self._effective_session_key(msg)
                         session = self.sessions.get_or_create(key)
                         if restore_runtime_checkpoint(session):
                             self._clear_pending_user_turn(session)
@@ -1547,9 +1818,18 @@ class AgentLoop:
         finally:
             self._background_tasks.clear()
 
-        cleanup_steps = (
+        async def _close_exec_sessions() -> None:
+            await self._exec_session_manager.close_all()
+
+        collaboration_cleanup: tuple[Callable[[], Awaitable[None]], ...] = ()
+        if getattr(self, "_owns_collaboration_repository", False) and hasattr(
+            self, "collaboration"
+        ):
+            collaboration_cleanup = (self.collaboration.aclose,)
+        cleanup_steps: tuple[Callable[[], Awaitable[None]], ...] = (
             self.subagents.close,
-            self._exec_session_manager.close_all,
+            _close_exec_sessions,
+            *collaboration_cleanup,
         )
         for cleanup in cleanup_steps:
             try:
@@ -1754,9 +2034,41 @@ class AgentLoop:
     async def _restore_turn(self, ctx: TurnContext) -> None:
         """Restore checkpoint / pending user turn; reference non-image attachments."""
         msg = ctx.msg
+        force_fresh_scope = msg.metadata.pop(_PENDING_REAUTH_DISPATCH_KEY, None) is True
+
+        if ctx.kind is TurnKind.USER and msg.sender_id != "subagent" and msg.media:
+            media_scope = await self._conversation_scope_for_message(msg)
+            if media_scope.user_id and media_scope.vault_id:
+                managed_media_root = await asyncio.to_thread(
+                    lambda: get_media_dir().resolve(strict=False)
+                )
+                relocated_media: list[str] = []
+                for media_path in msg.media:
+                    try:
+                        resolved_media = await asyncio.to_thread(
+                            lambda: Path(media_path).resolve(strict=True)
+                        )
+                        resolved_media.relative_to(managed_media_root)
+                    except (OSError, ValueError):
+                        # Local caller-supplied media is not channel-managed and
+                        # therefore must remain available to the current turn.
+                        relocated_media.append(media_path)
+                        continue
+                    relocated_media.extend(
+                        await asyncio.to_thread(
+                            relocate_media_to_vault,
+                            [media_path],
+                            owner_user_id=media_scope.user_id,
+                            vault_id=media_scope.vault_id,
+                        )
+                        or [media_path]
+                    )
+                ctx.msg = dataclasses.replace(msg, media=relocated_media)
+                msg = ctx.msg
 
         if ctx.kind is TurnKind.USER and msg.media:
-            new_content, image_paths = reference_non_image_attachments(
+            new_content, image_paths = await asyncio.to_thread(
+                reference_non_image_attachments,
                 msg.content,
                 msg.media,
             )
@@ -1781,6 +2093,44 @@ class AgentLoop:
                     restricted.register(tool)
             tools = restricted
         ctx.tools = tools
+        if ctx.kind is TurnKind.USER and msg.sender_id != "subagent":
+            collaboration_scope = await self._conversation_scope_for_message(msg)
+            ctx.attributes["collaboration_scope"] = collaboration_scope
+            if collaboration_scope.user_id is not None:
+                session.metadata[COLLABORATION_USER_METADATA_KEY] = collaboration_scope.user_id
+            else:
+                session.metadata.pop(COLLABORATION_USER_METADATA_KEY, None)
+            if collaboration_scope.vault_id is not None:
+                session.metadata[COLLABORATION_VAULT_METADATA_KEY] = collaboration_scope.vault_id
+                if (
+                    msg.channel.startswith("feishu")
+                    and msg.metadata.get("msg_type") == "audio"
+                    and "[transcription: " in msg.content
+                ):
+                    transcript = msg.content.split("[transcription: ", 1)[1].split("]", 1)[0].strip()
+                    if transcript:
+                        self.recordings.append(RecordingNote(
+                            collaboration_scope.user_id or "", collaboration_scope.vault_id,
+                            str(msg.metadata.get("source_chat_id") or msg.chat_id),
+                            str(msg.metadata.get("message_id") or ""),
+                            int(time.time() * 1000), transcript,
+                        ))
+            else:
+                session.metadata.pop(COLLABORATION_VAULT_METADATA_KEY, None)
+            if collaboration_scope.project_id is not None:
+                session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = (
+                    collaboration_scope.project_id
+                )
+            else:
+                session.metadata.pop(COLLABORATION_PROJECT_METADATA_KEY, None)
+            if collaboration_scope.binding is not None:
+                session.metadata[COLLABORATION_BINDING_METADATA_KEY] = (
+                    collaboration_scope.binding.id
+                )
+            else:
+                session.metadata.pop(COLLABORATION_BINDING_METADATA_KEY, None)
+            ctx.tools = self._tools_for_conversation_scope(ctx.tools, collaboration_scope)
+            self.sessions.save(session)
 
         if ctx.kind is TurnKind.SYSTEM:
             logger.info("Processing system message from {}", msg.sender_id)
@@ -1805,6 +2155,11 @@ class AgentLoop:
             RECOVERY_INBOUND_METADATA_KEY not in msg.metadata
             and restore_pending_interruption(session)
         ):
+            self.sessions.save(session)
+        if force_fresh_scope:
+            # This turn was withheld from a different active authorization
+            # scope. Do not resume that scope's provider-side conversation.
+            session.provider_state = None
             self.sessions.save(session)
 
     async def _compact_session(self, ctx: TurnContext) -> None:
@@ -1859,7 +2214,7 @@ class AgentLoop:
                         ctx.msg,
                         ctx.session_key,
                         turn_id=ctx.turn_id,
-                        attributes=ctx.attributes,
+                        attributes=_public_turn_attributes(ctx.attributes),
                     )
             return True
         return False
@@ -1912,7 +2267,7 @@ class AgentLoop:
             ctx.input_persisted_early = True
         await ctx.delivery.runtime_admitted(runtime)
 
-        ctx.request_context = self._request_context_for_turn(ctx)
+        ctx.request_context = await self._request_context_for_turn(ctx)
         if ctx.kind is TurnKind.USER:
             ctx.runtime_context_blocks = await self._resolve_runtime_context_for_turn(ctx)
         staged_provider_state = False
@@ -1924,6 +2279,10 @@ class AgentLoop:
                 ctx.msg.content,
                 media=ctx.msg.media if ctx.kind is TurnKind.USER and ctx.msg.media else None,
                 runtime_context_blocks=ctx.runtime_context_blocks,
+                allowed_skills=self._profile_selection(
+                    self._conversation_scope_from_attributes(ctx.attributes),
+                    "skills",
+                ),
             )
             task_id = ctx.msg.metadata.get("subagent_task_id") if is_subagent else None
             already_staged = False
@@ -2063,7 +2422,7 @@ class AgentLoop:
                 ctx.msg,
                 ctx.session_key,
                 turn_id=ctx.turn_id,
-                attributes=ctx.attributes,
+                attributes=_public_turn_attributes(ctx.attributes),
             )
 
     async def _prepare_outbound(self, ctx: TurnContext) -> None:
@@ -2307,6 +2666,7 @@ class AgentLoop:
         attributes: Mapping[str, Any] | None = None,
     ) -> OutboundMessage | None:
         """Process an external message directly and return the outbound payload."""
+        await self._ensure_collaboration_initialized()
         if channel == "system":
             raise ValueError("channel 'system' is reserved for internal messages")
         metadata: dict[str, Any] = {}
