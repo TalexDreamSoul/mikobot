@@ -22,18 +22,22 @@ from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.collaboration import (
     AsyncLocalCollaborationRepository,
+    BotState,
     CollaborationConflictError,
+    CollaborationNotFoundError,
     CollaborationPermissionError,
     CollaborationStore,
     CollaborationStoreFormatError,
     ContextSourceKind,
     ConversationScopeKind,
     OrganizationRole,
+    PairingPurpose,
     SharePermission,
 )
 from nanobot.collaboration.context import collaboration_runtime_context
 from nanobot.collaboration.links import IdentityLinkError, IdentityLinkStore
 from nanobot.collaboration.mcp_server import build_collaboration_mcp_server
+from nanobot.collaboration.pairing import BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY
 from nanobot.providers.base import LLMResponse
 from nanobot.runtime_context import RUNTIME_CONTEXT_END
 
@@ -714,7 +718,7 @@ def test_legacy_collaboration_migration_persists_a_default_vault(tmp_path: Path)
         restored.default_vault_id
     ]
     persisted = json.loads(store.path.read_text(encoding="utf-8"))
-    assert persisted["schemaVersion"] == 5
+    assert persisted["schemaVersion"] == 6
     assert persisted["users"][legacy_user.id]["defaultVaultId"] == restored.default_vault_id
     assert persisted["vaults"][restored.default_vault_id]["ownerUserId"] == legacy_user.id
 
@@ -756,7 +760,7 @@ def test_v4_migration_assigns_personal_organizations_and_project_ownership(
     migrated.create_user("post-upgrade")
     persisted = json.loads(store.path.read_text(encoding="utf-8"))
 
-    assert persisted["schemaVersion"] == 5
+    assert persisted["schemaVersion"] == 6
     for user, project in ((alice, alice_project), (bob, bob_project)):
         organizations = migrated.list_organizations(user.id)
         assert len(organizations) == 1
@@ -766,6 +770,13 @@ def test_v4_migration_assigns_personal_organizations_and_project_ownership(
             organization.id, user.id
         )] == [(user.id, OrganizationRole.OWNER)]
         assert migrated.get_project(user.id, project.id).organization_id == organization.id
+        bots = migrated.list_bots(user.id, organization_id=organization.id)
+        assert len(bots) == 1
+        migrated_user = migrated.get_user(user.id)
+        assert migrated_user is not None
+        assert (migrated_user.default_organization_id, migrated_user.default_bot_id) == (
+            organization.id, bots[0].id
+        )
 
     before_reload = store.path.read_bytes()
     reloaded = CollaborationStore(store_path=store.path)
@@ -773,6 +784,343 @@ def test_v4_migration_assigns_personal_organizations_and_project_ownership(
         migrated.get_project(alice.id, alice_project.id).organization_id
     )
     assert store.path.read_bytes() == before_reload
+
+
+def test_v5_migration_preserves_shared_default_project_without_cross_organization_bot_data(
+    tmp_path: Path,
+) -> None:
+    """A legacy shared-project default keeps its organization but does not receive a personal-bot route or profile."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner = store.create_user("shared owner")
+    legacy = store.create_user("legacy member")
+    shared_organization = store.create_organization(owner.id, "Shared")
+    store.add_organization_member(
+        shared_organization.id, owner.id, legacy.id, OrganizationRole.MEMBER
+    )
+    shared_project = store.create_project(
+        owner.id, "Shared project", tmp_path / "shared", organization_id=shared_organization.id
+    )
+    store.add_member(shared_project.id, owner.id, legacy.id)
+    store.update_user_default_project(legacy.id, shared_project.id)
+    store.update_extension_profile(legacy.id, shared_project.id, {"skills": ["docs"]})
+
+    payload = json.loads(store.path.read_text(encoding="utf-8"))
+    payload["schemaVersion"] = 5
+    for collection in (
+        "bots", "botProjectAssignments", "botChannelAssignments",
+        "botProjectChannels", "botCapabilityProfiles", "pairingChallenges",
+    ):
+        del payload[collection]
+    for raw_user in payload["users"].values():
+        raw_user.pop("defaultOrganizationId", None)
+        raw_user.pop("defaultBotId", None)
+    store.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = CollaborationStore(store_path=store.path)
+    migrated_user = migrated.get_user(legacy.id)
+    assert migrated_user is not None
+    assert (migrated_user.default_project_id, migrated_user.default_organization_id) == (
+        shared_project.id, shared_organization.id
+    )
+    assert migrated_user.default_bot_id is None
+    personal_organization = next(
+        organization for organization in migrated.list_organizations(legacy.id) if organization.is_personal
+    )
+    personal_bot = migrated.list_bots(legacy.id, organization_id=personal_organization.id)[0]
+    assert migrated.list_bot_projects(legacy.id, personal_bot.id) == []
+    persisted = json.loads(store.path.read_text(encoding="utf-8"))
+    assert not any(
+        assignment["projectId"] == shared_project.id
+        for assignment in persisted["botProjectAssignments"].values()
+    )
+    assert not any(
+        profile["projectId"] == shared_project.id
+        for profile in persisted["botCapabilityProfiles"].values()
+    )
+
+
+def test_local_pairing_challenges_bind_channel_owner_and_project_visibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an exact, fresh, owner-bound channel Pair Code can expose a bot to project members."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner = store.create_user("owner")
+    member = store.create_user("member")
+    outsider = store.create_user("outsider")
+    organization = store.create_organization(owner.id, "Studio")
+    store.add_organization_member(organization.id, owner.id, member.id, OrganizationRole.MEMBER)
+    project = store.create_project(
+        owner.id, "Roadmap", tmp_path / "roadmap", organization_id=organization.id
+    )
+    store.add_member(project.id, owner.id, member.id)
+    bot = store.create_bot(owner.id, organization.id, "Release bot")
+
+    assert [item.id for item in store.list_bots(owner.id, organization_id=organization.id)] == [bot.id]
+    assert store.list_bots(member.id, organization_id=organization.id) == []
+
+    claim, claim_code = store.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.CLAIM_CHANNEL, organization_id=organization.id,
+        bot_id=bot.id, channel_type="weixin", instance_id="release",
+    )
+    with pytest.raises(CollaborationNotFoundError, match="not found or expired"):
+        store.verify_pairing_challenge(
+            claim_code, channel_type="weixin", instance_id="other", sender_id="owner-sender"
+        )
+    store.bind_identity("weixin.release", "outsider-sender", outsider.id)
+    with pytest.raises(CollaborationConflictError, match="belongs to another user"):
+        store.verify_pairing_challenge(
+            claim_code, channel_type="weixin", instance_id="release", sender_id="outsider-sender"
+        )
+
+    verified_claim = store.verify_pairing_challenge(
+        claim_code, channel_type="weixin", instance_id="release", sender_id="owner-sender"
+    )
+    assert verified_claim.id == claim.id
+    with pytest.raises(CollaborationPermissionError, match="another user"):
+        store.consume_pairing_challenge(member.id, claim.id)
+    assert store.consume_pairing_challenge(owner.id, claim.id).consumed_at_ms is not None
+    with pytest.raises(CollaborationNotFoundError, match="not found or expired"):
+        store.verify_pairing_challenge(
+            claim_code, channel_type="weixin", instance_id="release", sender_id="owner-sender"
+        )
+
+    assignment, assignment_code = store.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.ASSIGN_BOT_PROJECT, organization_id=organization.id,
+        bot_id=bot.id, project_id=project.id, channel_type="weixin", instance_id="release",
+    )
+    store.verify_pairing_challenge(
+        assignment_code, channel_type="weixin", instance_id="release", sender_id="owner-sender"
+    )
+    assert store.consume_pairing_challenge(owner.id, assignment.id).consumed_at_ms is not None
+    assert [(item.bot_id, item.project_id) for item in store.list_bot_projects(member.id, bot.id)] == [
+        (bot.id, project.id)
+    ]
+    assert [(item.channel_type, item.instance_id, item.enabled) for item in store.list_bot_project_channels(
+        member.id, bot.id, project.id
+    )] == [("weixin", "release", True)]
+    assert [item.id for item in store.list_bots(member.id, organization_id=organization.id)] == [bot.id]
+
+    expired, expired_code = store.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.CLAIM_CHANNEL, organization_id=organization.id,
+        bot_id=bot.id, channel_type="weixin", instance_id="expired",
+    )
+    monkeypatch.setattr("nanobot.collaboration.store._now", lambda: expired.expires_at_ms + 1)
+    with pytest.raises(CollaborationNotFoundError, match="not found or expired"):
+        store.verify_pairing_challenge(
+            expired_code, channel_type="weixin", instance_id="expired", sender_id="owner-sender"
+        )
+
+
+def test_local_pairing_assignment_requires_an_exact_active_route_and_updates_defaults(
+    tmp_path: Path,
+) -> None:
+    """Only a claimed, enabled route for an active bot grants a direct channel project scope."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner = store.create_user("route owner")
+    organization = store.create_organization(owner.id, "Route organization")
+    project = store.create_project(
+        owner.id, "Route project", tmp_path / "route", organization_id=organization.id
+    )
+    store.update_user_default_project(owner.id, project.id)
+    bot = store.create_bot(owner.id, organization.id, "Route bot")
+
+    claim, claim_code = store.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.CLAIM_CHANNEL, organization_id=organization.id,
+        bot_id=bot.id, channel_type="weixin", instance_id="release",
+    )
+    store.verify_pairing_challenge(
+        claim_code, channel_type="weixin", instance_id="release", sender_id="owner-sender"
+    )
+    store.consume_pairing_challenge(owner.id, claim.id)
+
+    missing_route = store.resolve_scope(
+        "weixin.release", "owner-sender", "owner-sender",
+        {BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY: True}, tmp_path / "default",
+    )
+    assert missing_route.is_isolated and missing_route.route_denied
+
+    assignment, assignment_code = store.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.ASSIGN_BOT_PROJECT, organization_id=organization.id,
+        bot_id=bot.id, project_id=project.id, channel_type="weixin", instance_id="release",
+    )
+    store.verify_pairing_challenge(
+        assignment_code, channel_type="weixin", instance_id="release", sender_id="owner-sender"
+    )
+    store.consume_pairing_challenge(owner.id, assignment.id)
+
+    updated_owner = store.get_user(owner.id)
+    assert updated_owner is not None
+    assert (
+        updated_owner.default_organization_id,
+        updated_owner.default_project_id,
+        updated_owner.default_bot_id,
+    ) == (organization.id, project.id, bot.id)
+    routed = store.resolve_scope(
+        "weixin.release", "owner-sender", "owner-sender",
+        {BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY: True}, tmp_path / "default",
+    )
+    assert (routed.kind, routed.project_id, routed.bot_id, routed.route_denied) == (
+        ConversationScopeKind.DIRECT, project.id, bot.id, False
+    )
+
+    staged, staged_code = store.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.CLAIM_CHANNEL, organization_id=organization.id,
+        bot_id=bot.id, channel_type="weixin", instance_id="staged",
+    )
+    store.verify_pairing_challenge(
+        staged_code, channel_type="weixin", instance_id="staged", sender_id="owner-sender"
+    )
+    store.consume_pairing_challenge(owner.id, staged.id)
+    unassigned_route = store.resolve_scope(
+        "weixin.staged", "owner-sender", "owner-sender",
+        {BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY: True}, tmp_path / "default",
+    )
+    assert unassigned_route.is_isolated and unassigned_route.route_denied
+
+    store.update_bot(bot.id, owner.id, state_value=BotState.DISABLED)
+    revoked = store.resolve_scope(
+        "weixin.release", "owner-sender", "owner-sender",
+        {BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY: True}, tmp_path / "default",
+    )
+    assert revoked.is_isolated and revoked.route_denied
+
+
+def test_local_shared_bot_does_not_leak_its_owners_persona_to_project_members(
+    tmp_path: Path,
+) -> None:
+    """A shared bot keeps each member in that member's personal persona vault."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner = store.create_user("bot owner")
+    member = store.create_user("bot member")
+    organization = store.create_organization(owner.id, "Persona organization")
+    store.add_organization_member(organization.id, owner.id, member.id, OrganizationRole.MEMBER)
+    project = store.create_project(
+        owner.id, "Persona project", tmp_path / "persona", organization_id=organization.id
+    )
+    store.add_member(project.id, owner.id, member.id)
+    assert owner.default_vault_id is not None
+    owner_persona = store.create_persona(owner.id, "Owner persona", owner.default_vault_id)
+    bot = store.create_bot(
+        owner.id, organization.id, "Shared persona bot", persona_id=owner_persona.id
+    )
+    claim, claim_code = store.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.CLAIM_CHANNEL, organization_id=organization.id,
+        bot_id=bot.id, channel_type="weixin", instance_id="persona",
+    )
+    store.verify_pairing_challenge(
+        claim_code, channel_type="weixin", instance_id="persona", sender_id="owner-sender"
+    )
+    store.consume_pairing_challenge(owner.id, claim.id)
+    assignment, assignment_code = store.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.ASSIGN_BOT_PROJECT, organization_id=organization.id,
+        bot_id=bot.id, project_id=project.id, channel_type="weixin", instance_id="persona",
+    )
+    store.verify_pairing_challenge(
+        assignment_code, channel_type="weixin", instance_id="persona", sender_id="owner-sender"
+    )
+    store.consume_pairing_challenge(owner.id, assignment.id)
+
+    assert member.default_vault_id is not None
+    member_persona = store.create_persona(member.id, "Member persona", member.default_vault_id)
+    store.update_user_default_project(member.id, project.id)
+    store.bind_identity("weixin.persona", "member-sender", member.id)
+
+    scope = store.resolve_scope(
+        "weixin.persona", "member-sender", "member-sender",
+        {BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY: True}, tmp_path / "default",
+    )
+
+    assert (scope.bot_id, scope.persona_id, scope.vault_id) == (
+        bot.id, member_persona.id, member.default_vault_id
+    )
+
+
+def test_local_project_deletion_cascades_bot_project_state_without_deleting_global_profile(
+    tmp_path: Path,
+) -> None:
+    """Deleting a project removes every project-scoped bot reference while retaining the bot's global capabilities."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner = store.create_user("owner")
+    organization = store.create_organization(owner.id, "Studio")
+    project = store.create_project(
+        owner.id, "Roadmap", tmp_path / "roadmap", organization_id=organization.id
+    )
+    bot = store.create_bot(owner.id, organization.id, "Release bot")
+    claim, claim_code = store.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.CLAIM_CHANNEL, organization_id=organization.id,
+        bot_id=bot.id, channel_type="weixin", instance_id="release",
+    )
+    store.verify_pairing_challenge(
+        claim_code, channel_type="weixin", instance_id="release", sender_id="owner-sender"
+    )
+    store.consume_pairing_challenge(owner.id, claim.id)
+    assignment, assignment_code = store.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.ASSIGN_BOT_PROJECT, organization_id=organization.id,
+        bot_id=bot.id, project_id=project.id, channel_type="weixin", instance_id="release",
+    )
+    store.verify_pairing_challenge(
+        assignment_code, channel_type="weixin", instance_id="release", sender_id="owner-sender"
+    )
+    store.consume_pairing_challenge(owner.id, assignment.id)
+    global_profile = store.update_bot_capability_profile(
+        owner.id, bot.id, {"skills": ["release-notes"]}
+    )
+    store.update_bot_capability_profile(
+        owner.id, bot.id, {"skills": ["project-notes"]}, project_id=project.id
+    )
+    pending, _code = store.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.ASSIGN_BOT_PROJECT, organization_id=organization.id,
+        bot_id=bot.id, project_id=project.id, channel_type="weixin", instance_id="release",
+    )
+
+    assert store.delete_project(project.id, owner.id) is True
+    reloaded = CollaborationStore(store_path=store.path)
+    assert reloaded.get_project(owner.id, project.id) is None
+    restored_owner = reloaded.get_user(owner.id)
+    assert restored_owner is not None
+    assert restored_owner.default_project_id != project.id
+    assert restored_owner.default_organization_id != organization.id
+    assert restored_owner.default_bot_id is not None
+    assert reloaded.get_project(owner.id, restored_owner.default_project_id) is not None
+    assert reloaded.list_bot_projects(owner.id, bot.id) == []
+    assert reloaded.get_pairing_challenge(owner.id, pending.id) is None
+    assert reloaded.get_bot_capability_profile(owner.id, bot.id) == global_profile
+    persisted = json.loads(store.path.read_text(encoding="utf-8"))
+    for collection in (
+        "botProjectAssignments", "botProjectChannels", "botCapabilityProfiles", "pairingChallenges",
+    ):
+        assert all(record.get("projectId") != project.id for record in persisted[collection].values())
+
+
+def test_local_pairing_challenge_limit_is_per_user_not_global(tmp_path: Path) -> None:
+    """One user cannot exhaust Pair Codes for another user."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    first = store.create_user("first")
+    second = store.create_user("second")
+    first_organization = store.create_organization(first.id, "First organization")
+    second_organization = store.create_organization(second.id, "Second organization")
+    first_bot = store.create_bot(first.id, first_organization.id, "First bot")
+    second_bot = store.create_bot(second.id, second_organization.id, "Second bot")
+
+    for index in range(32):
+        store.create_pairing_challenge(
+            first.id, purpose=PairingPurpose.CLAIM_CHANNEL,
+            organization_id=first_organization.id, bot_id=first_bot.id,
+            channel_type="weixin", instance_id=f"first-{index}",
+        )
+    with pytest.raises(CollaborationConflictError, match="too many active pairing challenges"):
+        store.create_pairing_challenge(
+            first.id, purpose=PairingPurpose.CLAIM_CHANNEL,
+            organization_id=first_organization.id, bot_id=first_bot.id,
+            channel_type="weixin", instance_id="first-over-limit",
+        )
+
+    challenge, _code = store.create_pairing_challenge(
+        second.id, purpose=PairingPurpose.CLAIM_CHANNEL,
+        organization_id=second_organization.id, bot_id=second_bot.id,
+        channel_type="weixin", instance_id="second-first",
+    )
+    assert challenge.requested_by_user_id == second.id
 
 
 def test_organization_roles_gate_membership_and_project_creation(tmp_path: Path) -> None:
@@ -980,6 +1328,11 @@ def test_removing_organization_member_clears_project_state_without_revoking_pers
     assert store.remove_organization_member(organization.id, owner.id, member.id)
 
     assert store.get_project(member.id, project.id) is None
+    restored_member = store.get_user(member.id)
+    assert restored_member is not None
+    assert restored_member.default_project_id != project.id
+    assert restored_member.default_organization_id != organization.id
+    assert restored_member.default_bot_id is not None
     with pytest.raises(CollaborationPermissionError, match="project membership"):
         store.list_tasks(member.id, project.id)
     assert store.resolve_binding("telegram", "team-chat") is None

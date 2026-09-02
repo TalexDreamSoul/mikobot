@@ -790,7 +790,10 @@ class SystemSettingsHandler:
             )
 
         try:
-            payload = await connector.handle(action, request.query)
+            query = {key: list(values) for key, values in request.query.items()}
+            if request.actor_user_id is not None:
+                query["_actor_user_id"] = [request.actor_user_id]
+            payload = await connector.handle(action, query)
         except ChannelConnectError as exc:
             return SettingsRouteResult.failure(exc.status, exc.message)
         except Exception:
@@ -805,6 +808,28 @@ class SystemSettingsHandler:
             )
 
         if payload.get("status") != "succeeded":
+            return SettingsRouteResult.success(payload)
+        if payload.get("pairing_required") is True:
+            if operations.channel_feature_action is not None:
+                try:
+                    listener = operations.channel_feature_action(
+                        "pairing", channel_name, str(payload.get("instance_id") or "default")
+                    )
+                    if inspect.isawaitable(listener):
+                        listener = await listener
+                    if isinstance(listener, dict):
+                        listener_payload = cast(dict[str, Any], listener)
+                        if not listener_payload.get("ok", True):
+                            payload["pairing_listener_error"] = listener_payload.get(
+                                "message", "pairing listener failed"
+                            )
+                except Exception as exc:
+                    self.logger.exception("failed to start pairing listener for {}", channel_name)
+                    payload["pairing_listener_error"] = str(exc)
+            payload["nanobot_features"] = self._with_channel_runtime_status(
+                self._nanobot_features_payload(operations), operations
+            )
+            payload["nanobot_features"]["requires_restart"] = False
             return SettingsRouteResult.success(payload)
         payload = await self._with_channel_connect_success(
             request,

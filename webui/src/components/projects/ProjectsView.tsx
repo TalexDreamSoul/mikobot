@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from "react";
+import { useTranslation } from "react-i18next";
 import {
+  Bot as BotIcon,
   Brain,
   Building2,
   ChevronDown,
@@ -15,6 +17,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { BotManagementPanel } from "@/components/projects/BotManagementPanel";
 import { ContextSourcesPanel } from "@/components/projects/ContextSourcesPanel";
 import { ExtensionsPanel } from "@/components/projects/ExtensionsPanel";
 import { OrganizationManagement } from "@/components/projects/OrganizationManagement";
@@ -27,18 +30,19 @@ import { useCollaborationProjects } from "@/hooks/useCollaborationProjects";
 import type { CollaborationOrganization, CollaborationProject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type ProjectPanel = "personal" | "tasks" | "members" | "extensions" | "context";
+type ProjectPanel = "personal" | "tasks" | "bots" | "members" | "extensions" | "context";
 
 const PROJECT_PANELS: Array<{
   id: ProjectPanel;
-  label: string;
+  labelKey: string;
   icon: LucideIcon;
 }> = [
-  { id: "personal", label: "My day", icon: ListTodo },
-  { id: "tasks", label: "Tasks", icon: ListTodo },
-  { id: "members", label: "Members", icon: Users },
-  { id: "extensions", label: "Extensions", icon: Brain },
-  { id: "context", label: "Context", icon: Files },
+  { id: "personal", labelKey: "projects.panels.personal", icon: ListTodo },
+  { id: "tasks", labelKey: "projects.panels.tasks", icon: ListTodo },
+  { id: "bots", labelKey: "projects.panels.bots", icon: BotIcon },
+  { id: "members", labelKey: "projects.panels.members", icon: Users },
+  { id: "extensions", labelKey: "projects.panels.extensions", icon: Brain },
+  { id: "context", labelKey: "projects.panels.context", icon: Files },
 ];
 
 function OrganizationSelector({
@@ -54,9 +58,10 @@ function OrganizationSelector({
   personalOrganizationId: string | null;
   onSelect: (id: string) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="relative min-w-0 flex-1">
-      <label htmlFor={id} className="sr-only">Organization scope</label>
+      <label htmlFor={id} className="sr-only">{t("projects.organizationScope")}</label>
       <select
         id={id}
         value={selectedId ?? ""}
@@ -66,7 +71,9 @@ function OrganizationSelector({
       >
         {organizations.map((organization) => (
           <option key={organization.id} value={organization.id}>
-            {organization.id === personalOrganizationId ? `Personal — ${organization.name}` : `Organization — ${organization.name}`}
+            {organization.id === personalOrganizationId
+              ? t("projects.personalOrganizationOption", { name: organization.name })
+              : t("projects.sharedOrganizationOption", { name: organization.name })}
           </option>
         ))}
       </select>
@@ -84,15 +91,16 @@ function ProjectList({
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
+  const { t } = useTranslation();
   if (!projects.length) {
     return (
       <div className="min-h-0 flex-1 px-3 py-5 text-xs leading-5 text-muted-foreground">
-        No projects in this organization yet.
+        {t("projects.noProjectsYet")}
       </div>
     );
   }
   return (
-    <nav aria-label="Projects in selected organization" className="min-h-0 flex-1 space-y-1 overflow-y-auto">
+    <nav aria-label={t("projects.listAria")} className="min-h-0 flex-1 space-y-1 overflow-y-auto">
       {projects.map((project) => {
         const selected = project.id === selectedId;
         return (
@@ -130,6 +138,7 @@ function NewProjectForm({
   onCancel: () => void;
   onCreate: (name: string) => Promise<unknown>;
 }) {
+  const { t } = useTranslation();
   const [name, setName] = useState("");
 
   const submit = async (event: FormEvent) => {
@@ -148,14 +157,16 @@ function NewProjectForm({
   return (
     <form onSubmit={(event) => void submit(event)} className="rounded-panel bg-settings-surface p-4">
       <div className="flex items-center justify-between gap-3">
-        <label htmlFor="new-project-name" className="text-sm font-semibold">New project</label>
+        <label htmlFor="new-project-name" className="text-sm font-semibold">{t("projects.newProject")}</label>
         <Button type="button" variant="ghost" size="icon" onClick={onCancel} disabled={busy} className="h-9 w-9">
           <X className="h-4 w-4" aria-hidden />
-          <span className="sr-only">Cancel new project</span>
+          <span className="sr-only">{t("projects.cancelNewProject")}</span>
         </Button>
       </div>
       <p className="mt-1 text-xs leading-5 text-muted-foreground">
-        This project will be created in {personal ? "your personal organization" : organizationName}.
+        {personal
+          ? t("projects.createInPersonal")
+          : t("projects.createInOrganization", { name: organizationName })}
       </p>
       <div className="mt-3 flex gap-2">
         <Input
@@ -164,12 +175,12 @@ function NewProjectForm({
           maxLength={512}
           autoFocus
           onChange={(event) => setName(event.target.value)}
-          placeholder="Project name"
+          placeholder={t("projects.projectNamePlaceholder")}
           disabled={busy}
           className="min-w-0 flex-1 bg-background"
         />
         <Button type="submit" disabled={!name.trim() || busy} className="shrink-0">
-          {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : "Create"}
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : t("common.create")}
         </Button>
       </div>
     </form>
@@ -177,9 +188,10 @@ function NewProjectForm({
 }
 
 function LoadingSurface() {
+  const { t } = useTranslation();
   return (
     <div aria-busy="true" className="space-y-5 p-5 sm:p-8">
-      <span className="sr-only">Loading projects</span>
+      <span className="sr-only">{t("projects.loading")}</span>
       <div className="h-8 w-48 animate-pulse rounded-compact bg-muted motion-reduce:animate-none" />
       <div className="h-12 w-full animate-pulse rounded-control bg-muted/70 motion-reduce:animate-none" />
       <div className="h-48 w-full animate-pulse rounded-panel bg-muted/55 motion-reduce:animate-none" />
@@ -188,14 +200,18 @@ function LoadingSurface() {
 }
 
 export function ProjectsView({
+  projects,
   onToggleSidebar,
   hostChromeInset = false,
 }: {
+  projects: ReturnType<typeof useCollaborationProjects>;
   onToggleSidebar: () => void;
   hostChromeInset?: boolean;
 }) {
-  const projects = useCollaborationProjects();
-  const [panel, setPanel] = useState<ProjectPanel>("tasks");
+  const { t } = useTranslation();
+  const [panel, setPanel] = useState<ProjectPanel>(() =>
+    window.location.hash.includes("section=bots") ? "bots" : "tasks"
+  );
   const [showNewProject, setShowNewProject] = useState(false);
   const [showOrganizationManagement, setShowOrganizationManagement] = useState(false);
   const organizations = projects.summary?.organizations ?? [];
@@ -214,8 +230,8 @@ export function ProjectsView({
           hostChromeInset ? "pt-16" : "pt-4",
         )}>
           <div className="mb-4 px-2">
-            <p className="text-xs font-medium text-muted-foreground">Project workspace</p>
-            <h1 className="mt-1 text-lg font-semibold tracking-tight">Projects</h1>
+            <p className="text-xs font-medium text-muted-foreground">{t("projects.workspaceLabel")}</p>
+            <h1 className="mt-1 text-lg font-semibold tracking-tight">{t("projects.title")}</h1>
             {projects.summary?.user.display_name ? (
               <p className="mt-1 truncate text-xs text-muted-foreground">{projects.summary.user.display_name}</p>
             ) : null}
@@ -235,7 +251,7 @@ export function ProjectsView({
               className="h-10 w-full justify-start px-3 text-muted-foreground"
             >
               <Settings2 className="mr-2 h-4 w-4" aria-hidden />
-              Manage organizations
+              {t("projects.manageOrganizations")}
             </Button>
           </div>
           <ProjectList
@@ -251,7 +267,7 @@ export function ProjectsView({
             className="mt-2 h-10 w-full justify-start px-3 text-muted-foreground"
           >
             <Plus className="mr-2 h-4 w-4" aria-hidden />
-            New project
+            {t("projects.newProject")}
           </Button>
         </aside>
 
@@ -266,7 +282,7 @@ export function ProjectsView({
                 variant="ghost"
                 size="icon"
                 onClick={onToggleSidebar}
-                aria-label="Open navigation"
+                aria-label={t("sidebar.navigation")}
                 className="h-11 w-11 shrink-0 lg:hidden"
               >
                 <Menu className="h-5 w-5" aria-hidden />
@@ -284,7 +300,7 @@ export function ProjectsView({
                   variant="outline"
                   size="icon"
                   onClick={() => setShowOrganizationManagement(true)}
-                  aria-label="Manage organizations"
+                  aria-label={t("projects.manageOrganizations")}
                   className="h-11 w-11 shrink-0"
                 >
                   <Settings2 className="h-4 w-4" aria-hidden />
@@ -292,10 +308,10 @@ export function ProjectsView({
               </div>
               <div className="hidden min-w-0 flex-1 lg:block">
                 <div className="flex min-w-0 items-center gap-2">
-                  <h2 className="truncate text-lg font-semibold tracking-tight">{selectedProject?.name ?? selectedOrganization?.name ?? "Projects"}</h2>
+                  <h2 className="truncate text-lg font-semibold tracking-tight">{selectedProject?.name ?? selectedOrganization?.name ?? t("projects.title")}</h2>
                   {selectedOrganization ? (
                     <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                      {personalScope ? "Personal" : "Shared"}
+                      {personalScope ? t("projects.personalLabel") : t("projects.sharedLabel")}
                     </span>
                   ) : null}
                 </div>
@@ -304,7 +320,7 @@ export function ProjectsView({
 
             <div className="mt-2 flex gap-2 lg:hidden">
               <div className="relative min-w-0 flex-1">
-                <label htmlFor="mobile-project-switcher" className="sr-only">Current project</label>
+                <label htmlFor="mobile-project-switcher" className="sr-only">{t("projects.currentProject")}</label>
                 <select
                   id="mobile-project-switcher"
                   value={projects.projectId ?? ""}
@@ -312,7 +328,7 @@ export function ProjectsView({
                   disabled={!organizationProjects.length}
                   className="h-11 w-full appearance-none truncate rounded-control border border-input bg-background py-2 pl-3 pr-9 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
                 >
-                  {!organizationProjects.length ? <option value="">No projects in this organization</option> : null}
+                  {!organizationProjects.length ? <option value="">{t("projects.noProjectsInOrganization")}</option> : null}
                   {organizationProjects.map((project) => (
                     <option key={project.id} value={project.id}>{project.name}</option>
                   ))}
@@ -324,17 +340,17 @@ export function ProjectsView({
                 variant="outline"
                 onClick={() => setShowNewProject((open) => !open)}
                 disabled={!selectedOrganization}
-                aria-label="New project"
+                aria-label={t("projects.newProject")}
                 className="h-11 w-11 shrink-0 px-0 sm:w-auto sm:px-3"
               >
                 <Plus className="h-4 w-4" aria-hidden />
-                <span className="ml-2 hidden sm:inline">New project</span>
+                <span className="ml-2 hidden sm:inline">{t("projects.newProject")}</span>
               </Button>
             </div>
 
-            {selectedProject ? (
-              <nav aria-label="Project sections" className="mt-3 flex gap-1 overflow-x-auto rounded-control bg-muted p-1">
-                {PROJECT_PANELS.map(({ id, label, icon: Icon }) => (
+            {selectedOrganization ? (
+              <nav aria-label={t("projects.sectionsAria")} className="mt-3 flex gap-1 overflow-x-auto rounded-control bg-muted p-1">
+                {PROJECT_PANELS.filter(({ id }) => selectedProject || id === "bots").map(({ id, labelKey, icon: Icon }) => (
                   <button
                     key={id}
                     type="button"
@@ -346,7 +362,7 @@ export function ProjectsView({
                     )}
                   >
                     <Icon className="h-4 w-4" aria-hidden />
-                    {label}
+                    {t(labelKey)}
                   </button>
                 ))}
               </nav>
@@ -363,7 +379,7 @@ export function ProjectsView({
                     variant="ghost"
                     size="icon"
                     onClick={() => projects.setError(null)}
-                    aria-label="Dismiss error"
+                    aria-label={t("common.dismiss")}
                     className="-mr-2 -mt-2 h-9 w-9 shrink-0 text-destructive"
                   >
                     <X className="h-4 w-4" aria-hidden />
@@ -386,26 +402,30 @@ export function ProjectsView({
               ) : !organizations.length ? (
                 <div className="rounded-panel bg-settings-surface px-5 py-10 text-center">
                   <Building2 className="mx-auto h-6 w-6 text-muted-foreground" aria-hidden />
-                  <h2 className="mt-3 text-base font-semibold">No organization is available</h2>
+                  <h2 className="mt-3 text-base font-semibold">{t("projects.noOrganization")}</h2>
                   <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
-                    Open organization settings to create a shared workspace or retry loading your personal scope.
+                    {t("projects.noOrganizationDescription")}
                   </p>
                   <Button type="button" onClick={() => setShowOrganizationManagement(true)} className="mt-5">
                     <Settings2 className="mr-2 h-4 w-4" aria-hidden />
                     Organization settings
                   </Button>
                 </div>
+              ) : panel === "bots" ? (
+                <BotManagementPanel projects={projects} />
               ) : !organizationProjects.length ? (
                 <div className="rounded-panel bg-settings-surface px-5 py-10 text-center">
                   <FolderKanban className="mx-auto h-6 w-6 text-muted-foreground" aria-hidden />
-                  <h2 className="mt-3 text-base font-semibold">No projects in {selectedOrganization?.name}</h2>
+                  <h2 className="mt-3 text-base font-semibold">{t("projects.noProjectsNamed", { name: selectedOrganization?.name })}</h2>
                   <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
-                    Create a project in this {personalScope ? "personal" : "shared"} scope. Other organizations’ projects stay separate.
+                    {t("projects.noProjectsDescription", {
+                      scope: personalScope ? t("projects.personalLabel") : t("projects.sharedLabel"),
+                    })}
                   </p>
                   {!showNewProject ? (
                     <Button type="button" onClick={() => setShowNewProject(true)} className="mt-5">
                       <Plus className="mr-2 h-4 w-4" aria-hidden />
-                      New project
+                      {t("projects.newProject")}
                     </Button>
                   ) : null}
                 </div>
@@ -413,12 +433,12 @@ export function ProjectsView({
                 <LoadingSurface />
               ) : !projects.detail ? (
                 <div className="rounded-panel bg-settings-surface px-5 py-8 text-center">
-                  <p className="text-sm font-medium">Project details are unavailable</p>
+                  <p className="text-sm font-medium">{t("projects.detailsUnavailable")}</p>
                   <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
-                    Check the connection or your project access, then try again.
+                    {t("projects.detailsUnavailableDescription")}
                   </p>
                   <Button type="button" variant="outline" onClick={() => void projects.refreshDetail()} className="mt-4">
-                    Try again
+                    {t("common.retry")}
                   </Button>
                 </div>
               ) : panel === "personal" ? (

@@ -97,6 +97,13 @@ function FeishuInstanceAction({
   const tx = channelTranslator(t, "feishu");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  if (instance.pairing_only) {
+    return (
+      <p className="text-[12px] text-muted-foreground">
+        {t("settings.channels.pairingOnly", { defaultValue: "Awaiting Pair Code" })}
+      </p>
+    );
+  }
 
   if (!instance.configured) {
     return (

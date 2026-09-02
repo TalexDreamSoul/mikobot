@@ -86,6 +86,7 @@ export function ChannelQrConnectFlow({
 
   const pending = connect?.status === "pending";
   const succeeded = connect?.status === "succeeded";
+  const pairingRequired = succeeded && connect?.pairing_required === true;
   const canStart = !pending && !busy;
   const pollingPaused = Boolean(connect && pausePolling?.(connect));
   const displayMessage = connect
@@ -292,7 +293,30 @@ export function ChannelQrConnectFlow({
         </div>
       ) : null}
 
-      {succeeded && !suppressSucceeded ? (
+      {succeeded && !suppressSucceeded && pairingRequired ? (
+        <div className="rounded-control border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-[12px] text-amber-900 dark:text-amber-100">
+          <p className="font-semibold">
+            {tx("settings.channels.pairingRequiredTitle", "Connected — bot assignment required")}
+          </p>
+          <p className="mt-1 leading-5">
+            {tx(
+              "settings.channels.pairingRequiredDescription",
+              "Assign instance {{instance}} to a bot with a one-time Pair Code before it can receive messages.",
+            ).replace("{{instance}}", connect?.instance_id ?? "default")}
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="mt-3 h-8 rounded-full px-3 text-[12px] font-semibold"
+            onClick={() => { window.location.hash = "#/projects?section=bots"; }}
+          >
+            {tx("settings.channels.manageBots", "Open bot management")}
+          </Button>
+        </div>
+      ) : null}
+
+      {succeeded && !suppressSucceeded && !pairingRequired ? (
         <div className="flex items-center gap-2 rounded-control border border-emerald-500/20 px-3 py-2 text-[12px] font-medium text-emerald-700 dark:text-emerald-200">
           <Check className="h-3.5 w-3.5" aria-hidden />
           {displayMessage ?? labels.connected}

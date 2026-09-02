@@ -51,6 +51,8 @@
     "expired": "WeChat login expired. Scan again to reconnect.",
     "failed": "Unable to connect WeChat. Try again.",
     "verifyPlaceholder": "Code",
-    "verifySubmit": "Verify"
+    "verifySubmit": "Verify",
+    "pairingOnly": "Awaiting Pair Code",
+    "addBot": "Add another WeChat bot"
   }
 }

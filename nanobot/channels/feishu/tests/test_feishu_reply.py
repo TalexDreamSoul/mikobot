@@ -1197,6 +1197,85 @@ async def test_on_message_unauthorized_dm_sends_pairing_code_without_side_effect
 
 
 @pytest.mark.asyncio
+async def test_on_message_consumes_raw_pair_code_before_reacting() -> None:
+    """A verified raw Pair Code stops Feishu ingress before any reaction."""
+    channel = _make_feishu_channel(group_policy="open")
+    pair_code = "ASSIGN-BOT-PROJECT-CODE"
+    observed: list[tuple[str, str]] = []
+
+    async def verify_pairing(content: str, sender_id: str) -> bool:
+        observed.append((content, sender_id))
+        return content == pair_code
+
+    channel.assignment_pairing_handler = verify_pairing
+    channel.send = AsyncMock()
+    channel._add_reaction = AsyncMock()
+    channel._handle_message = AsyncMock()
+
+    await channel._on_message(
+        _make_feishu_event(content=json.dumps({"text": pair_code}), sender_open_id="ou_pairer")
+    )
+
+    assert observed == [(pair_code, "ou_pairer")]
+    channel._add_reaction.assert_not_awaited()
+    channel._handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_on_message_strict_assignment_route_preserves_authorized_text() -> None:
+    """A strictly authorized direct message reaches the agent with its text intact."""
+    channel = _make_feishu_channel(group_policy="open")
+    content = "ordinary message survives strict route authorization"
+
+    async def authorize(sender_id: str) -> bool:
+        return sender_id == "ou_route_authorized"
+
+    channel.require_assignment_authorization = True
+    channel.assignment_authorization_handler = authorize
+    channel._add_reaction = AsyncMock()
+
+    await channel._on_message(
+        _make_feishu_event(
+            content=json.dumps({"text": content}),
+            sender_open_id="ou_route_authorized",
+        )
+    )
+
+    inbound = await channel.bus.consume_inbound()
+    assert inbound.sender_id == "ou_route_authorized"
+    assert inbound.content == content
+
+
+@pytest.mark.asyncio
+async def test_on_message_strict_assignment_route_rejects_legacy_allow_from() -> None:
+    """Legacy allowFrom must not bypass a denied strict assignment route."""
+    channel = _make_feishu_channel(group_policy="open")
+    channel.config.allow_from = ["ou_legacy"]
+    channel.require_assignment_authorization = True
+
+    async def deny_route(_sender_id: str) -> bool:
+        return False
+
+    channel.assignment_authorization_handler = deny_route
+    channel._add_reaction = AsyncMock()
+    channel._download_and_save_media = AsyncMock(return_value=("/tmp/audio.ogg", "[audio]"))
+    channel._handle_message = AsyncMock()
+
+    await channel._on_message(
+        _make_feishu_event(
+            msg_type="audio",
+            content='{"file_key": "legacy-route-audio"}',
+            sender_open_id="ou_legacy",
+        )
+    )
+
+    channel._add_reaction.assert_not_awaited()
+    channel._download_and_save_media.assert_not_awaited()
+    channel._handle_message.assert_not_awaited()
+    assert channel.bus.inbound_size == 0
+
+
+@pytest.mark.asyncio
 async def test_on_message_unauthorized_group_ignored_before_side_effects() -> None:
     """Unauthorized group chat sender is silently ignored before any side effects."""
     channel = _make_feishu_channel(group_policy="open")

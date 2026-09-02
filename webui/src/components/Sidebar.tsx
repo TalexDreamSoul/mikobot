@@ -30,12 +30,20 @@ import {
 import { Button } from "@/components/ui/button";
 import type {
   ChatSummary,
+  CollaborationBot,
+  CollaborationOrganization,
   SidebarViewState,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface SidebarProps {
   sessions: ChatSummary[];
+  organizations?: CollaborationOrganization[];
+  bots?: CollaborationBot[];
+  activeOrganizationId?: string | null;
+  activeBotId?: string | null;
+  onSelectOrganization?: (organizationId: string) => void;
+  onSelectBot?: (botId: string) => void;
   temporarySessions?: ChatSummary[];
   activeKey: string | null;
   loading: boolean;
@@ -136,30 +144,55 @@ export function Sidebar(props: SidebarProps) {
         className={cn(
           "flex items-center px-3 pb-2.5",
           props.hostChromeInset ? "pt-[2.85rem]" : "pt-3",
-          collapsed ? "w-14 justify-start" : "justify-between",
+          collapsed ? "w-14 justify-start" : "justify-between gap-2",
         )}
       >
-        <button
-          type="button"
-          aria-label={collapsed ? toggleLabel : undefined}
-          aria-hidden={collapsed ? undefined : true}
-          title={collapsed ? toggleLabel : undefined}
-          onClick={collapsed ? props.onExpand : undefined}
-          tabIndex={collapsed ? 0 : -1}
-          className={cn(
-            "flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl transition-colors",
-            collapsed
-              ? "-ml-0.5 hover:bg-sidebar-accent/75"
-              : "pointer-events-none -ml-0.5",
-          )}
-        >
-          <img
-            src="/brand/nanobot_mark.svg"
-            alt=""
-            className="h-8 w-8 select-none object-contain"
-            draggable={false}
-          />
-        </button>
+        <div className={cn("flex min-w-0 items-center", !collapsed && "flex-1 gap-2")}>
+          <button
+            type="button"
+            aria-label={collapsed ? toggleLabel : undefined}
+            aria-hidden={collapsed ? undefined : true}
+            title={collapsed ? toggleLabel : undefined}
+            onClick={collapsed ? props.onExpand : undefined}
+            tabIndex={collapsed ? 0 : -1}
+            className={cn(
+              "flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl transition-colors",
+              collapsed
+                ? "-ml-0.5 hover:bg-sidebar-accent/75"
+                : "pointer-events-none -ml-0.5",
+            )}
+          >
+            <img
+              src="/brand/nanobot_mark.svg"
+              alt=""
+              className="h-8 w-8 select-none object-contain"
+              draggable={false}
+            />
+          </button>
+          {!collapsed ? (
+            <label className="min-w-0 flex-1">
+              <span className="sr-only">{t("sidebar.botSwitcher")}</span>
+              <select
+                value={props.activeBotId ?? ""}
+                onChange={(event) => props.onSelectBot?.(event.target.value)}
+                disabled={!props.bots?.length}
+                aria-label={t("sidebar.botSwitcher")}
+                className="h-9 w-full truncate rounded-lg border border-sidebar-border/60 bg-sidebar-accent/35 px-2 text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {!props.bots?.length ? (
+                  <option value="">{t("sidebar.noBots")}</option>
+                ) : null}
+                {(props.bots ?? [])
+                  .filter((bot) => !props.activeOrganizationId || bot.organization_id === props.activeOrganizationId)
+                  .map((bot) => (
+                    <option key={bot.id} value={bot.id}>
+                      {bot.name === "Personal bot" ? t("projects.bots.defaultName") : bot.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+          ) : null}
+        </div>
         {!collapsed && !props.hostChromeInset && (
           <Button
             variant="ghost"
@@ -200,7 +233,7 @@ export function Sidebar(props: SidebarProps) {
         />
         <SidebarActionButton
           collapsed={collapsed}
-          label="Projects"
+          label={t("sidebar.projects")}
           onClick={props.onOpenProjects}
           onIntent={props.onProjectsIntent}
           active={props.activeUtility === "projects"}
@@ -298,19 +331,44 @@ export function Sidebar(props: SidebarProps) {
       </div>
       <div
         className={cn(
-          "flex items-center gap-1 bg-sidebar/55 px-2.5 py-3 text-xs",
-          collapsed && "w-14 flex-col px-0",
+          "space-y-2 bg-sidebar/55 px-2.5 py-3 text-xs",
+          collapsed && "w-14 px-0",
         )}
       >
-        <SidebarActionButton
-          collapsed={collapsed}
-          label={t("sidebar.settings")}
-          onClick={props.onOpenSettings}
-          onIntent={props.onSettingsIntent}
-          className={collapsed ? undefined : "flex-1"}
-          icon={<Settings className="h-4 w-4" />}
-        />
-        <ConnectionBadge />
+        {!collapsed ? (
+          <label className="block">
+            <span className="sr-only">{t("sidebar.organizationSwitcher")}</span>
+            <select
+              value={props.activeOrganizationId ?? ""}
+              onChange={(event) => props.onSelectOrganization?.(event.target.value)}
+              disabled={!props.organizations?.length}
+              aria-label={t("sidebar.organizationSwitcher")}
+              className="h-10 w-full truncate rounded-lg border border-sidebar-border/60 bg-sidebar-accent/35 px-2.5 text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {!props.organizations?.length ? (
+                <option value="">{t("sidebar.noOrganizations")}</option>
+              ) : null}
+              {(props.organizations ?? []).map((organization) => (
+                <option key={organization.id} value={organization.id}>
+                  {organization.is_personal
+                    ? t("sidebar.personalOrganization", { name: organization.name })
+                    : organization.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        <div className={cn("flex items-center gap-1", collapsed && "flex-col")}>
+          <SidebarActionButton
+            collapsed={collapsed}
+            label={t("sidebar.settings")}
+            onClick={props.onOpenSettings}
+            onIntent={props.onSettingsIntent}
+            className={collapsed ? undefined : "flex-1"}
+            icon={<Settings className="h-4 w-4" />}
+          />
+          <ConnectionBadge />
+        </div>
       </div>
     </nav>
   );

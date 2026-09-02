@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useCollaborationProjects } from "@/hooks/useCollaborationProjects";
 import * as api from "@/lib/api";
 import type {
+  CollaborationBot,
   CollaborationOrganization,
   CollaborationOrganizationPayload,
   CollaborationPayload,
@@ -18,6 +19,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return {
     ...actual,
     fetchCollaboration: vi.fn(),
+    fetchCollaborationBot: vi.fn(),
     fetchCollaborationOrganization: vi.fn(),
     fetchCollaborationProject: vi.fn(),
   };
@@ -78,11 +80,15 @@ function collaboration(
   organizations: CollaborationOrganization[],
   projects: CollaborationProject[],
   activeProjectId: string | null = null,
+  bots: CollaborationBot[] = [],
 ): CollaborationPayload {
   return {
     user: { id: "user-1", display_name: "Ari" },
     organizations,
     projects,
+    bots,
+    active_organization_id: null,
+    active_bot_id: null,
     active_project_id: activeProjectId,
   };
 }
@@ -119,6 +125,7 @@ describe("useCollaborationProjects", () => {
     vi.mocked(api.fetchCollaboration).mockReset();
     vi.mocked(api.fetchCollaborationOrganization).mockReset();
     vi.mocked(api.fetchCollaborationProject).mockReset();
+    vi.mocked(api.fetchCollaborationBot).mockReset();
   });
 
   it("selects the explicitly personal organization when organization timestamps collide", async () => {
@@ -245,6 +252,57 @@ describe("useCollaborationProjects", () => {
     });
 
     await waitFor(() => expect(result.current.error).toBe("User is not a member of this organization."));
+  });
+
+  it("keeps the active project when switching bots in the same organization", async () => {
+    const studio = organization("org-studio", "Studio");
+    const projectValue = project("project-studio", "Team roadmap", studio.id);
+    const releaseBot: CollaborationBot = {
+      id: "bot-release",
+      organization_id: studio.id,
+      owner_user_id: "user-1",
+      name: "Release bot",
+      avatar_url: null,
+      persona_id: null,
+      state: "active",
+      created_at_ms: timestamp,
+      updated_at_ms: timestamp,
+    };
+    const reviewBot: CollaborationBot = { ...releaseBot, id: "bot-review", name: "Review bot" };
+    const summary = collaboration([studio], [projectValue], projectValue.id, [releaseBot, reviewBot]);
+    const client = fakeClient();
+    client.requestMutation.mockResolvedValue({ user: summary.user });
+
+    vi.mocked(api.fetchCollaboration).mockResolvedValue(summary);
+    vi.mocked(api.fetchCollaborationOrganization).mockResolvedValue(organizationPayload(studio));
+    vi.mocked(api.fetchCollaborationProject).mockResolvedValue(projectPayload(projectValue));
+    vi.mocked(api.fetchCollaborationBot).mockResolvedValue({
+      bot: reviewBot,
+      channels: [],
+      projects: [],
+      project_channels: [],
+      capability_profiles: [],
+    });
+
+    const { result } = renderHook(useCollaborationProjects, { wrapper: wrap(client) });
+    await waitFor(() => expect(result.current.projectId).toBe(projectValue.id));
+
+    act(() => {
+      result.current.selectBot(reviewBot.id);
+    });
+
+    await waitFor(() => expect(result.current.botId).toBe(reviewBot.id));
+    expect(result.current.organizationId).toBe(studio.id);
+    expect(result.current.projectId).toBe(projectValue.id);
+    await waitFor(() => expect(client.requestMutation).toHaveBeenCalledWith(
+      "collaboration.user.defaults",
+      {
+        organization_id: studio.id,
+        bot_id: reviewBot.id,
+        project_id: projectValue.id,
+      },
+      expect.any(Number),
+    ));
   });
 
   it("keeps the backend final-owner error after refreshing project membership", async () => {

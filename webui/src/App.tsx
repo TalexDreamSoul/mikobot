@@ -37,6 +37,7 @@ import { floatingSurfaceElevationClassName } from "@/components/ui/floating-surf
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 
 import { useSessions } from "@/hooks/useSessions";
+import { useCollaborationProjects } from "@/hooks/useCollaborationProjects";
 import { useDeferredTitleRefresh } from "@/hooks/useDeferredTitleRefresh";
 import { useSidebarState } from "@/hooks/useSidebarState";
 import { useSkills } from "@/hooks/useSkills";
@@ -177,6 +178,7 @@ const SETTINGS_SECTION_KEYS: SettingsSectionKey[] = [
   "voice",
   "browser",
   "channels",
+  "login-security",
   "apps",
   "automations",
   "skills",
@@ -1119,6 +1121,7 @@ function Shell({
 }) {
   const { t, i18n } = useTranslation();
   const { client, getToken } = useClient();
+  const collaboration = useCollaborationProjects();
   const { theme, toggle } = useTheme();
   const {
     sessions,
@@ -2632,6 +2635,12 @@ function Shell({
 
   const sidebarProps = {
     sessions: sidebarTopicSessions,
+    organizations: collaboration.summary?.organizations ?? [],
+    bots: collaboration.summary?.bots ?? [],
+    activeOrganizationId: collaboration.organizationId,
+    activeBotId: collaboration.botId,
+    onSelectOrganization: collaboration.selectOrganization,
+    onSelectBot: collaboration.selectBot,
     temporarySessions: temporarySessionList,
     activeKey: view === "chat"
       ? (temporaryChatActive ? activeKey : activeSidebarKey)
@@ -2968,6 +2977,7 @@ function Shell({
               <div className="absolute inset-0 flex flex-col">
                 <Suspense fallback={<SurfaceLoadingFallback />}>
                   <ProjectsView
+                    projects={collaboration}
                     onToggleSidebar={toggleSidebar}
                     hostChromeInset={showHostChrome}
                   />

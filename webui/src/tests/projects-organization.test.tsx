@@ -5,7 +5,6 @@ import { describe, expect, it, vi } from "vitest";
 import { OrganizationManagement } from "@/components/projects/OrganizationManagement";
 import { ProjectMembersPanel } from "@/components/projects/ProjectMembersPanel";
 import { ProjectsView } from "@/components/projects/ProjectsView";
-import { useCollaborationProjects } from "@/hooks/useCollaborationProjects";
 import type {
   CollaborationOrganization,
   CollaborationOrganizationMember,
@@ -16,10 +15,7 @@ import type {
   CollaborationProjectPayload,
   CollaborationProjectRole,
 } from "@/lib/types";
-
-vi.mock("@/hooks/useCollaborationProjects", () => ({
-  useCollaborationProjects: vi.fn(),
-}));
+import { ClientProvider } from "@/providers/ClientProvider";
 
 const timestamp = 1_735_689_600_000;
 
@@ -112,7 +108,7 @@ describe("OrganizationManagement", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "New organization name" }), {
       target: { value: "  Design guild  " },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create organization" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create a shared organization" }));
     await waitFor(() => expect(props.onCreate).toHaveBeenCalledWith("Design guild"));
 
     fireEvent.change(screen.getByRole("textbox", { name: "Organization name" }), {
@@ -324,12 +320,15 @@ describe("ProjectsView organization scope", () => {
     };
     const selectOrganization = vi.fn();
 
-    vi.mocked(useCollaborationProjects).mockReturnValue({
+    const projects = {
       summary: {
         user: { id: "user-1", display_name: "Ari" },
         organizations: [personal, studio],
         projects: [privateProject, sharedProject],
+        bots: [],
         active_project_id: sharedProject.id,
+        active_organization_id: studio.id,
+        active_bot_id: null,
       },
       organizationId: studio.id,
       personalOrganizationId: personal.id,
@@ -345,6 +344,7 @@ describe("ProjectsView organization scope", () => {
       setError: vi.fn(),
       selectOrganization,
       selectProject: vi.fn(),
+      selectBot: vi.fn(),
       reload: vi.fn(),
       refreshOrganization: vi.fn(),
       refreshDetail: vi.fn(),
@@ -352,6 +352,11 @@ describe("ProjectsView organization scope", () => {
       renameOrganization: vi.fn(),
       removeOrganization: vi.fn(),
       addOrganizationMember: vi.fn(),
+      createBot: vi.fn(),
+      updateBotState: vi.fn(),
+      beginPairing: vi.fn(),
+      finishPairing: vi.fn(),
+      saveBotCapabilities: vi.fn(),
       removeOrganizationMember: vi.fn(),
       addProjectMember: vi.fn(),
       removeProjectMember: vi.fn(),
@@ -364,9 +369,9 @@ describe("ProjectsView organization scope", () => {
       createContextSource: vi.fn(),
       toggleContextSource: vi.fn(),
       deleteContextSource: vi.fn(),
-    } as never);
+    } as never;
 
-    render(<ProjectsView onToggleSidebar={vi.fn()} />);
+    render(<ProjectsView projects={projects} onToggleSidebar={vi.fn()} />);
 
     const mobileOrganizationSelector = document.getElementById("mobile-organization-switcher");
     expect(mobileOrganizationSelector).toHaveAccessibleName("Organization scope");
@@ -377,5 +382,70 @@ describe("ProjectsView organization scope", () => {
     const projectSelector = screen.getByRole("combobox", { name: "Current project" });
     expect(within(projectSelector).getByRole("option", { name: "Team roadmap" })).toBeInTheDocument();
     expect(within(projectSelector).queryByRole("option", { name: "Private roadmap" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the Bots panel available for an organization with no projects", () => {
+    const studio = organization("org-studio", "Studio");
+    const projects = {
+      summary: {
+        user: { id: "user-1", display_name: "Ari" },
+        organizations: [studio],
+        projects: [],
+        bots: [],
+        active_project_id: null,
+        active_organization_id: studio.id,
+        active_bot_id: null,
+      },
+      organizationId: studio.id,
+      personalOrganizationId: null,
+      projectId: null,
+      detail: null,
+      loading: false,
+      detailLoading: false,
+      organizationDetail: null,
+      organizationLoading: false,
+      organizationError: null,
+      busyKey: null,
+      error: null,
+      setError: vi.fn(),
+      selectOrganization: vi.fn(),
+      selectProject: vi.fn(),
+      selectBot: vi.fn(),
+      reload: vi.fn(),
+      refreshOrganization: vi.fn(),
+      refreshDetail: vi.fn(),
+      createOrganization: vi.fn(),
+      renameOrganization: vi.fn(),
+      removeOrganization: vi.fn(),
+      addOrganizationMember: vi.fn(),
+      removeOrganizationMember: vi.fn(),
+      createBot: vi.fn(),
+      updateBotState: vi.fn(),
+      beginPairing: vi.fn(),
+      finishPairing: vi.fn(),
+      saveBotCapabilities: vi.fn(),
+      addProjectMember: vi.fn(),
+      removeProjectMember: vi.fn(),
+      createProject: vi.fn(),
+      createTaskList: vi.fn(),
+      createTask: vi.fn(),
+      updateTaskStatus: vi.fn(),
+      deleteTask: vi.fn(),
+      saveExtensions: vi.fn(),
+      createContextSource: vi.fn(),
+      toggleContextSource: vi.fn(),
+      deleteContextSource: vi.fn(),
+    } as never;
+
+    render(
+      <ClientProvider client={{ status: "open", onStatus: () => () => {} } as never} token="token">
+        <ProjectsView projects={projects} onToggleSidebar={vi.fn()} />
+      </ClientProvider>,
+    );
+
+    const botsButton = screen.getByRole("button", { name: "Bots" });
+    expect(botsButton).toBeInTheDocument();
+    fireEvent.click(botsButton);
+    expect(screen.getByRole("heading", { name: "Bots" })).toBeInTheDocument();
   });
 });

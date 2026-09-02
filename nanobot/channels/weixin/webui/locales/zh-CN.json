@@ -52,6 +52,8 @@
     "expired": "微信登录已过期，请重新扫码连接。",
     "failed": "无法连接微信，请重试。",
     "verifyPlaceholder": "验证码",
-    "verifySubmit": "验证"
+    "verifySubmit": "验证",
+    "pairingOnly": "等待配对码",
+    "addBot": "添加另一个微信机器人"
   }
 }

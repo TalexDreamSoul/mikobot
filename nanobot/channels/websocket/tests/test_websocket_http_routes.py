@@ -592,6 +592,7 @@ async def test_webui_skills_route_requires_token_and_hides_paths(
             "name": "workspace-skill",
             "description": "Workspace skill.",
             "source": "workspace",
+            "logical_path": "workspace/workspace-skill/SKILL.md",
             "enabled": True,
             "deletable": True,
             "available": True,
@@ -1496,13 +1497,15 @@ async def test_feishu_connect_routes_write_config_and_hot_reload(
     assert body["status"] == "succeeded"
     assert body["instance_id"] == "default"
     assert "app_secret" not in body
-    assert calls == [("enable", "feishu", "default")]
+    assert body["pairing_required"] is True
+    assert calls == [("pairing", "feishu", "default")]
     assert body["nanobot_features"]["requires_restart"] is False
     data = json.loads(config_path.read_text(encoding="utf-8"))
     assert data["channels"]["feishu"]["instances"][0]["id"] == "default"
     assert data["channels"]["feishu"]["instances"][0]["appId"] == "cli_app"
     assert data["channels"]["feishu"]["instances"][0]["appSecret"] == "secret"
-    assert data["channels"]["feishu"]["instances"][0]["enabled"] is True
+    assert data["channels"]["feishu"]["instances"][0]["enabled"] is False
+    assert data["channels"]["feishu"]["instances"][0]["pairingRequired"] is True
     assert data["channels"]["feishu"]["instances"][0]["displayName"] == "Voraflare Bot"
     assert data["channels"]["feishu"]["instances"][0]["avatarUrl"] == "https://example.com/feishu.png"
 

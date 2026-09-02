@@ -16,6 +16,13 @@ from nanobot.agent.tools.context import (
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.collaboration import (
+    COLLABORATION_VAULT_METADATA_KEY,
+    CollaborationPermissionError,
+    ConversationScope,
+    ConversationScopeKind,
+)
+from nanobot.collaboration.pairing import BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY
 from nanobot.config.schema import Config
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 from nanobot.session.turn_continuation import INTERNAL_CONTINUATION_META
@@ -295,3 +302,57 @@ async def test_process_message_captures_original_text_before_restore(
         )
 
     assert seen == [(expected, runtime)]
+
+
+@pytest.mark.asyncio
+async def test_strict_route_denial_stops_before_full_tools_or_vault_session_access(
+    tmp_path: Path,
+) -> None:
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.chat_with_retry = AsyncMock()
+    collaboration = MagicMock()
+    collaboration.ensure_identity_user = AsyncMock(return_value=(MagicMock(), None))
+    collaboration.resolve_scope = AsyncMock(
+        return_value=ConversationScope(
+            ConversationScopeKind.ISOLATED,
+            "external-user",
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+            "isolated-route",
+            route_denied=True,
+        )
+    )
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+        collaboration_repository=collaboration,
+    )
+    private_tool = _ContextRecordingTool()
+    loop.tools = _Tools(private_tool)
+    loop.runner.run = AsyncMock()
+    message = InboundMessage(
+        channel="feishu.team",
+        sender_id="external-user",
+        chat_id="group-42",
+        content="inspect the private workspace",
+        metadata={BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY: True},
+    )
+
+    with pytest.raises(CollaborationPermissionError, match="no enabled bot-project route"):
+        await loop._process_message(message)
+
+    provider.chat_with_retry.assert_not_awaited()
+    loop.runner.run.assert_not_awaited()
+    assert private_tool.contexts == []
+    session = loop.sessions.get_cached(message.session_key)
+    assert session is not None
+    assert COLLABORATION_VAULT_METADATA_KEY not in session.metadata
+    assert session.messages == []

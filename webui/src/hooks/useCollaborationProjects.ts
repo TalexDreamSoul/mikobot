@@ -3,8 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addCollaborationOrganizationMember,
   addCollaborationProjectMember,
+  consumeCollaborationPairingChallenge,
+  createCollaborationBot,
   createCollaborationContextSource,
   createCollaborationOrganization,
+  createCollaborationPairingChallenge,
   createCollaborationProject,
   createCollaborationTask,
   createCollaborationTaskList,
@@ -12,20 +15,26 @@ import {
   deleteCollaborationOrganization,
   deleteCollaborationTask,
   fetchCollaboration,
+  fetchCollaborationBot,
   fetchCollaborationOrganization,
   fetchCollaborationProject,
   removeCollaborationOrganizationMember,
   removeCollaborationProjectMember,
+  updateCollaborationBot,
+  updateCollaborationBotCapabilities,
   updateCollaborationContextSource,
+  updateCollaborationDefaults,
   updateCollaborationExtensions,
   updateCollaborationOrganization,
   updateCollaborationTask,
 } from "@/lib/api";
 import type {
+  CollaborationBotPayload,
   CollaborationEditableContextSourceKind,
   CollaborationExtensionSettings,
   CollaborationOrganizationPayload,
   CollaborationOrganizationRole,
+  CollaborationPairingPurpose,
   CollaborationPayload,
   CollaborationProjectPayload,
   CollaborationProjectRole,
@@ -58,6 +67,9 @@ export function useCollaborationProjects() {
   const [organizationDetail, setOrganizationDetail] = useState<CollaborationOrganizationPayload | null>(null);
   const [organizationLoading, setOrganizationLoading] = useState(false);
   const [organizationError, setOrganizationError] = useState<string | null>(null);
+  const [botId, setBotId] = useState<string | null>(null);
+  const [botDetail, setBotDetail] = useState<CollaborationBotPayload | null>(null);
+  const [botDetailLoading, setBotDetailLoading] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CollaborationProjectPayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -66,26 +78,49 @@ export function useCollaborationProjects() {
   const [error, setError] = useState<string | null>(null);
   const detailRequestRef = useRef(0);
   const organizationRequestRef = useRef(0);
+  const botRequestRef = useRef(0);
 
   const loadSummary = useCallback(async (
     preferredProjectId?: string | null,
     preferredOrganizationId?: string | null,
   ) => {
     const next = await fetchCollaboration(getToken());
+    const nextBots = next.bots ?? [];
+    const normalized = {
+      ...next,
+      bots: nextBots,
+      active_organization_id: next.active_organization_id ?? null,
+      active_bot_id: next.active_bot_id ?? null,
+    };
     const activeProject = next.projects.find((project) => project.id === next.active_project_id);
     const personalId = personalOrganizationId(next);
-    setSummary(next);
+    const activeOrganizationId = (
+      preferredOrganizationId
+      ?? next.active_organization_id
+      ?? activeProject?.organization_id
+      ?? personalId
+      ?? next.organizations[0]?.id
+      ?? null
+    );
+    setSummary(normalized);
     setOrganizationId((current) => {
-      const preferred = preferredOrganizationId ?? current ?? activeProject?.organization_id ?? personalId;
+      const preferred = preferredOrganizationId ?? current ?? activeOrganizationId;
       if (preferred && next.organizations.some((organization) => organization.id === preferred)) return preferred;
-      return activeProject?.organization_id ?? personalId ?? next.organizations[0]?.id ?? null;
+      return activeOrganizationId;
+    });
+    setBotId((current) => {
+      const preferred = current ?? normalized.active_bot_id;
+      if (preferred && nextBots.some((bot) => bot.id === preferred)) return preferred;
+      return nextBots.find((bot) => bot.organization_id === activeOrganizationId)?.id
+        ?? nextBots[0]?.id
+        ?? null;
     });
     setProjectId((current) => {
       const preferred = preferredProjectId ?? current ?? next.active_project_id;
       if (preferred && next.projects.some((project) => project.id === preferred)) return preferred;
       return next.projects[0]?.id ?? null;
     });
-    return next;
+    return normalized;
   }, [getToken]);
 
   const loadOrganization = useCallback(async (nextOrganizationId: string) => {
@@ -120,6 +155,19 @@ export function useCollaborationProjects() {
     }
   }, [getToken]);
 
+  const loadBotDetail = useCallback(async (nextBotId: string) => {
+    const request = botRequestRef.current + 1;
+    botRequestRef.current = request;
+    setBotDetailLoading(true);
+    try {
+      const next = await fetchCollaborationBot(getToken(), nextBotId);
+      if (botRequestRef.current === request) setBotDetail(next);
+      return next;
+    } finally {
+      if (botRequestRef.current === request) setBotDetailLoading(false);
+    }
+  }, [getToken]);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -140,6 +188,12 @@ export function useCollaborationProjects() {
       setProjectId(null);
       return;
     }
+    setBotId((current) => {
+      if (current && summary.bots.some((bot) => (
+        bot.id === current && bot.organization_id === organizationId
+      ))) return current;
+      return summary.bots.find((bot) => bot.organization_id === organizationId)?.id ?? null;
+    });
     setProjectId((current) => {
       if (current && summary.projects.some((project) => (
         project.id === current && project.organization_id === organizationId
@@ -184,6 +238,15 @@ export function useCollaborationProjects() {
     setDetail(null);
     void refreshDetail();
   }, [refreshDetail]);
+
+  useEffect(() => {
+    if (!botId) {
+      setBotDetail(null);
+      return;
+    }
+    setBotDetail(null);
+    void loadBotDetail(botId).catch((reason) => setError(errorMessage(reason)));
+  }, [botId, loadBotDetail]);
 
   const run = useCallback(async (
     key: string,
@@ -288,6 +351,92 @@ export function useCollaborationProjects() {
     ));
   }, [client, organizationId, runOrganization]);
 
+  const createBot = useCallback(async (name: string) => {
+    if (!organizationId) throw new Error("Select an organization first.");
+    setBusyKey("bot:create");
+    setError(null);
+    try {
+      const { bot } = await createCollaborationBot(client, {
+        organizationId,
+        name,
+      });
+      setBotId(bot.id);
+      await loadSummary(projectId, organizationId);
+      await loadBotDetail(bot.id);
+      return bot;
+    } catch (reason) {
+      setError(errorMessage(reason));
+      throw reason;
+    } finally {
+      setBusyKey(null);
+    }
+  }, [client, loadBotDetail, loadSummary, organizationId, projectId]);
+
+  const updateBotState = useCallback(async (state: "active" | "disabled") => {
+    if (!botId) throw new Error("Select a bot first.");
+    await run("bot:state", () => updateCollaborationBot(client, botId, { state }));
+    await loadSummary(projectId, organizationId);
+    await loadBotDetail(botId);
+  }, [botId, client, loadBotDetail, loadSummary, organizationId, projectId, run]);
+
+  const beginPairing = useCallback(async (values: {
+    purpose: CollaborationPairingPurpose;
+    channelType: string;
+    instanceId: string;
+    projectId?: string | null;
+  }) => {
+    if (!organizationId || !botId) throw new Error("Select an organization and bot first.");
+    setBusyKey("pairing:create");
+    setError(null);
+    try {
+      return await createCollaborationPairingChallenge(client, {
+        ...values,
+        organizationId,
+        botId,
+      });
+    } catch (reason) {
+      setError(errorMessage(reason));
+      throw reason;
+    } finally {
+      setBusyKey(null);
+    }
+  }, [botId, client, organizationId]);
+
+  const finishPairing = useCallback(async (challengeId: string) => {
+    setBusyKey("pairing:consume");
+    setError(null);
+    try {
+      const result = await consumeCollaborationPairingChallenge(client, challengeId);
+      if (botId) await loadBotDetail(botId);
+      if (projectId) await loadDetail(projectId);
+      return result;
+    } catch (reason) {
+      setError(errorMessage(reason));
+      throw reason;
+    } finally {
+      setBusyKey(null);
+    }
+  }, [botId, client, loadBotDetail, loadDetail, projectId]);
+
+  const saveBotCapabilities = useCallback(async (
+    settings: CollaborationExtensionSettings,
+    targetProjectId?: string | null,
+  ) => {
+    if (!botId) throw new Error("Select a bot first.");
+    const prior = botDetail?.capability_profiles.find(
+      (profile) => profile.project_id === (targetProjectId ?? null),
+    );
+    return run("bot:capabilities", () => updateCollaborationBotCapabilities(
+      client,
+      botId,
+      settings,
+      { projectId: targetProjectId, revision: prior?.revision ?? 0 },
+    )).then(async (result) => {
+      await loadBotDetail(botId);
+      return result;
+    });
+  }, [botDetail, botId, client, loadBotDetail, run]);
+
   const createProject = useCallback(async (name: string) => {
     if (!organizationId) throw new Error("Select an organization first.");
     setBusyKey("project:create");
@@ -391,12 +540,52 @@ export function useCollaborationProjects() {
     setOrganizationLoading(true);
     setOrganizationError(null);
     setDetail(null);
+    setBotDetail(null);
     setOrganizationId(nextOrganizationId);
-  }, []);
+    const nextBot = summary?.bots.find((bot) => bot.organization_id === nextOrganizationId);
+    const nextProject = summary?.projects.find(
+      (project) => project.organization_id === nextOrganizationId,
+    );
+    setBotId(nextBot?.id ?? null);
+    setProjectId(nextProject?.id ?? null);
+    if (nextBot) {
+      void updateCollaborationDefaults(client, {
+        organizationId: nextOrganizationId,
+        botId: nextBot.id,
+        projectId: nextProject?.id,
+      }).then(() => loadSummary(nextProject?.id, nextOrganizationId))
+        .catch((reason) => setError(errorMessage(reason)));
+    }
+  }, [client, loadSummary, summary]);
+  const selectBot = useCallback((nextBotId: string) => {
+    setBotId(nextBotId);
+    setBotDetail(null);
+    const bot = summary?.bots.find((item) => item.id === nextBotId);
+    if (!bot) return;
+    const currentProject = summary?.projects.find((item) => item.id === projectId);
+    const nextProjectId = currentProject?.organization_id === bot.organization_id
+      ? projectId
+      : summary?.projects.find((item) => item.organization_id === bot.organization_id)?.id ?? null;
+    setOrganizationId(bot.organization_id);
+    setProjectId(nextProjectId);
+    void updateCollaborationDefaults(client, {
+      organizationId: bot.organization_id,
+      botId: bot.id,
+      projectId: nextProjectId,
+    }).then(() => loadSummary(nextProjectId, bot.organization_id))
+      .catch((reason) => setError(errorMessage(reason)));
+  }, [client, loadSummary, projectId, summary]);
   const selectProject = useCallback((nextProjectId: string) => {
     setDetail(null);
     setProjectId(nextProjectId);
-  }, []);
+    if (organizationId && botId) {
+      void updateCollaborationDefaults(client, {
+        organizationId,
+        botId,
+        projectId: nextProjectId,
+      }).catch((reason) => setError(errorMessage(reason)));
+    }
+  }, [botId, client, organizationId]);
 
   return {
     summary,
@@ -405,6 +594,9 @@ export function useCollaborationProjects() {
     organizationLoading,
     organizationError,
     personalOrganizationId: personalId,
+    botId,
+    botDetail,
+    botDetailLoading,
     projectId,
     detail,
     loading,
@@ -413,6 +605,7 @@ export function useCollaborationProjects() {
     error,
     setError,
     selectOrganization,
+    selectBot,
     selectProject,
     reload: loadSummary,
     refreshOrganization,
@@ -422,6 +615,11 @@ export function useCollaborationProjects() {
     removeOrganization,
     addOrganizationMember,
     removeOrganizationMember,
+    createBot,
+    beginPairing,
+    updateBotState,
+    finishPairing,
+    saveBotCapabilities,
     createProject,
     addProjectMember,
     removeProjectMember,
@@ -435,3 +633,5 @@ export function useCollaborationProjects() {
     deleteContextSource,
   };
 }
+
+export type CollaborationProjectsController = ReturnType<typeof useCollaborationProjects>;

@@ -6,10 +6,14 @@ from typing import Any
 
 import pytest
 
+from nanobot.channels.connect import ChannelConnectError
 from nanobot.channels.weixin.connect import WeixinConnectStore
 from nanobot.channels.weixin.runtime import WeixinChannel
 from nanobot.config.loader import save_config
-from nanobot.config.schema import Config
+from nanobot.config.schema import Config, _resolve_tool_config_refs
+
+# Resolve lazy tool-config forward references before constructing Config in isolated tests.
+_resolve_tool_config_refs()
 
 
 @pytest.mark.asyncio
@@ -73,6 +77,116 @@ async def test_weixin_connect_store_saves_confirmed_qr_login(
     assert weixin_cfg.get("token") == "wx-token"
     assert weixin_cfg.get("baseUrl") == "https://weixin.example"
     assert weixin_cfg.get("stateDir") == str(state_dir)
+    assert weixin_cfg.get("enabled") is False
+    assert weixin_cfg.get("pairingRequired") is True
+
+
+@pytest.mark.asyncio
+async def test_weixin_connect_sessions_are_bounded_and_replacing_one_closes_its_old_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thirty-two distinct QR sessions fit; replacing an instance closes its prior client without growing the store."""
+    class FakeChannel:
+        def __init__(self) -> None:
+            self.closed = False
+            self.connect_base_url = "https://weixin.example"
+
+        def connect_load_state(self) -> bool:
+            return False
+
+        def connect_open_client(self) -> None:
+            return None
+
+        async def connect_fetch_qr_code(self, *, force: bool) -> tuple[str, str]:
+            return "qr", "https://qr.example/weixin"
+
+        async def connect_close_client(self) -> None:
+            self.closed = True
+
+    built: list[FakeChannel] = []
+
+    def build(_instance_id: str) -> FakeChannel:
+        channel = FakeChannel()
+        built.append(channel)
+        return channel
+
+    monkeypatch.setattr(WeixinConnectStore, "_build_channel", staticmethod(build))
+    store = WeixinConnectStore()
+    for index in range(32):
+        await store.start(instance_id=f"instance-{index}")
+    with pytest.raises(ChannelConnectError) as rejected:
+        await store.start(instance_id="instance-over-limit")
+    assert rejected.value.status == 429
+
+    old = next(session.channel for session in store._sessions.values() if session.instance_id == "instance-0")
+    await store.start(instance_id="instance-0")
+    assert old.closed is True
+    assert len(store._sessions) == 32
+
+
+@pytest.mark.asyncio
+async def test_weixin_connect_session_rejects_other_actor_poll_and_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connector session can only be polled or cancelled by its creating actor."""
+    class FakeChannel:
+        connect_base_url = "https://weixin.example"
+
+        def connect_load_state(self) -> bool:
+            return False
+
+        def connect_open_client(self) -> None:
+            return None
+
+        async def connect_fetch_qr_code(self, *, force: bool) -> tuple[str, str]:
+            return "actor-qr", "https://qr.example/actor"
+
+        async def connect_close_client(self) -> None:
+            return None
+
+        async def connect_poll_qr_code(
+            self, *, base_url: str, qrcode_id: str, verify_code: str
+        ) -> dict[str, str]:
+            return {"status": "pending"}
+
+        def connect_poll_error_is_retryable(self, _exc: Exception) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        WeixinConnectStore,
+        "_build_channel",
+        staticmethod(lambda _instance_id: FakeChannel()),
+    )
+    store = WeixinConnectStore()
+    started = await store.handle(
+        "start",
+        {
+            "instance_id": ["actor-instance"],
+            "_actor_user_id": ["owner-user"],
+        },
+    )
+    query = {
+        "session_id": [started["session_id"]],
+        "_actor_user_id": ["other-user"],
+    }
+
+    with pytest.raises(ChannelConnectError) as poll_error:
+        await store.handle("poll", query)
+    assert poll_error.value.status == 403
+
+    with pytest.raises(ChannelConnectError) as cancel_error:
+        await store.handle("cancel", query)
+    assert cancel_error.value.status == 403
+    assert started["session_id"] in store._sessions
+
+    cancelled = await store.handle(
+        "cancel",
+        {
+            "session_id": [started["session_id"]],
+            "_actor_user_id": ["owner-user"],
+        },
+    )
+    assert cancelled["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

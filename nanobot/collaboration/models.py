@@ -1,7 +1,7 @@
 """Immutable collaboration domain entities.
 
-The collaboration subsystem deliberately models only the local, single-instance
-concepts needed to partition work.  Persistence and authorization live in
+The collaboration subsystem models tenant, project, bot, and channel-instance
+boundaries needed to partition work.  Persistence and authorization live in
 :mod:`nanobot.collaboration.store`.
 """
 
@@ -21,6 +21,7 @@ COLLABORATION_USER_METADATA_KEY = "collaboration_user_id"
 COLLABORATION_PROJECT_METADATA_KEY = "collaboration_project_id"
 COLLABORATION_BINDING_METADATA_KEY = "collaboration_binding_id"
 COLLABORATION_VAULT_METADATA_KEY = "collaboration_vault_id"
+COLLABORATION_BOT_METADATA_KEY = "collaboration_bot_id"
 
 
 
@@ -75,6 +76,16 @@ class ContextSourceKind(StrEnum):
     CUSTOM = "custom"
 
 
+class BotState(StrEnum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
+class PairingPurpose(StrEnum):
+    CLAIM_CHANNEL = "claim_channel"
+    ASSIGN_BOT_PROJECT = "assign_bot_project"
+
+
 @dataclass(frozen=True, slots=True)
 class User:
     id: str
@@ -85,6 +96,8 @@ class User:
     # Optional only for backward-compatible decoding of the original single-user store.
     default_vault_id: str | None = None
     default_persona_id: str | None = None
+    default_organization_id: str | None = None
+    default_bot_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +148,73 @@ class Persona:
     instructions: str
     created_at_ms: int
     updated_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class Bot:
+    id: str
+    organization_id: str
+    owner_user_id: str
+    name: str
+    avatar_url: str | None
+    persona_id: str | None
+    state: BotState
+    created_at_ms: int
+    updated_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class BotProjectAssignment:
+    bot_id: str
+    project_id: str
+    assigned_by_user_id: str
+    created_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class BotChannelAssignment:
+    bot_id: str
+    channel_type: str
+    instance_id: str
+    claimed_by_user_id: str
+    created_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class BotProjectChannel:
+    bot_id: str
+    project_id: str
+    channel_type: str
+    instance_id: str
+    enabled: bool
+    updated_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class BotCapabilityProfile:
+    bot_id: str
+    project_id: str | None
+    revision: int
+    settings: JsonObject
+    updated_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class PairingChallenge:
+    id: str
+    code_digest: str
+    requested_by_user_id: str
+    purpose: PairingPurpose
+    organization_id: str
+    bot_id: str
+    project_id: str | None
+    channel_type: str
+    instance_id: str
+    expires_at_ms: int
+    verified_at_ms: int | None
+    verified_sender_id: str | None
+    consumed_at_ms: int | None
+    created_at_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +373,9 @@ class ConversationScope:
     session_suffix: str
     vault_id: str | None = None
     persona_id: str | None = None
+    bot_id: str | None = None
+    bot: Bot | None = None
+    route_denied: bool = False
 
     @property
     def is_isolated(self) -> bool:

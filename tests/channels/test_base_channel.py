@@ -67,6 +67,32 @@ def test_is_allowed_pairing_fallback(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_required_assignment_authorization_blocks_legacy_allowlist_until_channel_claim() -> None:
+    """Protected transports ignore legacy allowFrom grants until their assignment authorizer approves the sender."""
+    bus = MessageBus()
+    channel = _DummyChannel({"allowFrom": ["*"]}, bus)
+    channel.require_assignment_authorization = True
+
+    async def denied(_sender_id: str) -> bool:
+        return False
+
+    channel.assignment_authorization_handler = denied
+    await channel._handle_message(
+        sender_id="legacy-approved", chat_id="chat", content="ordinary", is_dm=False
+    )
+    assert bus.inbound_size == 0
+
+    async def claimed(_sender_id: str) -> bool:
+        return True
+
+    channel.assignment_authorization_handler = claimed
+    await channel._handle_message(
+        sender_id="claimed", chat_id="chat", content="ordinary", is_dm=False
+    )
+    assert (await bus.consume_inbound()).sender_id == "claimed"
+
+
+@pytest.mark.asyncio
 async def test_handle_message_dm_sends_pairing_code(monkeypatch) -> None:
     channel = _DummyChannel({"allowFrom": []}, MessageBus())
     monkeypatch.setattr(

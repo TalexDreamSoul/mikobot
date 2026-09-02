@@ -19,6 +19,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
+from filelock import FileLock
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
@@ -732,23 +733,12 @@ def save_registration_result(
     name: str | None = None,
 ) -> str:
     """Persist a successful Feishu/Lark registration result to config.json."""
-    from nanobot.config.loader import load_config, save_config
+    from nanobot.config.loader import get_config_path, load_config, save_config
 
-    full_config = load_config()
-    feishu_cfg = _as_json_object(getattr(full_config.channels, "feishu", None)) or {}
-    defaults = feishu_default_config()
+    config_path = get_config_path()
     app_id = str(result["app_id"]).strip()
     domain = str(result.get("domain", "feishu") or "feishu").strip().lower()
     domain = "lark" if domain == "lark" else "feishu"
-    existing = _saved_feishu_instance_for_identity(feishu_cfg, defaults, app_id, domain)
-    effective_instance_id = existing.instance_id if existing is not None else instance_id
-    previous_identity_key = _saved_feishu_instance_identity_key(
-        feishu_cfg,
-        defaults,
-        effective_instance_id,
-    )
-    next_identity_key = feishu_app_identity_key(app_id, domain)
-    identity_changed = bool(previous_identity_key and previous_identity_key != next_identity_key)
     identity: dict[str, str] = {}
     with suppress(Exception):
         identity = fetch_feishu_app_identity(
@@ -756,39 +746,59 @@ def save_registration_result(
             str(result["app_secret"]),
             domain,
         )
-    default_name = (
-        "nanobot"
-        if effective_instance_id == DEFAULT_INSTANCE_ID
-        else f"nanobot {effective_instance_id}"
-    )
-    existing_name = existing.config.get("name") if existing is not None else None
-    saved_name = (
-        existing_name
-        if existing is not None and existing.instance_id != instance_id
-        else name
-    )
-    values = {
-        "name": str(saved_name or default_name),
-        "appId": app_id,
-        "appSecret": result["app_secret"],
-        "domain": domain,
-        "identityKey": next_identity_key,
-        "enabled": True,
-        **identity,
-    }
-    if identity_changed:
-        values["allowFrom"] = []
-        values["allow_from"] = []
-        clear_channel(runtime_channel_name("feishu", effective_instance_id))
-    feishu_cfg = upsert_feishu_instance(
-        feishu_cfg,
-        defaults,
-        effective_instance_id,
-        values,
-    )
-    setattr(full_config.channels, "feishu", feishu_cfg)
-    save_config(full_config)
-    return effective_instance_id
+
+    config_lock = FileLock(str(config_path.with_suffix(f"{config_path.suffix}.lock")))
+    with config_lock:
+        full_config = load_config(config_path)
+        feishu_cfg = _as_json_object(getattr(full_config.channels, "feishu", None)) or {}
+        defaults = feishu_default_config()
+        existing = _saved_feishu_instance_for_identity(feishu_cfg, defaults, app_id, domain)
+        effective_instance_id = existing.instance_id if existing is not None else instance_id
+        previous_identity_key = _saved_feishu_instance_identity_key(
+            feishu_cfg,
+            defaults,
+            effective_instance_id,
+        )
+        next_identity_key = feishu_app_identity_key(app_id, domain)
+        identity_changed = bool(
+            previous_identity_key and previous_identity_key != next_identity_key
+        )
+        default_name = (
+            "nanobot"
+            if effective_instance_id == DEFAULT_INSTANCE_ID
+            else f"nanobot {effective_instance_id}"
+        )
+        existing_name = existing.config.get("name") if existing is not None else None
+        saved_name = (
+            existing_name
+            if existing is not None and existing.instance_id != instance_id
+            else name
+        )
+        # Durable credentials stay disabled; the manager may run a transient
+        # pairing-only listener until the Pair Code is consumed.
+        values: dict[str, Any] = {
+            "name": str(saved_name or default_name),
+            "appId": app_id,
+            "appSecret": result["app_secret"],
+            "domain": domain,
+            "identityKey": next_identity_key,
+            "enabled": False,
+            "pairingRequired": True,
+            **identity,
+        }
+        if identity_changed:
+            values["allowFrom"] = []
+            values["allow_from"] = []
+            clear_channel(runtime_channel_name("feishu", effective_instance_id))
+        feishu_cfg = upsert_feishu_instance(
+            feishu_cfg,
+            defaults,
+            effective_instance_id,
+            values,
+        )
+        setattr(full_config.channels, "feishu", feishu_cfg)
+        save_config(full_config, config_path)
+        return effective_instance_id
 
 
 def refresh_saved_feishu_identities(
@@ -2665,16 +2675,46 @@ class FeishuChannel(BaseChannel):
             while len(self._processed_message_ids) > 1000:
                 self._processed_message_ids.popitem(last=False)
 
-            # Early permission check — avoid side effects for unauthorized users.
-            # Group chats are silently ignored; DMs get a pairing code.
-            if not self.is_allowed(sender_id):
+            # Assignment verification must precede reactions, media downloads, and
+            # the legacy allowlist. Parse only the text needed for this proof.
+            preflight_content = ""
+            if msg_type == "text":
+                raw_preflight = message.content if isinstance(message.content, str) else ""
+                try:
+                    preflight_json = _as_json_object(json.loads(raw_preflight)) or {}
+                except json.JSONDecodeError:
+                    preflight_json = {}
+                preflight_text = preflight_json.get("text")
+                if isinstance(preflight_text, str):
+                    preflight_content = preflight_text.strip()
+            if await self._consume_assignment_pairing(
+                sender_id,
+                sender_id,
+                preflight_content,
+                is_dm=chat_type == "p2p",
+            ):
+                return
+            assignment_allowed = await self._assignment_sender_is_authorized(sender_id)
+            conversation_allowed = True
+            if self.require_assignment_authorization and chat_type == "group":
+                conversation_allowed = await self._assignment_conversation_is_authorized(
+                    sender_id, chat_id
+                )
+            if self.require_assignment_authorization and (
+                (chat_type == "p2p" and not assignment_allowed)
+                or (chat_type == "group" and not conversation_allowed)
+            ):
+                return
+            if (
+                not self.require_assignment_authorization
+                and not assignment_allowed
+                and not self.is_allowed(sender_id)
+            ):
                 if chat_type == "p2p":
-                    # content="" because the pairing reply is generated by
-                    # BaseChannel._handle_message, not from the original message.
                     await self._handle_message(
                         sender_id=sender_id,
                         chat_id=sender_id,
-                        content="",
+                        content=preflight_content,
                         is_dm=True,
                     )
                 return
@@ -2812,6 +2852,7 @@ class FeishuChannel(BaseChannel):
                 },
                 session_key=session_key,
                 is_dm=chat_type == "p2p",
+                authorization_id=chat_id if chat_type == "group" else None,
             )
 
         except Exception:

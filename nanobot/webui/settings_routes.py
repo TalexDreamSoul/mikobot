@@ -365,6 +365,11 @@ class WebUISettingsRouter:
                 if needs_local_browser
                 else False
             ),
+            actor_user_id=getattr(request, "_nanobot_settings_actor_user_id", None),
+            actor_organization_id=getattr(
+                request, "_nanobot_settings_actor_organization_id", None
+            ),
+            system_admin=bool(getattr(request, "_nanobot_settings_system_admin", False)),
         )
 
     def _authorized(self, request: WsRequest) -> bool:

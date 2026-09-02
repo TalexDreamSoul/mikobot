@@ -10,6 +10,7 @@ import {
   applyDocumentLocale,
   defaultLocale,
   fallbackLocale,
+  mergeLocaleMessages,
   normalizeLocale,
   persistLocale,
   resolveInitialLocale,
@@ -54,10 +55,15 @@ async function loadLocaleResources(
 
   const loader = commonLoaders.get(locale);
   if (!loader) throw new Error(`No common locale loader registered for '${locale}'`);
+  const fallbackLoader = commonLoaders.get(fallbackLocale);
+  if (!fallbackLoader) throw new Error(`No fallback locale loader registered for '${fallbackLocale}'`);
 
-  const pending = Promise.all([loader(), channelLocaleResources(locale)])
-    .then(([common, channels]) => {
-      const resource: LocaleResource = { common: common.default, ...channels };
+  const pending = Promise.all([loader(), fallbackLoader(), channelLocaleResources(locale)])
+    .then(([common, fallback, channels]) => {
+      const messages = locale === fallbackLocale
+        ? common.default
+        : mergeLocaleMessages(fallback.default, common.default);
+      const resource: LocaleResource = { common: messages, ...channels };
       resources[locale] = resource;
       if (i18n.isInitialized) {
         for (const [namespace, messages] of Object.entries(resource)) {

@@ -82,3 +82,23 @@ export function applyDocumentLocale(locale: SupportedLocale): void {
 export function localeOption(locale: SupportedLocale) {
   return supportedLocales.find((entry) => entry.code === locale) ?? supportedLocales[0];
 }
+
+type LocaleMessageTree = Record<string, unknown>;
+
+function isLocaleMessageTree(value: unknown): value is LocaleMessageTree {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function mergeLocaleMessages<T extends LocaleMessageTree>(
+  fallback: T,
+  localized: LocaleMessageTree,
+): T {
+  const merged: LocaleMessageTree = { ...fallback };
+  for (const [key, value] of Object.entries(localized)) {
+    const fallbackValue = fallback[key];
+    merged[key] = isLocaleMessageTree(fallbackValue) && isLocaleMessageTree(value)
+      ? mergeLocaleMessages(fallbackValue, value)
+      : value;
+  }
+  return merged as T;
+}

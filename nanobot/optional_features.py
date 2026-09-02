@@ -587,6 +587,8 @@ def with_channel_runtime_status(
                 state = str(status.get("state", "stopped")) if status else "stopped"
                 instance["runtime_status"] = state
                 instance["running"] = state == "running"
+                if status and status.get("pairing_only"):
+                    instance["pairing_only"] = True
                 if status and status.get("error"):
                     instance["runtime_error"] = str(status["error"])
                 decorated_instances.append(instance)

@@ -1,4 +1,5 @@
 import { Children, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import { Brain, Check, Loader2, Server } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -106,6 +107,7 @@ export function ExtensionsPanel({
   busy: boolean;
   onSave: (settings: CollaborationExtensionSettings) => Promise<unknown>;
 }) {
+  const { t } = useTranslation();
   const profile = detail.extension_profile;
   const availableSkillIds = useMemo(
     () => new Set(detail.available.skills.map((skill) => skill.id)),
@@ -161,23 +163,23 @@ export function ExtensionsPanel({
     <section aria-labelledby="project-extensions-title" className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h2 id="project-extensions-title" className="text-lg font-semibold tracking-tight">Extensions</h2>
+          <h2 id="project-extensions-title" className="text-lg font-semibold tracking-tight">{t("projects.extensions.title")}</h2>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-            Compose the capabilities available to you in this project without changing other projects.
+            {t("projects.extensions.description")}
           </p>
         </div>
         <Button type="button" disabled={!dirty || busy} onClick={() => void save()} className="w-full sm:w-auto">
           {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : null}
-          {busy ? "Saving…" : "Save extensions"}
+          {busy ? t("projects.extensions.saving") : t("projects.extensions.save")}
         </Button>
       </div>
 
       <div className="space-y-4">
         <ExtensionGroup
-          title="Skills"
-          description="Selected skills are catalogued with the project. Their full instructions are read on demand only when the work calls for them."
+          title={t("projects.extensions.skills")}
+          description={t("projects.extensions.skillsDescription")}
           icon={<Brain className="h-4 w-4" />}
-          emptyMessage="No skills are currently available."
+          emptyMessage={t("projects.extensions.noSkills")}
         >
           {detail.available.skills.map((skill: CollaborationAvailableSkill) => (
             <SelectionRow
@@ -193,10 +195,10 @@ export function ExtensionsPanel({
         </ExtensionGroup>
 
         <ExtensionGroup
-          title="MCP servers"
-          description="Selecting an MCP server makes it available to this project. It starts and operates only when selected and used."
+          title={t("projects.extensions.mcpServers")}
+          description={t("projects.extensions.mcpDescription")}
           icon={<Server className="h-4 w-4" />}
-          emptyMessage="No MCP servers are currently available."
+          emptyMessage={t("projects.extensions.noMcp")}
         >
           {detail.available.mcp_servers.map((server: CollaborationAvailableMcpServer) => (
             <SelectionRow

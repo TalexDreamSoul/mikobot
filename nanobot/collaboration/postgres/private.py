@@ -127,7 +127,7 @@ class PostgresPrivateMixin(PostgresRepositoryBase):
                 SET default_vault_id = %s, updated_at_ms = %s
                 WHERE id = %s
                 RETURNING id, display_name, default_project_id, created_at_ms, updated_at_ms,
-                          default_vault_id, default_persona_id
+                          default_vault_id, default_persona_id, default_organization_id, default_bot_id
                 """,
                 (vault_id, now, user_id),
             )
@@ -223,7 +223,7 @@ class PostgresPrivateMixin(PostgresRepositoryBase):
                 SET default_persona_id = %s, updated_at_ms = %s
                 WHERE id = %s
                 RETURNING id, display_name, default_project_id, created_at_ms, updated_at_ms,
-                          default_vault_id, default_persona_id
+                          default_vault_id, default_persona_id, default_organization_id, default_bot_id
                 """,
                 (persona_id, now, user_id),
             )
@@ -541,7 +541,7 @@ class PostgresPrivateMixin(PostgresRepositoryBase):
             connection,
             """
             SELECT id, display_name, default_project_id, created_at_ms, updated_at_ms,
-                   default_vault_id, default_persona_id
+                   default_vault_id, default_persona_id, default_organization_id, default_bot_id
             FROM nanobot_collaboration.collaboration_users
             WHERE id = %s
             """,

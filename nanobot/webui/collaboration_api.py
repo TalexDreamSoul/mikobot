@@ -7,11 +7,17 @@ from types import EllipsisType
 from typing import cast
 
 from nanobot.collaboration.models import (
+    Bot,
+    BotCapabilityProfile,
+    BotChannelAssignment,
+    BotProjectAssignment,
+    BotProjectChannel,
     ContextSource,
     ContextSourceKind,
     ExtensionProfile,
     Organization,
     OrganizationMembership,
+    PairingChallenge,
     PersonalTask,
     Project,
     ProjectMembership,
@@ -35,7 +41,84 @@ def user_payload(user: User) -> dict[str, object]:
         "display_name": user.display_name,
         "default_vault_id": user.default_vault_id,
         "default_persona_id": user.default_persona_id,
+        "default_organization_id": user.default_organization_id,
+        "default_bot_id": user.default_bot_id,
     }
+
+
+def bot_payload(bot: Bot) -> dict[str, object]:
+    return {
+        "id": bot.id,
+        "organization_id": bot.organization_id,
+        "owner_user_id": bot.owner_user_id,
+        "name": bot.name,
+        "avatar_url": bot.avatar_url,
+        "persona_id": bot.persona_id,
+        "state": bot.state.value,
+        "created_at_ms": bot.created_at_ms,
+        "updated_at_ms": bot.updated_at_ms,
+    }
+
+
+def bot_project_payload(assignment: BotProjectAssignment) -> dict[str, object]:
+    return {
+        "bot_id": assignment.bot_id,
+        "project_id": assignment.project_id,
+        "assigned_by_user_id": assignment.assigned_by_user_id,
+        "created_at_ms": assignment.created_at_ms,
+    }
+
+
+def bot_channel_payload(assignment: BotChannelAssignment) -> dict[str, object]:
+    return {
+        "bot_id": assignment.bot_id,
+        "channel_type": assignment.channel_type,
+        "instance_id": assignment.instance_id,
+        "claimed_by_user_id": assignment.claimed_by_user_id,
+        "created_at_ms": assignment.created_at_ms,
+    }
+
+
+def bot_project_channel_payload(route: BotProjectChannel) -> dict[str, object]:
+    return {
+        "bot_id": route.bot_id,
+        "project_id": route.project_id,
+        "channel_type": route.channel_type,
+        "instance_id": route.instance_id,
+        "enabled": route.enabled,
+        "updated_at_ms": route.updated_at_ms,
+    }
+
+
+def bot_capability_payload(profile: BotCapabilityProfile) -> dict[str, object]:
+    return {
+        "bot_id": profile.bot_id,
+        "project_id": profile.project_id,
+        "revision": profile.revision,
+        "settings": thaw_json(profile.settings),
+        "updated_at_ms": profile.updated_at_ms,
+    }
+
+
+def pairing_challenge_payload(
+    challenge: PairingChallenge, *, code: str | None = None
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "id": challenge.id,
+        "purpose": challenge.purpose.value,
+        "organization_id": challenge.organization_id,
+        "bot_id": challenge.bot_id,
+        "project_id": challenge.project_id,
+        "channel_type": challenge.channel_type,
+        "instance_id": challenge.instance_id,
+        "expires_at_ms": challenge.expires_at_ms,
+        "verified": challenge.verified_at_ms is not None,
+        "consumed": challenge.consumed_at_ms is not None,
+        "created_at_ms": challenge.created_at_ms,
+    }
+    if code is not None:
+        payload["code"] = code
+    return payload
 
 
 def organization_payload(organization: Organization) -> dict[str, object]:
@@ -201,6 +284,8 @@ def optional_string(payload: Mapping[str, object], name: str) -> str | None:
     if name not in payload:
         return None
     value = payload[name]
+    if value is None:
+        return None
     if not isinstance(value, str) or len(value.strip()) > 16_000:
         raise ValueError(f"{name} must be a string")
     return value.strip()
@@ -212,6 +297,17 @@ def optional_position(payload: Mapping[str, object]) -> int | None:
     value = payload["position"]
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10_000:
         raise ValueError("position must be a non-negative integer")
+    return value
+
+
+def optional_nonnegative_int(
+    payload: Mapping[str, object], key: str
+) -> int | None:
+    if key not in payload:
+        return None
+    value = payload[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{key} must be a non-negative integer")
     return value
 
 

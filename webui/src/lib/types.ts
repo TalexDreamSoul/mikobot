@@ -230,6 +230,7 @@ export interface SkillSummary {
   name: string;
   description: string;
   source: "workspace" | "builtin" | string;
+  logical_path?: string;
   enabled?: boolean;
   deletable?: boolean;
   available: boolean;
@@ -251,6 +252,7 @@ interface SkillInstallOption {
 }
 
 export interface SkillDetail extends SkillSummary {
+  files?: Array<{ path: string; size: number }>;
   requirements: SkillRequirements;
   install_options?: SkillInstallOption[];
   raw_markdown: string;
@@ -420,6 +422,8 @@ export interface CollaborationUser {
   display_name: string;
   default_vault_id?: string | null;
   default_persona_id?: string | null;
+  default_organization_id?: string | null;
+  default_bot_id?: string | null;
 }
 
 export type CollaborationOrganizationRole = "owner" | "admin" | "member";
@@ -447,6 +451,69 @@ export interface CollaborationOrganizationsPayload {
 export interface CollaborationOrganizationPayload {
   organization: CollaborationOrganization;
   members: CollaborationOrganizationMember[];
+}
+
+export type CollaborationBotState = "active" | "disabled";
+
+export interface CollaborationBot {
+  id: string;
+  organization_id: string;
+  owner_user_id: string;
+  name: string;
+  avatar_url: string | null;
+  persona_id: string | null;
+  state: CollaborationBotState;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface CollaborationBotProjectAssignment {
+  bot_id: string;
+  project_id: string;
+  assigned_by_user_id: string;
+  created_at_ms: number;
+}
+
+export interface CollaborationBotChannelAssignment {
+  bot_id: string;
+  channel_type: string;
+  instance_id: string;
+  claimed_by_user_id: string;
+  created_at_ms: number;
+}
+
+export interface CollaborationBotProjectChannel {
+  bot_id: string;
+  project_id: string;
+  channel_type: string;
+  instance_id: string;
+  enabled: boolean;
+  updated_at_ms: number;
+}
+
+export interface CollaborationBotCapabilityProfile {
+  bot_id: string;
+  project_id: string | null;
+  revision: number;
+  settings: CollaborationExtensionSettings;
+  updated_at_ms: number;
+}
+
+export type CollaborationPairingPurpose = "claim_channel" | "assign_bot_project";
+
+export interface CollaborationPairingChallenge {
+  id: string;
+  purpose: CollaborationPairingPurpose;
+  organization_id: string;
+  bot_id: string;
+  project_id: string | null;
+  channel_type: string;
+  instance_id: string;
+  expires_at_ms: number;
+  verified: boolean;
+  consumed: boolean;
+  created_at_ms: number;
+  code?: string;
 }
 
 export interface CollaborationProject {
@@ -535,12 +602,20 @@ export interface CollaborationPayload {
   user: CollaborationUser;
   projects: CollaborationProject[];
   organizations: CollaborationOrganization[];
+  bots: CollaborationBot[];
+  active_organization_id: string | null;
+  active_bot_id: string | null;
   active_project_id: string | null;
 }
 
 export interface CollaborationProjectPayload {
   project: CollaborationProject;
   members: CollaborationProjectMember[];
+  bots: Array<{
+    bot: CollaborationBot;
+    assignment: CollaborationBotProjectAssignment;
+    channels: CollaborationBotProjectChannel[];
+  }>;
   task_lists: CollaborationTaskList[];
   tasks: CollaborationTask[];
   extension_profile: CollaborationExtensionProfile;
@@ -549,6 +624,21 @@ export interface CollaborationProjectPayload {
     mcp_servers: CollaborationAvailableMcpServer[];
   };
   context_sources: CollaborationContextSource[];
+}
+
+export interface CollaborationBotPayload {
+  bot: CollaborationBot;
+  projects: Array<{
+    assignment: CollaborationBotProjectAssignment;
+    project: CollaborationProject;
+  }>;
+  channels: CollaborationBotChannelAssignment[];
+  project_channels: CollaborationBotProjectChannel[];
+  capability_profiles: CollaborationBotCapabilityProfile[];
+}
+
+export interface CollaborationPairingPayload {
+  pairing: CollaborationPairingChallenge;
 }
 
 export type PersonalTaskReviewState = "confirmed" | "proposed" | "dismissed";
@@ -701,6 +791,27 @@ export interface RuntimeCapabilities {
   can_pick_folder: boolean;
   can_open_logs: boolean;
   can_export_diagnostics: boolean;
+}
+
+export interface LoginSecuritySettings {
+  enabled: boolean;
+  issuer: string;
+  client_id: string;
+  client_secret_configured: boolean;
+  redirect_uri: string;
+  scopes: string[];
+  admin_subjects: string[];
+  token_endpoint_auth_method: "none" | "client_secret_basic" | "client_secret_post";
+  session_ttl_s: number;
+  flow_ttl_s: number;
+  session_capacity: number;
+  flow_capacity: number;
+  restart_required_after_save: boolean;
+}
+
+export interface LoginSecurityPayload {
+  login_security: LoginSecuritySettings;
+  requires_restart?: boolean;
 }
 
 interface ProviderModelInfo {
@@ -1186,6 +1297,7 @@ export interface NanobotChannelInstanceInfo {
   enabled: boolean;
   running?: boolean;
   runtime_status?: ChannelRuntimeStatus;
+  pairing_only?: boolean;
   runtime_error?: string;
   configured: boolean;
   config_values: Record<string, string>;
@@ -1372,6 +1484,7 @@ export interface ChannelConnectPayload {
   expires_at_ms?: number;
   app_id?: string;
   account?: string;
+  pairing_required?: boolean;
   nanobot_features?: NanobotFeaturesPayload;
 }
 

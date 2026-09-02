@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -25,7 +26,10 @@ from nanobot.channels.weixin.runtime import (
     sanitize_weixin_markdown,
     split_weixin_message,
 )
-from nanobot.config.schema import Config
+from nanobot.config.schema import Config, _resolve_tool_config_refs
+
+# Resolve lazy tool-config forward references before constructing Config in isolated tests.
+_resolve_tool_config_refs()
 
 
 def _channel(**config: object) -> WeixinChannel:
@@ -95,6 +99,109 @@ def test_channel_manager_preserves_weixin_quota_defaults(
 
     assert channel.send_progress is send_progress
     assert channel.send_tool_hints is send_tool_hints
+
+
+@pytest.mark.asyncio
+async def test_manager_pairing_action_is_transient_then_activate_persists_marker_clear(
+    tmp_path, monkeypatch
+) -> None:
+    """Pairing starts a listener without enabling config; activation enables and clears the marker."""
+    section = {
+        "instances": [
+            {"id": "default", "enabled": False, "pairingRequired": True}
+        ]
+    }
+    config = SimpleNamespace(
+        channels=SimpleNamespace(
+            weixin=section, send_progress=False, send_tool_hints=False, show_reasoning=False
+        )
+    )
+    saved: list[object] = []
+
+    class FakeRuntime:
+        name = "weixin"
+        display_name = "WeChat"
+
+        def __init__(self, _section, _bus, **_kwargs) -> None:
+            self.section = _section
+
+        async def stop(self) -> None:
+            return None
+
+        def progress_transport_defaults(self) -> tuple[bool, bool]:
+            return False, False
+
+    def update_instance_config(
+        current: dict[str, object],
+        values: dict[str, object],
+        *,
+        instance_id: str,
+    ) -> dict[str, object]:
+        instances = [dict(item) for item in current["instances"]]  # type: ignore[index]
+        target = next(item for item in instances if item["id"] == instance_id)
+        target.update(values)
+        return {**current, "instances": instances}
+
+    plugin = SimpleNamespace(
+        name="weixin",
+        display_name="WeChat",
+        default_enabled=False,
+        capabilities=set(),
+        load_channel_class=lambda: FakeRuntime,
+        management=SimpleNamespace(update_instance_config=update_instance_config),
+    )
+    spec = SimpleNamespace(instance_id="default", config=section["instances"][0])
+    from nanobot.channels import manager as manager_mod
+    from nanobot.channels import registry as registry_mod
+
+    monkeypatch.setattr(registry_mod, "discover_plugins", lambda _names=None: {"weixin": plugin})
+    monkeypatch.setattr(manager_mod, "channel_instance_specs", lambda *_args, **_kwargs: [spec])
+    monkeypatch.setattr(manager_mod, "channel_runtime_name", lambda *_args, **_kwargs: "weixin")
+    monkeypatch.setattr(
+        manager_mod,
+        "resolve_channel_action_target",
+        lambda instance_id: instance_id or "default",
+    )
+    monkeypatch.setattr(manager_mod, "channel_setup_spec", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
+    monkeypatch.setattr("nanobot.config.loader.save_config", lambda value, _path: saved.append(value))
+
+    manager = ChannelManager.__new__(ChannelManager)
+    manager.config = config
+    manager.bus = MessageBus()
+    manager._config_path = tmp_path / "config.json"
+    manager.channels = {}
+    manager._channel_owners = {}
+    manager._channel_runtime_specs = {}
+    manager._channel_errors = {}
+    manager._channel_tasks = {}
+    manager._pairing_only_channels = set()
+    manager._started = False
+    manager._collaboration_repository = object()
+    manager._verify_assignment_pairing = AsyncMock(return_value=True)
+
+    pairing = await manager.apply_channel_feature_action("pairing", "weixin", "default")
+
+    assert pairing["ok"] is True
+    assert section["instances"][0]["enabled"] is False
+    assert section["instances"][0]["pairingRequired"] is True
+    assert saved == []
+    listener = manager.channels["weixin"]
+    assert await listener.assignment_pairing_handler("PAIR-CODE", "wx-sender") is True
+    manager._verify_assignment_pairing.assert_awaited_once_with(
+        "weixin", "default", "PAIR-CODE", "wx-sender"
+    )
+
+    activated = await manager.apply_channel_feature_action("activate", "weixin", "default")
+
+    assert activated["ok"] is True
+    activated_instance = config.channels.weixin["instances"][0]
+    assert activated_instance["enabled"] is True
+    assert activated_instance["pairingRequired"] is False
+    assert saved == [config]
+    saved_instance = saved[-1].channels.weixin["instances"][0]
+    assert saved_instance["enabled"] is True
+    assert saved_instance["pairingRequired"] is False
 
 
 @pytest.mark.asyncio

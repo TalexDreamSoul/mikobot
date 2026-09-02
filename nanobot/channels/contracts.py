@@ -600,7 +600,7 @@ def _channel_feature_instance(
         if field_spec.kind != "secret":
             config_values[key] = stringify_channel_value(value)
 
-    return {
+    result = {
         "id": instance.instance_id,
         "name": name,
         "display_name": display_name,
@@ -610,6 +610,9 @@ def _channel_feature_instance(
         "config_values": config_values,
         "configured_fields": configured_fields,
     }
+    if channel_field_value(config, "pairingRequired") is True:
+        result["pairing_only"] = True
+    return result
 
 
 def _config_mapping(value: Any) -> dict[str, Any] | None:

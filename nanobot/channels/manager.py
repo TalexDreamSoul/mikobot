@@ -10,6 +10,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from filelock import FileLock
 from loguru import logger
 
 from nanobot.bus.events import OutboundMessage
@@ -32,6 +33,7 @@ from nanobot.channels.contracts import (
     channel_runtime_name,
     resolve_channel_action_target,
 )
+from nanobot.channels.plugin import ChannelPlugin
 from nanobot.channels.registry import channel_default_enabled
 from nanobot.config.schema import Config
 from nanobot.utils.restart import (
@@ -41,6 +43,7 @@ from nanobot.utils.restart import (
 )
 
 if TYPE_CHECKING:
+    from nanobot.collaboration import CollaborationRepository
     from nanobot.cron.service import CronService
     from nanobot.session.manager import SessionManager
     from nanobot.triggers.local_store import LocalTriggerStore
@@ -94,6 +97,7 @@ class ChannelManager:
         session_manager: "SessionManager | None" = None,
         cron_service: CronService | None = None,
         local_trigger_store: LocalTriggerStore | None = None,
+        collaboration_repository: "CollaborationRepository | None" = None,
         webui_runtime_model_name: Callable[[], str | None] | None = None,
         webui_refresh_runtime_config: Callable[[], None] | None = None,
         webui_cron_pending_job_ids: Callable[[str], set[str]] | None = None,
@@ -119,6 +123,7 @@ class ChannelManager:
         self._session_manager = session_manager
         self._cron_service = cron_service
         self._local_trigger_store = local_trigger_store
+        self._collaboration_repository = collaboration_repository
         self._webui_runtime_model_name = webui_runtime_model_name
         self._webui_refresh_runtime_config = webui_refresh_runtime_config
         self._webui_cron_pending_job_ids = webui_cron_pending_job_ids
@@ -135,6 +140,7 @@ class ChannelManager:
         self._channel_runtime_specs: dict[str, tuple[str, str]] = {}
         self._channel_errors: dict[str, str] = {}
         self._channel_tasks: dict[str, asyncio.Task[None]] = {}
+        self._pairing_only_channels: set[str] = set()
         self._dispatch_task: asyncio.Task[None] | None = None
         self._started = False
         self._origin_reply_fingerprints: dict[tuple[str, str, str], str] = {}
@@ -174,7 +180,6 @@ class ChannelManager:
         kwargs: dict[str, Any] = {}
         if cls.name == "websocket":
             from nanobot.channels.websocket.runtime import WebSocketConfig
-            from nanobot.collaboration import build_collaboration_repository
             from nanobot.webui.gateway_services import build_gateway_services
 
             parsed = WebSocketConfig.model_validate(section)
@@ -203,13 +208,55 @@ class ChannelManager:
                 mcp_reload=self._webui_mcp_reload,
                 skill_state_action=self._webui_skill_state_action,
                 recovery_action=self._webui_recovery_action,
-                collaboration=build_collaboration_repository(self.config.collaboration),
+                collaboration=self._collaboration_repository,
                 logger=logger,
             )
             kwargs["gateway"] = gateway
         channel = cls(section, self.bus, **kwargs)
         if runtime_name and runtime_name != channel.name:
             channel.name = runtime_name
+        runtime_specs = getattr(self, "_channel_runtime_specs", {})
+        runtime_spec = runtime_specs.get(runtime_name or channel.name)
+        collaboration_repository = getattr(self, "_collaboration_repository", None)
+        if collaboration_repository is not None and runtime_spec is not None:
+            channel_type, instance_id = runtime_spec
+
+            async def verify_assignment_pairing(
+                content: str, sender_id: str, *,
+                _channel_type: str = channel_type, _instance_id: str = instance_id,
+            ) -> bool:
+                return await self._verify_assignment_pairing(
+                    _channel_type, _instance_id, content, sender_id
+                )
+
+            channel.assignment_pairing_handler = verify_assignment_pairing
+
+            async def authorize_assignment_sender(
+                sender_id: str, *,
+                _channel_type: str = channel_type,
+                _instance_id: str = instance_id,
+            ) -> bool:
+                return await self._authorize_assignment_sender(
+                    _channel_type, _instance_id, sender_id
+                )
+
+            channel.assignment_authorization_handler = authorize_assignment_sender
+
+            async def authorize_assignment_conversation(
+                sender_id: str,
+                conversation_id: str,
+                *,
+                _channel_type: str = channel_type,
+                _instance_id: str = instance_id,
+            ) -> bool:
+                return await self._authorize_assignment_conversation(
+                    _channel_type, _instance_id, sender_id, conversation_id
+                )
+
+            channel.assignment_conversation_authorization_handler = (
+                authorize_assignment_conversation
+            )
+            channel.require_assignment_authorization = channel_type in {"feishu", "weixin"}
         progress_default, tool_hints_default = channel.progress_transport_defaults() or (
             self.config.channels.send_progress,
             self.config.channels.send_tool_hints,
@@ -224,6 +271,104 @@ class ChannelManager:
             section, "show_reasoning", self.config.channels.show_reasoning,
         )
         return channel
+
+
+    async def _verify_assignment_pairing(
+        self,
+        channel_type: str,
+        instance_id: str,
+        content: str,
+        sender_id: str,
+    ) -> bool:
+        from nanobot.collaboration.pairing import normalize_assignment_code
+        from nanobot.collaboration.store import CollaborationNotFoundError
+
+        repository = self._collaboration_repository
+        if repository is None:
+            return False
+        try:
+            code = normalize_assignment_code(content)
+        except ValueError:
+            return False
+        try:
+            await repository.verify_pairing_challenge(
+                code,
+                channel_type=channel_type,
+                instance_id=instance_id,
+                sender_id=sender_id,
+            )
+        except CollaborationNotFoundError:
+            return False
+        return True
+
+    async def _authorize_assignment_sender(
+        self,
+        channel_type: str,
+        instance_id: str,
+        sender_id: str,
+    ) -> bool:
+        from nanobot.collaboration.models import BotState
+        from nanobot.collaboration.pairing import runtime_channel_key
+
+        repository = self._collaboration_repository
+        if repository is None:
+            return False
+        user = await repository.resolve_identity(
+            runtime_channel_key(channel_type, instance_id), sender_id
+        )
+        if user is None:
+            return False
+        if user.default_project_id is None:
+            return False
+        for bot in await repository.list_bots(user.id):
+            if bot.state is not BotState.ACTIVE:
+                continue
+            routes = await repository.list_bot_project_channels(
+                user.id, bot.id, user.default_project_id
+            )
+            if any(
+                route.enabled
+                and route.channel_type == channel_type
+                and route.instance_id == instance_id
+                for route in routes
+            ):
+                return True
+        return False
+
+    async def _authorize_assignment_conversation(
+        self,
+        channel_type: str,
+        instance_id: str,
+        sender_id: str,
+        conversation_id: str,
+    ) -> bool:
+        from nanobot.collaboration.models import BotState
+        from nanobot.collaboration.pairing import runtime_channel_key
+
+        repository = self._collaboration_repository
+        if repository is None:
+            return False
+        channel = runtime_channel_key(channel_type, instance_id)
+        user = await repository.resolve_identity(channel, sender_id)
+        if user is None:
+            return False
+        binding = await repository.resolve_binding(channel, conversation_id, user.id)
+        if binding is None:
+            return False
+        for bot in await repository.list_bots(user.id):
+            if bot.state is not BotState.ACTIVE:
+                continue
+            routes = await repository.list_bot_project_channels(
+                user.id, bot.id, binding.project_id
+            )
+            if any(
+                route.enabled
+                and route.channel_type == channel_type
+                and route.instance_id == instance_id
+                for route in routes
+            ):
+                return True
+        return False
 
     def _init_channels(self) -> None:
         """Initialize enabled runtimes from dependency-free channel descriptors."""
@@ -443,6 +588,106 @@ class ChannelManager:
             with suppress(asyncio.CancelledError):
                 await task
         return True
+    async def _apply_pairing_only_action(
+        self, plugin: ChannelPlugin, instance_id: str | None
+    ) -> dict[str, Any]:
+        from nanobot.config.loader import load_config
+
+        self.config = load_config()
+        section = self._channel_section(plugin.name, default_enabled=plugin.default_enabled)
+        target_instance_id = resolve_channel_action_target(instance_id)
+        specs = channel_instance_specs(plugin, section, enabled_only=False) if section is not None else []
+        selected = next(
+            (spec for spec in specs if spec.instance_id == target_instance_id), None
+        )
+        if selected is None:
+            return {
+                "handled": True,
+                "ok": False,
+                "requires_restart": True,
+                "message": f"{plugin.display_name} pairing instance was not found.",
+            }
+        runtime_name = channel_runtime_name(plugin, selected.instance_id)
+        try:
+            channel_class = plugin.load_channel_class()
+            pairing_config: dict[str, Any]
+            raw_config = selected.config
+            if hasattr(raw_config, "model_dump"):
+                pairing_config = cast(
+                    dict[str, Any],
+                    raw_config.model_dump(mode="json", by_alias=True),
+                )
+            elif isinstance(raw_config, dict):
+                pairing_config = dict(cast(dict[str, Any], raw_config))
+            else:
+                raise TypeError("channel instance config must be a mapping")
+            pairing_config["enabled"] = True
+            pairing_config["allowFrom"] = []
+            self._channel_runtime_specs[runtime_name] = (
+                plugin.name, selected.instance_id
+            )
+            channel = self._build_channel(
+                plugin.name,
+                channel_class,
+                pairing_config,
+                runtime_name=runtime_name,
+            )
+        except Exception as exc:
+            self._mark_runtime_error((runtime_name,), "Pairing listener could not be started.")
+            logger.exception("Failed to build pairing listener {}", runtime_name)
+            return {
+                "handled": True,
+                "ok": False,
+                "requires_restart": False,
+                "message": f"{plugin.display_name} pairing listener failed: {exc}",
+            }
+
+        if runtime_name in self.channels:
+            await self._stop_channel(runtime_name)
+        self.channels[runtime_name] = channel
+        self._channel_owners[runtime_name] = plugin.name
+        self._channel_errors.pop(runtime_name, None)
+        self._pairing_only_channels.add(runtime_name)
+        if self._started:
+            self._start_channel_task(runtime_name, channel)
+            await asyncio.sleep(0)
+        return {
+            "handled": True,
+            "ok": runtime_name not in self._channel_errors,
+            "requires_restart": False,
+            "message": f"{plugin.display_name} pairing listener is ready.",
+        }
+    def _persist_enabled_instance(
+        self, plugin: ChannelPlugin, section: Any, instance_id: str
+    ) -> Any:
+        from nanobot.config.loader import load_config, save_config
+
+        updater = plugin.management.update_instance_config
+        if updater is None:
+            raise RuntimeError(f"{plugin.name} does not support instance updates")
+        config_lock = FileLock(
+            str(self._config_path.with_suffix(f"{self._config_path.suffix}.lock"))
+        )
+        with config_lock:
+            config = load_config(self._config_path)
+            latest_section = self._channel_section(
+                plugin.name,
+                config=config,
+                default_enabled=plugin.default_enabled,
+            )
+            if latest_section is None:
+                latest_section = section
+            if hasattr(latest_section, "model_dump"):
+                latest_section = latest_section.model_dump(mode="json", by_alias=True)
+            updated_section = updater(
+                latest_section,
+                {"enabled": True, "pairingRequired": False},
+                instance_id=instance_id,
+            )
+            setattr(config.channels, plugin.name, updated_section)
+            save_config(config, self._config_path)
+            self.config = config
+            return updated_section
 
     async def apply_channel_feature_action(
         self,
@@ -473,7 +718,10 @@ class ChannelManager:
                 "requires_restart": True,
                 "message": f"{plugin.display_name} is always enabled and is applied on restart.",
             }
-
+        if action == "activate" and plugin.management.update_instance_config is None:
+            return {"handled": False}
+        if action == "pairing":
+            return await self._apply_pairing_only_action(plugin, instance_id)
         from nanobot.config.loader import load_config
 
         self.config = load_config()
@@ -495,6 +743,7 @@ class ChannelManager:
                 self._channel_owners.pop(runtime_name, None)
             self._channel_runtime_specs.pop(runtime_name, None)
             self._channel_errors.pop(runtime_name, None)
+            self._pairing_only_channels.discard(runtime_name)
             return {
                 "handled": True,
                 "ok": True,
@@ -502,11 +751,18 @@ class ChannelManager:
                 "message": f"{name} channel stopped." if stopped else f"{name} channel disabled.",
             }
 
-        if action != "enable":
+        if action == "activate":
+            section = self._persist_enabled_instance(plugin, section, instance_id)
+            specs = [
+                spec
+                for spec in channel_instance_specs(plugin, section, enabled_only=True)
+                if spec.instance_id == instance_id
+            ]
+        elif action == "enable":
+            specs = channel_instance_specs(plugin, section) if section is not None else []
+            specs = [spec for spec in specs if spec.instance_id == instance_id]
+        else:
             return {"handled": True, "ok": False, "requires_restart": True}
-
-        specs = channel_instance_specs(plugin, section) if section is not None else []
-        specs = [spec for spec in specs if spec.instance_id == instance_id]
         if not specs:
             return {
                 "handled": True,
@@ -514,7 +770,6 @@ class ChannelManager:
                 "requires_restart": True,
                 "message": f"{name} channel config was not enabled.",
             }
-
         runtime_specs = [
             (channel_runtime_name(plugin, spec.instance_id), spec)
             for spec in specs
@@ -591,6 +846,7 @@ class ChannelManager:
         for runtime_name, channel in built:
             self.channels[runtime_name] = channel
             self._channel_owners[runtime_name] = name
+            self._pairing_only_channels.discard(runtime_name)
             self._channel_errors.pop(runtime_name, None)
             if self._started:
                 self._start_channel_task(runtime_name, channel)
@@ -697,6 +953,7 @@ class ChannelManager:
         # Stop all channels
         for name in list(self.channels):
             await self._stop_channel(name)
+        getattr(self, "_pairing_only_channels", set[str]()).clear()
 
     @staticmethod
     def _fingerprint_content(content: str) -> str:
@@ -1045,13 +1302,16 @@ class ChannelManager:
                 state = "starting"
             else:
                 state = "stopped"
+            pairing_only = runtime_name in getattr(self, "_pairing_only_channels", set[str]())
             status[runtime_name] = {
-                "enabled": True,
+                "enabled": not pairing_only,
                 "running": running,
                 "state": state,
                 "owner": owner,
                 "instance_id": instance_id,
             }
+            if pairing_only:
+                status[runtime_name]["pairing_only"] = True
             if error:
                 status[runtime_name]["error"] = error
         return status

@@ -39,7 +39,7 @@ class PostgresIdentityMixin(PostgresRepositoryBase):
         user_id, now = self._new_id(), self._now_ms()
         async with self._actor_transaction(user_id) as connection:
             _organization_id, vault_id = await self._create_private_state(connection, user_id, display_name, now)
-            row = await self._fetch_one(connection, "UPDATE nanobot_collaboration.collaboration_users SET default_vault_id = %s, updated_at_ms = %s WHERE id = %s RETURNING id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id", (vault_id, now, user_id))
+            row = await self._fetch_one(connection, "UPDATE nanobot_collaboration.collaboration_users SET default_vault_id = %s, updated_at_ms = %s WHERE id = %s RETURNING id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id, default_organization_id, default_bot_id", (vault_id, now, user_id))
         if row is None:
             raise CollaborationNotFoundError("user not found")
         return decode_user_row(row)
@@ -48,7 +48,7 @@ class PostgresIdentityMixin(PostgresRepositoryBase):
         user_id = _identifier(user_id, "user_id")
         display_name = _string(display_name, "display_name", limit=256)
         async with self._actor_transaction(user_id) as connection:
-            row = await self._fetch_one(connection, "UPDATE nanobot_collaboration.collaboration_users SET display_name = %s, updated_at_ms = %s WHERE id = %s RETURNING id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id", (display_name, self._now_ms(), user_id))
+            row = await self._fetch_one(connection, "UPDATE nanobot_collaboration.collaboration_users SET display_name = %s, updated_at_ms = %s WHERE id = %s RETURNING id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id, default_organization_id, default_bot_id", (display_name, self._now_ms(), user_id))
         if row is None:
             raise CollaborationNotFoundError("user not found")
         return decode_user_row(row)
@@ -61,7 +61,7 @@ class PostgresIdentityMixin(PostgresRepositoryBase):
 
     async def list_users(self) -> list[User]:
         async with self._actor_transaction("") as connection:
-            rows = await self._fetch_all(connection, "SELECT id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id FROM nanobot_collaboration.collaboration_users ORDER BY created_at_ms, id")
+            rows = await self._fetch_all(connection, "SELECT id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id, default_organization_id, default_bot_id FROM nanobot_collaboration.collaboration_users ORDER BY created_at_ms, id")
         return [decode_user_row(row) for row in rows]
 
     async def update_user_default_project(self, user_id: str, project_id: str | None) -> User:
@@ -71,7 +71,7 @@ class PostgresIdentityMixin(PostgresRepositoryBase):
         async with self._actor_transaction(user_id) as connection:
             if project_id is not None and await self._fetch_one(connection, "SELECT 1 FROM nanobot_collaboration.collaboration_project_memberships WHERE project_id = %s AND user_id = %s", (project_id, user_id)) is None:
                 raise CollaborationPermissionError("project membership is required")
-            row = await self._fetch_one(connection, "UPDATE nanobot_collaboration.collaboration_users SET default_project_id = %s, updated_at_ms = %s WHERE id = %s RETURNING id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id", (project_id, self._now_ms(), user_id))
+            row = await self._fetch_one(connection, "UPDATE nanobot_collaboration.collaboration_users SET default_project_id = %s, updated_at_ms = %s WHERE id = %s RETURNING id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id, default_organization_id, default_bot_id", (project_id, self._now_ms(), user_id))
         if row is None:
             raise CollaborationNotFoundError("user not found")
         return decode_user_row(row)
@@ -119,7 +119,7 @@ class PostgresIdentityMixin(PostgresRepositoryBase):
             if identity is not None:
                 user_id = str(identity["user_id"])
                 await _set_transaction_user(connection, user_id)
-                return await self._default_project(connection, user_id)
+                return await self._default_project(connection, user_id, workspace)
             user_id, now = self._new_id(), self._now_ms()
             await _set_transaction_user(connection, user_id)
             organization_id, vault_id = await self._create_private_state(connection, user_id, "Local owner" if use_local_owner else f"{channel} user", now)
@@ -128,7 +128,7 @@ class PostgresIdentityMixin(PostgresRepositoryBase):
             project_name = "Local project" if use_local_owner else "Personal project"
             await _execute(connection, "INSERT INTO nanobot_collaboration.collaboration_projects (id, organization_id, name, workspace_path, created_by_user_id, created_at_ms, updated_at_ms) VALUES (%s, %s, %s, %s, %s, %s, %s)", (project_id, organization_id, project_name, project_workspace, user_id, now, now))
             await _execute(connection, "INSERT INTO nanobot_collaboration.collaboration_project_memberships (organization_id, project_id, user_id, role, created_at_ms) VALUES (%s, %s, %s, 'owner', %s)", (organization_id, project_id, user_id, now))
-            user_row = await self._fetch_one(connection, "UPDATE nanobot_collaboration.collaboration_users SET default_project_id = %s, default_vault_id = %s, updated_at_ms = %s WHERE id = %s RETURNING id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id", (project_id, vault_id, now, user_id))
+            user_row = await self._fetch_one(connection, "UPDATE nanobot_collaboration.collaboration_users SET default_project_id = %s, default_vault_id = %s, updated_at_ms = %s WHERE id = %s RETURNING id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id, default_organization_id, default_bot_id", (project_id, vault_id, now, user_id))
             if await self._fetch_one(connection, "INSERT INTO nanobot_collaboration.collaboration_identities (organization_id, user_id, channel, sender_id, created_at_ms) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (channel, sender_id) DO NOTHING RETURNING user_id", (organization_id, user_id, channel, sender_id, now)) is None:
                 raise CollaborationConflictError("channel sender identity is already bound")
             project_row = await self._project_row(connection, project_id)
@@ -230,7 +230,7 @@ class PostgresIdentityMixin(PostgresRepositoryBase):
         return organization_id, vault_id
 
     async def _user_row(self, connection: Any, user_id: str):
-        return await self._fetch_one(connection, "SELECT id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id FROM nanobot_collaboration.collaboration_users WHERE id = %s", (user_id,))
+        return await self._fetch_one(connection, "SELECT id, display_name, default_project_id, created_at_ms, updated_at_ms, default_vault_id, default_persona_id, default_organization_id, default_bot_id FROM nanobot_collaboration.collaboration_users WHERE id = %s", (user_id,))
 
     async def _project_row(self, connection: Any, project_id: str):
         return await self._fetch_one(connection, "SELECT id, name, workspace_path, created_by_user_id, created_at_ms, updated_at_ms, organization_id FROM nanobot_collaboration.collaboration_projects WHERE id = %s", (project_id,))
@@ -238,17 +238,103 @@ class PostgresIdentityMixin(PostgresRepositoryBase):
     async def _identity_row(self, connection: Any, channel: str, sender_id: str):
         return await self._fetch_one(connection, "SELECT user_id, channel, sender_id, created_at_ms FROM nanobot_collaboration.collaboration_identities WHERE channel = %s AND sender_id = %s", (channel, sender_id))
 
-    async def _default_project(self, connection: Any, user_id: str) -> tuple[User, Project]:
+    async def _default_project(
+        self, connection: Any, user_id: str, default_workspace: str
+    ) -> tuple[User, Project]:
         row = await self._user_row(connection, user_id)
         if row is None:
             raise CollaborationNotFoundError("identity user not found")
         user = decode_user_row(row)
-        if user.default_project_id is None:
-            raise CollaborationConflictError("channel identity has no default project")
-        project_row = await self._project_row(connection, user.default_project_id)
-        if project_row is None:
-            raise CollaborationConflictError("channel identity default project is missing")
-        return user, decode_project_row(project_row)
+        project_row = (
+            await self._project_row(connection, user.default_project_id)
+            if user.default_project_id is not None
+            else None
+        )
+        if project_row is not None:
+            return user, decode_project_row(project_row)
+
+        personal = await self._fetch_one(connection, """
+            SELECT organization.id AS organization_id, project.id AS project_id,
+                   bot.id AS bot_id
+            FROM nanobot_collaboration.collaboration_organizations AS organization
+            JOIN nanobot_collaboration.collaboration_organization_memberships AS organization_membership
+              ON organization_membership.organization_id = organization.id
+             AND organization_membership.user_id = %s
+             AND organization_membership.role = 'owner'
+            JOIN nanobot_collaboration.collaboration_projects AS project
+              ON project.organization_id = organization.id
+            JOIN nanobot_collaboration.collaboration_project_memberships AS project_membership
+              ON project_membership.organization_id = project.organization_id
+             AND project_membership.project_id = project.id
+             AND project_membership.user_id = %s
+            LEFT JOIN nanobot_collaboration.collaboration_bots AS bot
+              ON bot.organization_id = organization.id
+             AND bot.owner_user_id = %s
+            WHERE organization.created_by_user_id = %s
+              AND organization.is_personal
+            ORDER BY project.created_at_ms, project.id, bot.created_at_ms, bot.id
+            LIMIT 1
+            """, (user_id, user_id, user_id, user_id))
+        if personal is None:
+            organization_id = await self._personal_organization_id(connection, user_id)
+            if organization_id is None:
+                raise CollaborationConflictError("channel identity has no personal organization")
+            project_id = self._new_id()
+            now = self._now_ms()
+            project_workspace = str(
+                Path(default_workspace) / "workspaces" / user_id / "default"
+            )
+            await _execute(connection, """
+                INSERT INTO nanobot_collaboration.collaboration_projects
+                    (id, organization_id, name, workspace_path, created_by_user_id,
+                     created_at_ms, updated_at_ms)
+                VALUES (%s, %s, 'Personal project', %s, %s, %s, %s)
+                """, (project_id, organization_id, project_workspace, user_id, now, now))
+            await _execute(connection, """
+                INSERT INTO nanobot_collaboration.collaboration_project_memberships
+                    (organization_id, project_id, user_id, role, created_at_ms)
+                VALUES (%s, %s, %s, 'owner', %s)
+                """, (organization_id, project_id, user_id, now))
+            personal = await self._fetch_one(connection, """
+                SELECT %s::varchar AS organization_id, %s::varchar AS project_id,
+                       bot.id AS bot_id
+                FROM nanobot_collaboration.collaboration_bots AS bot
+                WHERE bot.organization_id = %s AND bot.owner_user_id = %s
+                ORDER BY bot.created_at_ms, bot.id
+                LIMIT 1
+                """, (organization_id, project_id, organization_id, user_id))
+            if personal is None:
+                personal = {
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "bot_id": None,
+                }
+        if personal["bot_id"] is not None:
+            await _execute(connection, """
+                INSERT INTO nanobot_collaboration.collaboration_bot_project_assignments
+                    (organization_id, bot_id, project_id, assigned_by_user_id, created_at_ms)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """, (
+                    personal["organization_id"], personal["bot_id"],
+                    personal["project_id"], user_id, self._now_ms(),
+                ))
+        restored = await self._fetch_one(connection, """
+            UPDATE nanobot_collaboration.collaboration_users
+            SET default_project_id = %s, default_organization_id = %s,
+                default_bot_id = %s, updated_at_ms = %s
+            WHERE id = %s
+            RETURNING id, display_name, default_project_id, created_at_ms, updated_at_ms,
+                      default_vault_id, default_persona_id, default_organization_id,
+                      default_bot_id
+            """, (
+                personal["project_id"], personal["organization_id"], personal["bot_id"],
+                self._now_ms(), user_id,
+            ))
+        project_row = await self._project_row(connection, str(personal["project_id"]))
+        if restored is None or project_row is None:
+            raise CollaborationStoreFormatError("failed to restore personal defaults")
+        return decode_user_row(restored), decode_project_row(project_row)
 
     async def _personal_organization_id(self, connection: Any, user_id: str) -> str | None:
         row = await self._fetch_one(connection, "SELECT organization.id, organization.is_personal FROM nanobot_collaboration.collaboration_organizations AS organization JOIN nanobot_collaboration.collaboration_organization_memberships AS membership ON membership.organization_id = organization.id WHERE organization.created_by_user_id = %s AND organization.is_personal AND membership.user_id = %s AND membership.role = 'owner' ORDER BY organization.created_at_ms, organization.id LIMIT 1", (user_id, user_id))

@@ -12,6 +12,11 @@ import pytest
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.weixin import runtime as weixin_mod
+from nanobot.channels.weixin.instances import (
+    WEIXIN_MANAGEMENT,
+    weixin_default_config,
+    weixin_instance_specs,
+)
 from nanobot.channels.weixin.runtime import (
     ITEM_IMAGE,
     ITEM_TEXT,
@@ -69,6 +74,44 @@ def test_make_headers_includes_route_tag_when_configured() -> None:
     assert headers["SKRouteTag"] == "123"
     assert headers["iLink-App-Id"] == "bot"
     assert headers["iLink-App-ClientVersion"] == str((2 << 16) | (4 << 8) | 6)
+
+
+def test_weixin_instances_isolate_runtime_names_and_state_but_keep_legacy_default_shape(
+    tmp_path: Path,
+) -> None:
+    """Each configured Weixin instance gets a distinct runtime/state identity; flat config remains default."""
+    state_root = tmp_path / "weixin"
+    specs = weixin_instance_specs(
+        {
+            "stateDir": str(state_root),
+            "instances": [
+                {"id": "default", "enabled": True, "token": "token-default"},
+                {"id": "support", "enabled": True, "token": "token-support"},
+            ],
+        },
+        weixin_default_config(),
+    )
+
+    runtimes = {
+        spec.instance_id: (
+            WEIXIN_MANAGEMENT.runtime_name("weixin", spec.instance_id),
+            WeixinChannel(spec.config, MessageBus())._get_state_dir(),
+        )
+        for spec in specs
+    }
+    assert runtimes == {
+        "default": ("weixin", state_root),
+        "support": ("weixin.support", state_root / "support"),
+    }
+
+    legacy = weixin_instance_specs(
+        {"enabled": True, "token": "legacy-token", "stateDir": str(state_root)},
+        weixin_default_config(),
+    )
+    assert [(spec.instance_id, spec.config["token"], spec.config["stateDir"]) for spec in legacy] == [
+        ("default", "legacy-token", str(state_root))
+    ]
+    assert WEIXIN_MANAGEMENT.runtime_name("weixin", legacy[0].instance_id) == "weixin"
 
 
 def test_channel_version_matches_reference_plugin_version() -> None:
@@ -365,6 +408,114 @@ async def test_process_message_pairs_unauthorized_sender_before_media_side_effec
     assert send_args[0] == "blocked-user"
     assert "ABCD-EFGH" in send_args[1]
     assert send_args[2] == "ctx-blocked"
+    assert bus.inbound_size == 0
+
+
+@pytest.mark.asyncio
+async def test_process_message_consumes_raw_pair_code_before_media_or_typing(tmp_path) -> None:
+    """A verified raw Pair Code bypasses Weixin media and typing side effects."""
+    bus = MessageBus()
+    channel = WeixinChannel(
+        WeixinConfig(enabled=True, allow_from=["*"], state_dir=str(tmp_path)),
+        bus,
+    )
+    pair_code = "ASSIGN-BOT-PROJECT-CODE"
+    observed: list[tuple[str, str]] = []
+
+    async def verify_pairing(content: str, sender_id: str) -> bool:
+        observed.append((content, sender_id))
+        return content == pair_code
+
+    channel.assignment_pairing_handler = verify_pairing
+    channel.send = AsyncMock()
+    channel._download_media_item = AsyncMock(return_value="/tmp/unwanted.jpg")
+    channel._start_typing = AsyncMock()
+
+    await channel._process_message(
+        {
+            "message_type": 1,
+            "message_id": "pair-code-with-media",
+            "from_user_id": "wx-pairer",
+            "context_token": "pair-context",
+            "item_list": [
+                {"type": ITEM_TEXT, "text_item": {"text": pair_code}},
+                {"type": ITEM_IMAGE, "image_item": {"media": {"encrypt_query_param": "x"}}},
+            ],
+        }
+    )
+
+    assert observed == [(pair_code, "wx-pairer")]
+    channel._download_media_item.assert_not_awaited()
+    channel._start_typing.assert_not_awaited()
+    assert channel._context_tokens == {}
+    assert bus.inbound_size == 0
+
+
+@pytest.mark.asyncio
+async def test_process_message_strict_assignment_route_preserves_authorized_text(tmp_path) -> None:
+    """A strictly authorized Weixin direct message preserves non-empty text."""
+    bus = MessageBus()
+    channel = WeixinChannel(
+        WeixinConfig(enabled=True, allow_from=["legacy-user"], state_dir=str(tmp_path)),
+        bus,
+    )
+    content = "ordinary message survives strict route authorization"
+
+    async def authorize(sender_id: str) -> bool:
+        return sender_id == "wx-route-authorized"
+
+    channel.require_assignment_authorization = True
+    channel.assignment_authorization_handler = authorize
+    channel._start_typing = AsyncMock()
+
+    await channel._process_message(
+        {
+            "message_type": 1,
+            "message_id": "strict-authorized-text",
+            "from_user_id": "wx-route-authorized",
+            "context_token": "authorized-context",
+            "item_list": [{"type": ITEM_TEXT, "text_item": {"text": content}}],
+        }
+    )
+
+    inbound = await bus.consume_inbound()
+    assert inbound.sender_id == "wx-route-authorized"
+    assert inbound.content == content
+
+
+@pytest.mark.asyncio
+async def test_process_message_strict_assignment_route_rejects_legacy_allow_from(tmp_path) -> None:
+    """Legacy allowFrom must not authorize a denied strict Weixin route."""
+    bus = MessageBus()
+    channel = WeixinChannel(
+        WeixinConfig(enabled=True, allow_from=["wx-legacy"], state_dir=str(tmp_path)),
+        bus,
+    )
+
+    async def deny_route(_sender_id: str) -> bool:
+        return False
+
+    channel.require_assignment_authorization = True
+    channel.assignment_authorization_handler = deny_route
+    channel._download_media_item = AsyncMock(return_value="/tmp/unwanted.jpg")
+    channel._start_typing = AsyncMock()
+
+    await channel._process_message(
+        {
+            "message_type": 1,
+            "message_id": "strict-legacy-bypass",
+            "from_user_id": "wx-legacy",
+            "context_token": "legacy-context",
+            "item_list": [
+                {"type": ITEM_TEXT, "text_item": {"text": "should not route"}},
+                {"type": ITEM_IMAGE, "image_item": {"media": {"encrypt_query_param": "x"}}},
+            ],
+        }
+    )
+
+    channel._download_media_item.assert_not_awaited()
+    channel._start_typing.assert_not_awaited()
+    assert channel._context_tokens == {}
     assert bus.inbound_size == 0
 
 

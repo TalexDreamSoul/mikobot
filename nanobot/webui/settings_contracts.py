@@ -15,6 +15,9 @@ class SettingsRequest:
     query: QueryParams
     payload: dict[str, Any] | None = None
     local_browser: bool = False
+    actor_user_id: str | None = None
+    actor_organization_id: str | None = None
+    system_admin: bool = False
 
 
 @dataclass(frozen=True)

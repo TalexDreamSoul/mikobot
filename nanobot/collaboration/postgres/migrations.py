@@ -29,6 +29,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
     nanobot_collaboration.collaboration_identities,
     nanobot_collaboration.collaboration_vaults,
     nanobot_collaboration.collaboration_personas,
+    nanobot_collaboration.collaboration_bots,
+    nanobot_collaboration.collaboration_bot_project_assignments,
+    nanobot_collaboration.collaboration_bot_channel_assignments,
+    nanobot_collaboration.collaboration_bot_project_channels,
+    nanobot_collaboration.collaboration_bot_capability_profiles,
+    nanobot_collaboration.collaboration_pairing_challenges,
     nanobot_collaboration.collaboration_share_grants,
     nanobot_collaboration.collaboration_projects,
     nanobot_collaboration.collaboration_project_memberships,
@@ -40,6 +46,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
     nanobot_collaboration.collaboration_context_sources
 TO {role};
 """)
+_RUNTIME_CHANNEL_CLAIM_GRANT = sql.SQL("""
+GRANT SELECT ON TABLE
+    nanobot_collaboration.collaboration_channel_claim_registry
+TO {role};
+""")
+
 _RUNTIME_HELPER_GRANTS = sql.SQL("""
 GRANT EXECUTE ON FUNCTION
     nanobot_collaboration.nanobot_current_user_id(),
@@ -89,7 +101,7 @@ async def migrate(
         ):
             raise RuntimeError("PostgreSQL runtime role cannot bypass collaboration RLS")
         membership_cursor = await connection.execute(
-            "SELECT pg_catalog.pg_has_role(current_user, %s, 'MEMBER')",
+            "SELECT pg_catalog.pg_has_role(current_user, %s, 'USAGE')",
             (_POLICY_OWNER,),
         )
         membership_row = await membership_cursor.fetchone()
@@ -115,6 +127,9 @@ async def migrate(
             applied.add(version)
         await connection.execute(
             _RUNTIME_BUSINESS_GRANTS.format(role=sql.Identifier(runtime_role))
+        )
+        await connection.execute(
+            _RUNTIME_CHANNEL_CLAIM_GRANT.format(role=sql.Identifier(runtime_role))
         )
         await connection.execute(
             sql.SQL("SET LOCAL ROLE {policy_owner}").format(

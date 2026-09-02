@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -10,6 +11,7 @@ from loguru import logger
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.collaboration.pairing import BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY
 from nanobot.pairing import (
     PAIRING_CODE_META_KEY,
     format_pairing_reply,
@@ -33,16 +35,20 @@ class BaseChannel(ABC):
     show_reasoning: bool = True
 
     def __init__(self, config: Any, bus: MessageBus):
-        """
-        Initialize the channel.
-
-        Args:
-            config: Channel-specific configuration.
-            bus: The message bus for communication.
-        """
+        """Initialize channel configuration, transport, and optional assignment pairing."""
         self.config = config
         self.logger = logger.bind(channel=self.name)
         self.bus = bus
+        self.assignment_pairing_handler: (
+            Callable[[str, str], Awaitable[bool]] | None
+        ) = None
+        self.assignment_authorization_handler: (
+            Callable[[str], Awaitable[bool]] | None
+        ) = None
+        self.assignment_conversation_authorization_handler: (
+            Callable[[str, str], Awaitable[bool]] | None
+        ) = None
+        self.require_assignment_authorization = False
         self._running = False
 
     async def transcribe_audio(self, file_path: str | Path) -> str:
@@ -252,6 +258,55 @@ class BaseChannel(ABC):
             return True
         return False
 
+    async def _consume_assignment_pairing(
+        self,
+        sender_id: str,
+        chat_id: str,
+        content: str,
+        *,
+        is_dm: bool,
+    ) -> bool:
+        pairing_handler = self.assignment_pairing_handler
+        if pairing_handler is None or not is_dm:
+            return False
+        try:
+            assignment_verified = await pairing_handler(content, str(sender_id))
+        except Exception:
+            self.logger.exception("Assignment Pair Code verification failed")
+            return True
+        if not assignment_verified:
+            return False
+        await self.send(
+            OutboundMessage(
+                channel=self.name,
+                chat_id=str(chat_id),
+                content="Pair Code verified. Return to the WebUI to finish the assignment.",
+            )
+        )
+        return True
+
+    async def _assignment_sender_is_authorized(self, sender_id: str) -> bool:
+        authorization_handler = self.assignment_authorization_handler
+        if authorization_handler is None:
+            return False
+        try:
+            return await authorization_handler(str(sender_id))
+        except Exception:
+            self.logger.exception("Channel assignment authorization failed")
+            return False
+
+
+    async def _assignment_conversation_is_authorized(
+        self, sender_id: str, conversation_id: str
+    ) -> bool:
+        authorization_handler = self.assignment_conversation_authorization_handler
+        if authorization_handler is None:
+            return False
+        try:
+            return await authorization_handler(str(sender_id), str(conversation_id))
+        except Exception:
+            self.logger.exception("Channel conversation assignment authorization failed")
+            return False
     async def _handle_message(
         self,
         sender_id: str,
@@ -271,8 +326,24 @@ class BaseChannel(ABC):
         can pass that entity as ``authorization_id`` without changing the
         sender's identity.  When omitted, authorization remains sender-based.
         """
+        if await self._consume_assignment_pairing(
+            sender_id, chat_id, content, is_dm=is_dm
+        ):
+            return
         permission_id = authorization_id if authorization_id is not None else sender_id
-        if not self.is_allowed(permission_id):
+        assignment_allowed = await self._assignment_sender_is_authorized(str(sender_id))
+        conversation_allowed = True
+        if self.require_assignment_authorization and authorization_id is not None:
+            conversation_allowed = await self._assignment_conversation_is_authorized(
+                str(sender_id), str(authorization_id)
+            )
+        if self.require_assignment_authorization:
+            permission_granted = (
+                conversation_allowed if authorization_id is not None else assignment_allowed
+            )
+        else:
+            permission_granted = assignment_allowed or self.is_allowed(permission_id)
+        if not permission_granted:
             if is_dm:
                 try:
                     code = generate_code(self.name, str(sender_id))
@@ -303,11 +374,13 @@ class BaseChannel(ABC):
                 )
             return
 
-        meta = metadata or {}
+        meta = dict(metadata or {})
         if is_dm:
-            meta = {**meta, "is_direct": True}
+            meta["is_direct"] = True
+        if self.require_assignment_authorization:
+            meta[BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY] = True
         if self.supports_streaming:
-            meta = {**meta, "_wants_stream": True}
+            meta["_wants_stream"] = True
 
         msg = InboundMessage(
             channel=self.name,

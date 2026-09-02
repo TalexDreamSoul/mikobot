@@ -217,6 +217,7 @@ export function ChannelInstancesPanel({
                     disabled={
                       busyInstanceId === instance.id
                       || !instance.configured
+                      || instance.pairing_only
                     }
                     ariaLabel={customization.toggleAriaLabel?.(instance)
                       ?? t("settings.channels.toggleInstance", {
@@ -344,17 +345,19 @@ function ChannelInstanceStatusBadge({
 }) {
   const { t } = useTranslation();
   let status = instance.configured ? "configured" : "needs_setup";
-  let label = instance.configured
-    ? t("settings.channels.instanceConfigured", { defaultValue: "Configured" })
-    : needsSetupLabel ?? t("settings.channels.instanceNeedsSetup", { defaultValue: "Needs setup" });
+  let label = instance.pairing_only
+    ? t("settings.channels.pairingOnly", { defaultValue: "Awaiting Pair Code" })
+    : instance.configured
+      ? t("settings.channels.instanceConfigured", { defaultValue: "Configured" })
+      : needsSetupLabel ?? t("settings.channels.instanceNeedsSetup", { defaultValue: "Needs setup" });
   if (instance.runtime_status === "failed") {
     status = "invalid";
     label = t("settings.channels.runtimeFailed", { defaultValue: "Failed" });
-  } else if (instance.runtime_status === "starting") {
+  } else if (!instance.pairing_only && instance.runtime_status === "starting") {
     label = t("settings.channels.runtimeStarting", { defaultValue: "Starting" });
-  } else if (instance.enabled && instance.runtime_status !== "running") {
+  } else if (!instance.pairing_only && instance.enabled && instance.runtime_status !== "running") {
     label = t("settings.channels.runtimeStopped", { defaultValue: "Not running" });
-  } else if (instance.runtime_status === "running") {
+  } else if (!instance.pairing_only && instance.runtime_status === "running") {
     status = "connected";
     label = configuredLabel
       ?? t("settings.channels.validation.connected", { defaultValue: "Connected" });

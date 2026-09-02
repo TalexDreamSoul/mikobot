@@ -7,6 +7,12 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from .models import (
+    Bot,
+    BotCapabilityProfile,
+    BotChannelAssignment,
+    BotProjectAssignment,
+    BotProjectChannel,
+    BotState,
     ContextSource,
     ContextSourceKind,
     ConversationBinding,
@@ -16,6 +22,8 @@ from .models import (
     Organization,
     OrganizationMembership,
     OrganizationRole,
+    PairingChallenge,
+    PairingPurpose,
     Persona,
     PersonalTask,
     Project,
@@ -204,6 +212,115 @@ class AsyncLocalCollaborationRepository:
         self, organization_id: str, user_id: str
     ) -> list[OrganizationMembership]:
         return await asyncio.to_thread(self._store.list_organization_members, organization_id, user_id)
+
+
+    async def create_bot(
+        self, actor_user_id: str, organization_id: str, name: str, *,
+        avatar_url: str | None = None, persona_id: str | None = None,
+    ) -> Bot:
+        return await asyncio.to_thread(
+            self._store.create_bot, actor_user_id, organization_id, name,
+            avatar_url=avatar_url, persona_id=persona_id,
+        )
+
+    async def get_bot(self, actor_user_id: str, bot_id: str) -> Bot | None:
+        return await asyncio.to_thread(self._store.get_bot, actor_user_id, bot_id)
+
+    async def list_bots(
+        self, actor_user_id: str, *, organization_id: str | None = None
+    ) -> list[Bot]:
+        return await asyncio.to_thread(
+            self._store.list_bots, actor_user_id, organization_id=organization_id
+        )
+
+    async def update_bot(
+        self, bot_id: str, actor_user_id: str, *, name: str | None = None,
+        avatar_url: str | None = None, persona_id: str | None = None,
+        state_value: BotState | None = None,
+    ) -> Bot:
+        return await asyncio.to_thread(
+            self._store.update_bot, bot_id, actor_user_id, name=name,
+            avatar_url=avatar_url, persona_id=persona_id, state_value=state_value,
+        )
+
+    async def delete_bot(self, bot_id: str, actor_user_id: str) -> bool:
+        return await asyncio.to_thread(self._store.delete_bot, bot_id, actor_user_id)
+
+    async def update_user_defaults(
+        self, user_id: str, *, organization_id: str, bot_id: str,
+        project_id: str | None = None,
+    ) -> User:
+        return await asyncio.to_thread(
+            self._store.update_user_defaults, user_id, organization_id=organization_id,
+            bot_id=bot_id, project_id=project_id,
+        )
+
+    async def list_bot_projects(
+        self, actor_user_id: str, bot_id: str
+    ) -> list[BotProjectAssignment]:
+        return await asyncio.to_thread(self._store.list_bot_projects, actor_user_id, bot_id)
+
+    async def list_bot_channels(
+        self, actor_user_id: str, bot_id: str
+    ) -> list[BotChannelAssignment]:
+        return await asyncio.to_thread(self._store.list_bot_channels, actor_user_id, bot_id)
+
+    async def list_bot_project_channels(
+        self, actor_user_id: str, bot_id: str, project_id: str
+    ) -> list[BotProjectChannel]:
+        return await asyncio.to_thread(
+            self._store.list_bot_project_channels, actor_user_id, bot_id, project_id
+        )
+
+    async def get_bot_capability_profile(
+        self, actor_user_id: str, bot_id: str, *, project_id: str | None = None
+    ) -> BotCapabilityProfile:
+        return await asyncio.to_thread(
+            self._store.get_bot_capability_profile, actor_user_id, bot_id,
+            project_id=project_id,
+        )
+
+    async def update_bot_capability_profile(
+        self, actor_user_id: str, bot_id: str, settings: Mapping[str, object], *,
+        project_id: str | None = None, expected_revision: int | None = None,
+    ) -> BotCapabilityProfile:
+        return await asyncio.to_thread(
+            self._store.update_bot_capability_profile, actor_user_id, bot_id, settings,
+            project_id=project_id, expected_revision=expected_revision,
+        )
+
+    async def create_pairing_challenge(
+        self, actor_user_id: str, *, purpose: PairingPurpose, organization_id: str,
+        bot_id: str, channel_type: str, instance_id: str,
+        project_id: str | None = None, ttl_seconds: int = 600,
+    ) -> tuple[PairingChallenge, str]:
+        return await asyncio.to_thread(
+            self._store.create_pairing_challenge, actor_user_id, purpose=purpose,
+            organization_id=organization_id, bot_id=bot_id, channel_type=channel_type,
+            instance_id=instance_id, project_id=project_id, ttl_seconds=ttl_seconds,
+        )
+
+    async def get_pairing_challenge(
+        self, actor_user_id: str, challenge_id: str
+    ) -> PairingChallenge | None:
+        return await asyncio.to_thread(
+            self._store.get_pairing_challenge, actor_user_id, challenge_id
+        )
+
+    async def verify_pairing_challenge(
+        self, code: str, *, channel_type: str, instance_id: str, sender_id: str
+    ) -> PairingChallenge:
+        return await asyncio.to_thread(
+            self._store.verify_pairing_challenge, code, channel_type=channel_type,
+            instance_id=instance_id, sender_id=sender_id,
+        )
+
+    async def consume_pairing_challenge(
+        self, actor_user_id: str, challenge_id: str
+    ) -> PairingChallenge:
+        return await asyncio.to_thread(
+            self._store.consume_pairing_challenge, actor_user_id, challenge_id
+        )
 
     async def create_project(
         self,

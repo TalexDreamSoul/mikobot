@@ -1,6 +1,7 @@
 import type { ChannelMessages } from "@/channel-plugins/i18n";
 import { channelNamespace } from "@/channel-plugins/i18n";
 import {
+  mergeLocaleMessages,
   supportedLocales,
   type SupportedLocale,
 } from "@/i18n/config";
@@ -79,13 +80,17 @@ async function loadChannelLocale(
 
   const loaders = loadersByChannel.get(channel);
   const loader = loaders?.get(locale) ?? loaders?.get("en");
-  if (!loader) {
+  const fallbackLoader = loaders?.get("en");
+  if (!loader || !fallbackLoader) {
     throw new Error(`Channel '${channel}' has no locale loader for '${locale}' or 'en'`);
   }
-  const messages = (await loader()).default;
-  if (!messages) {
+  const [localizedModule, fallbackModule] = await Promise.all([loader(), fallbackLoader()]);
+  if (!localizedModule.default || !fallbackModule.default) {
     throw new Error(`Channel '${channel}' locale '${locale}' has no default export`);
   }
+  const messages = locale === "en"
+    ? localizedModule.default
+    : mergeLocaleMessages(fallbackModule.default, localizedModule.default);
   translations.set(locale, messages);
   translationsByChannel.set(channel, translations);
   return messages;

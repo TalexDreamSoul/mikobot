@@ -19,7 +19,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { useLogoFallback } from "@/hooks/useLogoFallback";
 import { normalizeLocale } from "@/i18n/config";
-import { configureChannel } from "@/lib/api";
+import {
+  configureChannel,
+  disableNanobotFeature,
+  enableNanobotFeature,
+} from "@/lib/api";
 import { logoFallbackUrls } from "@/lib/provider-brand";
 import type {
   ChannelRuntimeStatus,
@@ -51,21 +55,27 @@ export function WeixinPanel({
   const { t, i18n } = useTranslation();
   const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
   const channelTx = channelTranslator(t, "weixin");
+  const defaultInstance = feature.instances?.find((instance) => instance.id === "default");
+  const defaultPairingOnly = defaultInstance?.pairing_only === true;
   const runtimeError = weixinRuntimeError(feature.runtime_error, channelTx);
   const displayName = channelTx("displayName", "WeChat");
   const enabledBusy = actionKey === `enable:${feature.name}`;
   const disabledBusy = actionKey === `disable:${feature.name}`;
   const channelBusy = enabledBusy || disabledBusy;
-  const channelChecked =
-    feature.runtime_status === "running" || feature.runtime_status === "starting";
+  const channelChecked = !defaultPairingOnly
+    && (feature.runtime_status === "running" || feature.runtime_status === "starting");
   const missingSupport = feature.enabled && !feature.installed;
   const alwaysEnabled = feature.capabilities?.includes("always_enabled") ?? false;
-  const toggleChecked = alwaysEnabled || channelChecked;
+  const toggleChecked = !defaultPairingOnly && (alwaysEnabled || channelChecked);
   const channelToggleDisabled =
-    alwaysEnabled
+    defaultPairingOnly
+    || alwaysEnabled
     || channelBusy
     || (!feature.install_supported && !feature.installed && !feature.enabled);
   const [connectRequestId, setConnectRequestId] = useState(0);
+  const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
+  const [busyInstanceId, setBusyInstanceId] = useState<string | null>(null);
+  const [instanceError, setInstanceError] = useState<string | null>(null);
   const [visibleSecrets, setVisibleSecrets] = useState<Record<string, boolean>>({});
   const [touchedFields, setTouchedFields] = useState<Set<string>>(() => new Set());
   const [saving, setSaving] = useState(false);
@@ -196,6 +206,25 @@ export function WeixinPanel({
     defaultValue: "{{name}} channel",
   });
 
+  const additionalInstances = (feature.instances ?? []).filter(
+    (instance) => instance.id !== "default",
+  );
+
+  const toggleInstance = async (instanceId: string, checked: boolean) => {
+    setBusyInstanceId(instanceId);
+    setInstanceError(null);
+    try {
+      const payload = checked
+        ? await enableNanobotFeature(client, feature.name, { instanceId })
+        : await disableNanobotFeature(client, feature.name, { instanceId });
+      onFeaturesUpdate(payload);
+    } catch (reason) {
+      setInstanceError((reason as Error).message);
+    } finally {
+      setBusyInstanceId(null);
+    }
+  };
+
   return (
     <aside className="min-h-full rounded-panel bg-settings-surface p-5">
       <div className="flex items-start justify-between gap-4">
@@ -229,7 +258,9 @@ export function WeixinPanel({
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-1">
           <WeixinStatusBadge status={feature.runtime_status}>
-            {weixinStatusLabel(feature, tx)}
+            {defaultPairingOnly
+              ? channelTx("custom.pairingOnly", "Awaiting Pair Code")
+              : weixinStatusLabel(feature, tx)}
           </WeixinStatusBadge>
           {channelBusy ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" aria-hidden />
@@ -255,6 +286,28 @@ export function WeixinPanel({
           {runtimeError}
         </div>
       ) : null}
+      {defaultPairingOnly ? (
+        <div className="mt-4 rounded-control border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-[12px] text-amber-900 dark:text-amber-100">
+          <p className="font-semibold">
+            {tx("settings.channels.pairingRequiredTitle", "Connected — bot assignment required")}
+          </p>
+          <p className="mt-1 leading-5">
+            {tx(
+              "settings.channels.pairingRequiredDescription",
+              "Assign instance {{instance}} to a bot with a one-time Pair Code before it can receive messages.",
+            ).replace("{{instance}}", defaultInstance?.id || "default")}
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="mt-3 h-8 rounded-full px-3 text-[12px] font-semibold"
+            onClick={() => { window.location.hash = "#/projects?section=bots"; }}
+          >
+            {tx("settings.channels.manageBots", "Open bot management")}
+          </Button>
+        </div>
+      ) : null}
 
       <div className="mt-4 space-y-4">
         <WeixinConnectFlow
@@ -262,6 +315,79 @@ export function WeixinPanel({
           feature={feature}
           idleLabel={channelTx("setup.primaryAction", "Connect WeChat")}
           connectRequestId={connectRequestId}
+          instanceId="default"
+          mode="replace"
+          onFeaturesUpdate={onFeaturesUpdate}
+        />
+
+        {additionalInstances.length ? (
+          <div className="space-y-2">
+            {additionalInstances.map((instance) => {
+              const expanded = selectedInstanceId === instance.id;
+              const status = instance.pairing_only
+                ? channelTx("custom.pairingOnly", "Awaiting Pair Code")
+                : instance.runtime_status ?? (instance.enabled ? "running" : "stopped");
+              const running = instance.runtime_status === "running" || instance.runtime_status === "starting";
+              return (
+                <article key={instance.id} className="rounded-control border border-border/50 bg-background px-3 py-2 text-[12px]">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left"
+                      aria-expanded={expanded}
+                      onClick={() => setSelectedInstanceId(expanded ? null : instance.id)}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium text-foreground">
+                          {instance.display_name?.trim() || instance.name || instance.id}
+                        </span>
+                        <span className="mt-0.5 block truncate text-muted-foreground">
+                          {instance.id} · {status}
+                        </span>
+                      </span>
+                      <ChevronDown className={cn("h-4 w-4 shrink-0 transition-transform", expanded && "rotate-180")} aria-hidden />
+                    </button>
+                    <ToggleButton
+                      checked={running}
+                      disabled={busyInstanceId === instance.id || !instance.configured || instance.pairing_only}
+                      ariaLabel={t("settings.channels.toggleInstance", {
+                        name: instance.display_name?.trim() || instance.name || instance.id,
+                        defaultValue: "{{name}} instance",
+                      })}
+                      label={running ? onLabel : offLabel}
+                      onChange={(checked) => void toggleInstance(instance.id, checked)}
+                    />
+                  </div>
+                  {expanded ? (
+                    <div className="mt-3 border-t border-border/45 pt-3">
+                      <WeixinConnectFlow
+                        token={token}
+                        feature={feature}
+                        idleLabel={tx("settings.channels.reconnect", "Reconnect")}
+                        instanceId={instance.id}
+                        mode="replace"
+                        onFeaturesUpdate={onFeaturesUpdate}
+                      />
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {instanceError ? (
+          <div role="alert" className="rounded-control border border-destructive/20 bg-destructive/5 px-3 py-2 text-[12px] text-destructive">
+            {instanceError}
+          </div>
+        ) : null}
+
+        <WeixinConnectFlow
+          token={token}
+          feature={feature}
+          idleLabel={channelTx("custom.addBot", "Add another WeChat bot")}
+          instanceId="default"
+          mode="create"
           onFeaturesUpdate={onFeaturesUpdate}
         />
 

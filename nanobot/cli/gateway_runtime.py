@@ -728,6 +728,7 @@ def _run_gateway(
         session_manager=session_manager,
         cron_service=cron,
         local_trigger_store=trigger_store,
+        collaboration_repository=getattr(agent, "collaboration", None),
         webui_runtime_model_name=_webui_runtime_model_name,
         webui_refresh_runtime_config=_webui_refresh_runtime_config,
         webui_cron_pending_job_ids=agent.pending_cron_job_ids_for_session,

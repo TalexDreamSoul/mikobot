@@ -35,10 +35,14 @@ from nanobot.channels.contracts import (
 from nanobot.channels.manager import ChannelManager
 from nanobot.channels.plugin import ChannelPlugin, load_channel_package
 from nanobot.config.loader import load_config, save_config
-from nanobot.config.schema import ChannelsConfig, Config
+from nanobot.config.schema import ChannelsConfig, Config, _resolve_tool_config_refs
 from nanobot.providers.transcription import GroqTranscriptionProvider as _GroqProvider
 from nanobot.providers.transcription import OpenAITranscriptionProvider as _OpenAIProvider
 from nanobot.utils.restart import RestartNotice
+
+# Config may be imported during a circular tool-config import; resolve its
+# forward references after all test dependencies have loaded.
+_resolve_tool_config_refs()
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -50,7 +50,8 @@ async def test_feishu_login_writes_credentials_to_active_config(monkeypatch, tmp
     assert instance["appSecret"] == "secret"
     assert instance["domain"] == "lark"
     assert instance["identityKey"] == "lark:cli_app"
-    assert instance["enabled"] is True
+    assert instance["enabled"] is False
+    assert instance["pairingRequired"] is True
     assert instance["displayName"] == "Voraflare Bot"
     assert instance["avatarUrl"] == "https://example.com/avatar.png"
     assert instance["identityFetchedAt"] == "2026-07-06T00:00:00Z"

@@ -7,6 +7,11 @@ import type {
   ChannelValidationPayload,
   ChatSummary,
   CliAppsPayload,
+  CollaborationBot,
+  CollaborationBotCapabilityProfile,
+  CollaborationBotPayload,
+  CollaborationPairingPayload,
+  CollaborationPairingPurpose,
   CollaborationContextSource,
   CollaborationEditableContextSourceKind,
   CollaborationExtensionProfile,
@@ -30,6 +35,8 @@ import type {
   PersonalVault,
   FilePreviewPayload,
   ImageGenerationSettingsUpdate,
+  LoginSecurityPayload,
+  LoginSecuritySettings,
   McpPresetsPayload,
   McpOAuthFlowPayload,
   MarketplaceProvider,
@@ -478,6 +485,32 @@ export async function fetchSettings(
   );
 }
 
+export async function fetchLoginSecurity(
+  token: string,
+  base: string = "",
+): Promise<LoginSecurityPayload> {
+  return request<LoginSecurityPayload>(
+    `${base}/api/settings/login-security`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function updateLoginSecurity(
+  transport: WebUIMutationTransport,
+  values: Partial<Omit<LoginSecuritySettings, "client_secret_configured" | "restart_required_after_save">> & {
+    client_secret?: string;
+    clear_client_secret?: boolean;
+  },
+): Promise<LoginSecurityPayload> {
+  return mutation<LoginSecurityPayload>(
+    transport,
+    "settings.login_security.update",
+    values,
+  );
+}
+
 export async function fetchSettingsUsage(
   token: string,
   base: string = "",
@@ -567,6 +600,32 @@ export async function fetchCollaborationProject(
   );
 }
 
+export async function fetchCollaborationBot(
+  token: string,
+  botId: string,
+  base: string = "",
+): Promise<CollaborationBotPayload> {
+  return request<CollaborationBotPayload>(
+    `${base}/api/collaboration/bots/${encodeURIComponent(botId)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchCollaborationPairing(
+  token: string,
+  challengeId: string,
+  base: string = "",
+): Promise<CollaborationPairingPayload> {
+  return request<CollaborationPairingPayload>(
+    `${base}/api/collaboration/pairing/${encodeURIComponent(challengeId)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
 export async function createCollaborationOrganization(
   transport: WebUIMutationTransport,
   name: string,
@@ -624,6 +683,94 @@ export async function removeCollaborationOrganizationMember(
     "collaboration.organization.member.remove",
     { organization_id: organizationId, member_user_id: memberUserId },
   );
+}
+
+export async function updateCollaborationDefaults(
+  transport: WebUIMutationTransport,
+  values: { organizationId: string; botId: string; projectId?: string | null },
+): Promise<{ user: CollaborationPayload["user"] }> {
+  return mutation(transport, "collaboration.user.defaults", {
+    organization_id: values.organizationId,
+    bot_id: values.botId,
+    ...(values.projectId ? { project_id: values.projectId } : {}),
+  });
+}
+
+export async function createCollaborationBot(
+  transport: WebUIMutationTransport,
+  values: { organizationId: string; name: string; avatarUrl?: string; personaId?: string },
+): Promise<{ bot: CollaborationBot }> {
+  return mutation(transport, "collaboration.bot.create", {
+    organization_id: values.organizationId,
+    name: values.name,
+    ...(values.avatarUrl ? { avatar_url: values.avatarUrl } : {}),
+    ...(values.personaId ? { persona_id: values.personaId } : {}),
+  });
+}
+
+export async function updateCollaborationBot(
+  transport: WebUIMutationTransport,
+  botId: string,
+  values: { name?: string; avatarUrl?: string; personaId?: string; state?: "active" | "disabled" },
+): Promise<{ bot: CollaborationBot }> {
+  return mutation(transport, "collaboration.bot.update", {
+    bot_id: botId,
+    ...(values.name ? { name: values.name } : {}),
+    ...(values.avatarUrl ? { avatar_url: values.avatarUrl } : {}),
+    ...(values.personaId ? { persona_id: values.personaId } : {}),
+    ...(values.state ? { state: values.state } : {}),
+  });
+}
+
+export async function deleteCollaborationBot(
+  transport: WebUIMutationTransport,
+  botId: string,
+): Promise<{ deleted: boolean }> {
+  return mutation(transport, "collaboration.bot.delete", { bot_id: botId });
+}
+
+export async function updateCollaborationBotCapabilities(
+  transport: WebUIMutationTransport,
+  botId: string,
+  settings: CollaborationExtensionSettings,
+  options: { projectId?: string | null; revision?: number } = {},
+): Promise<{ capability_profile: CollaborationBotCapabilityProfile }> {
+  return mutation(transport, "collaboration.bot.capabilities.update", {
+    bot_id: botId,
+    settings,
+    ...(options.projectId ? { project_id: options.projectId } : {}),
+    ...(options.revision !== undefined ? { revision: options.revision } : {}),
+  });
+}
+
+export async function createCollaborationPairingChallenge(
+  transport: WebUIMutationTransport,
+  values: {
+    purpose: CollaborationPairingPurpose;
+    organizationId: string;
+    botId: string;
+    channelType: string;
+    instanceId: string;
+    projectId?: string | null;
+  },
+): Promise<CollaborationPairingPayload> {
+  return mutation(transport, "collaboration.pairing.create", {
+    purpose: values.purpose,
+    organization_id: values.organizationId,
+    bot_id: values.botId,
+    channel_type: values.channelType,
+    instance_id: values.instanceId,
+    ...(values.projectId ? { project_id: values.projectId } : {}),
+  });
+}
+
+export async function consumeCollaborationPairingChallenge(
+  transport: WebUIMutationTransport,
+  challengeId: string,
+): Promise<CollaborationPairingPayload> {
+  return mutation(transport, "collaboration.pairing.consume", {
+    challenge_id: challengeId,
+  });
 }
 
 export async function createCollaborationProject(

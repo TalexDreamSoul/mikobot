@@ -1,6 +1,7 @@
 """Configuration schema using Pydantic."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -18,6 +19,16 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
     from nanobot.agent.tools.web import WebToolsConfig
+
+
+
+_COLLABORATION_POSTGRES_DSN_ENV = "NANOBOT_COLLABORATION_POSTGRES_DSN"
+_COLLABORATION_POSTGRES_MIGRATION_DSN_ENV = "NANOBOT_COLLABORATION_POSTGRES_MIGRATION_DSN"
+
+
+def _collaboration_dsn_from_env(name: str) -> str | None:
+    value = os.environ.get(name, "").strip()
+    return value or None
 
 
 class ChannelsConfig(Base):
@@ -366,13 +377,17 @@ class CollaborationConfig(Base):
 
     backend: Literal["local", "postgres"] = "local"
     postgres_dsn: str | None = Field(
-        default=None,
+        default_factory=lambda: _collaboration_dsn_from_env(
+            _COLLABORATION_POSTGRES_DSN_ENV
+        ),
         repr=False,
         exclude=True,
         validation_alias=AliasChoices("postgresDsn", "postgres_dsn"),
     )
     postgres_migration_dsn: str | None = Field(
-        default=None,
+        default_factory=lambda: _collaboration_dsn_from_env(
+            _COLLABORATION_POSTGRES_MIGRATION_DSN_ENV
+        ),
         repr=False,
         exclude=True,
         validation_alias=AliasChoices("postgresMigrationDsn", "postgres_migration_dsn"),

@@ -13,15 +13,19 @@ from psycopg import AsyncConnection
 from psycopg.errors import InsufficientPrivilege
 
 from nanobot.collaboration import (
+    BotState,
     CollaborationConflictError,
     CollaborationNotFoundError,
     CollaborationPermissionError,
     ContextSourceKind,
+    ConversationScopeKind,
     MembershipRole,
     OrganizationRole,
+    PairingPurpose,
     SharePermission,
     TaskStatus,
 )
+from nanobot.collaboration.pairing import BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY
 from nanobot.collaboration.postgres.migrations import migrate
 from nanobot.collaboration.postgres.repository import PostgresCollaborationRepository
 from nanobot.collaboration.postgres.session import PostgresSession
@@ -536,6 +540,92 @@ async def test_postgres_runtime_rls_hides_foreign_rows_and_denies_internal_edge_
                     "WHERE organization_id = %s",
                     (_name("forged-org"),),
                 )
+
+
+async def test_postgres_pairing_claim_assigns_bot_only_after_exact_verification_and_honors_rls(
+    postgres_repository: PostgresRepositoryTestContext,
+) -> None:
+    """A verified Pair Code creates one visible route while unrelated users cannot read its bot row."""
+    repository = postgres_repository.repository
+    owner, member, organization, project = await _shared_project(repository)
+    bot = await repository.create_bot(owner.id, organization.id, _name("release-bot"))
+    instance_id = _name("release")
+
+    assert await repository.list_bots(member.id, organization_id=organization.id) == []
+    claim, claim_code = await repository.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.CLAIM_CHANNEL, organization_id=organization.id,
+        bot_id=bot.id, channel_type="weixin", instance_id=instance_id,
+    )
+    first_sender = _name("owner-sender")
+    second_sender = _name("second-sender")
+    verified_claim = await repository.verify_pairing_challenge(
+        claim_code, channel_type="weixin", instance_id=instance_id, sender_id=first_sender
+    )
+    assert verified_claim.id == claim.id
+    with pytest.raises(CollaborationConflictError, match="another sender"):
+        await repository.verify_pairing_challenge(
+            claim_code, channel_type="weixin", instance_id=instance_id, sender_id=second_sender
+        )
+    assert (await repository.resolve_identity(f"weixin.{instance_id}", first_sender)).id == owner.id
+    assert await repository.resolve_identity(f"weixin.{instance_id}", second_sender) is None
+    with pytest.raises(CollaborationNotFoundError, match="not found"):
+        await repository.consume_pairing_challenge(member.id, claim.id)
+    consumed_claim = await repository.consume_pairing_challenge(owner.id, claim.id)
+    assert consumed_claim.consumed_at_ms is not None
+
+    competing_bot = await repository.create_bot(owner.id, organization.id, _name("competing-bot"))
+    competing_claim, competing_code = await repository.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.CLAIM_CHANNEL, organization_id=organization.id,
+        bot_id=competing_bot.id, channel_type="weixin", instance_id=instance_id,
+    )
+    await repository.verify_pairing_challenge(
+        competing_code, channel_type="weixin", instance_id=instance_id, sender_id=first_sender
+    )
+    with pytest.raises(CollaborationConflictError, match="already claimed"):
+        await repository.consume_pairing_challenge(owner.id, competing_claim.id)
+
+    assignment, assignment_code = await repository.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.ASSIGN_BOT_PROJECT, organization_id=organization.id,
+        bot_id=bot.id, project_id=project.id, channel_type="weixin", instance_id=instance_id,
+    )
+    await repository.verify_pairing_challenge(
+        assignment_code, channel_type="weixin", instance_id=instance_id, sender_id=_name("project-sender")
+    )
+    assert (await repository.consume_pairing_challenge(owner.id, assignment.id)).consumed_at_ms is not None
+    updated_owner = await repository.get_user(owner.id)
+    assert updated_owner is not None
+    assert (updated_owner.default_organization_id, updated_owner.default_project_id, updated_owner.default_bot_id) == (
+        organization.id, project.id, bot.id
+    )
+    routed = await repository.resolve_scope(
+        f"weixin.{instance_id}", first_sender, first_sender,
+        {BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY: True}, Path("/tmp/default")
+    )
+    assert (routed.kind, routed.project_id, routed.bot_id, routed.route_denied) == (
+        ConversationScopeKind.DIRECT, project.id, bot.id, False
+    )
+    await repository.update_bot(bot.id, owner.id, state_value=BotState.DISABLED)
+    revoked = await repository.resolve_scope(
+        f"weixin.{instance_id}", first_sender, first_sender,
+        {BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY: True}, Path("/tmp/default")
+    )
+    assert revoked.is_isolated and revoked.route_denied
+    assert [(item.bot_id, item.project_id) for item in await repository.list_bot_projects(member.id, bot.id)] == [
+        (bot.id, project.id)
+    ]
+    assert [(item.channel_type, item.instance_id, item.enabled) for item in await repository.list_bot_project_channels(
+        member.id, bot.id, project.id
+    )] == [("weixin", instance_id, True)]
+    assert [item.id for item in await repository.list_bots(member.id, organization_id=organization.id)] == [bot.id]
+
+    foreign = await repository.create_user(_name("foreign"))
+    assert await repository.get_bot(foreign.id, bot.id) is None
+    async with postgres_repository.session.transaction(foreign.id) as connection:
+        cursor = await connection.execute(
+            "SELECT id FROM nanobot_collaboration.collaboration_bots WHERE id = %s",
+            (bot.id,),
+        )
+        assert await cursor.fetchall() == []
 
 
 async def test_postgres_catalog_separates_runtime_owner_and_nologin_policy_owner(

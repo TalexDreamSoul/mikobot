@@ -357,6 +357,48 @@ def test_channel_feature_instances_use_generic_setup_snapshot() -> None:
     ]
 
 
+def test_channel_feature_instances_preserve_persistent_pairing_state() -> None:
+    setup_spec = ChannelSetupSpec(
+        fields={"token": ChannelFieldSpec(kind="secret")},
+        required=(SetupRequirement.field("token"),),
+    )
+    plugin = ChannelPlugin(
+        name="pairing_multi",
+        display_name="Pairing multi",
+        runtime=f"{__name__}:_SingleChannel",
+        setup=setup_spec,
+        management=ChannelManagementSpec(
+            multi_instance=True,
+            instance_specs=lambda section, *, enabled_only=True: [
+                ChannelInstanceSpec(item["id"], item)
+                for item in section["instances"]
+                if not enabled_only or item["enabled"]
+            ],
+            update_instance_config=lambda section, values, *, instance_id="default": section,
+            runtime_name=lambda name, instance_id: (
+                name if instance_id == "default" else f"{name}.{instance_id}"
+            ),
+        ),
+    )
+    section = {
+        "instances": [
+            {
+                "id": "offline",
+                "enabled": False,
+                "pairingRequired": True,
+                "token": "persisted-secret",
+            }
+        ]
+    }
+
+    instances = channel_feature_instances(plugin, section, setup_spec=setup_spec)
+
+    instance = instances[0]
+    assert instance["pairing_only"] is True
+    assert instance["config_values"] == {}
+    assert "channels.pairing_multi.token" in instance["configured_fields"]
+
+
 def test_feishu_instance_contract_skips_duplicate_app_identity() -> None:
     section = {
         "instances": [

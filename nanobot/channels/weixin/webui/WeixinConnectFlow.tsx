@@ -72,7 +72,12 @@ export function WeixinConnectFlow({
   idleLabel,
   connectRequestId,
   onFeaturesUpdate,
-}: ChannelPluginConnectFlowProps) {
+  instanceId = "default",
+  mode = "replace",
+}: ChannelPluginConnectFlowProps & {
+  instanceId?: string;
+  mode?: "replace" | "create";
+}) {
   const { t } = useTranslation();
   const tx = channelTranslator(t, "weixin");
   const [verificationCode, setVerificationCode] = useState("");
@@ -134,7 +139,7 @@ export function WeixinConnectFlow({
     <ChannelQrConnectFlow
       token={token}
       channelName="weixin"
-      startOptions={{ force: authExpired }}
+      startOptions={{ force: authExpired, instanceId, mode }}
       idleLabel={authExpired ? scanAgainLabel : idleLabel}
       connectRequestId={connectRequestId}
       forceOnRepeat

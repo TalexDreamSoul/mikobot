@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from nanobot.channels.connect import ChannelConnectError, QueryParams, query_first
 from nanobot.config.loader import load_config
@@ -14,9 +15,13 @@ if TYPE_CHECKING:
     from nanobot.channels.weixin.runtime import WeixinChannel
 
 
+_MAX_CONNECT_SESSIONS = 32
+_MAX_CONNECT_SESSIONS_PER_ACTOR = 4
+
 @dataclass(slots=True)
 class WeixinConnectSession:
     id: str
+    instance_id: str
     qrcode_id: str
     qr_url: str
     channel: WeixinChannel
@@ -25,6 +30,7 @@ class WeixinConnectSession:
     force: bool
     created_wall: float
     deadline: float
+    actor_user_id: str | None = None
     last_error: str | None = None
 
 
@@ -33,16 +39,37 @@ class WeixinConnectStore:
 
     def __init__(self) -> None:
         self._sessions: dict[str, WeixinConnectSession] = {}
+        self._start_lock = asyncio.Lock()
 
     async def handle(self, action: str, query: QueryParams) -> dict[str, Any]:
-        """Handle one generic settings connection action."""
+        """Handle one instance-aware settings connection action."""
+        actor_user_id = (query_first(query, "_actor_user_id") or "").strip() or None
         if action == "start":
+            from nanobot.channels.weixin.instances import (
+                DEFAULT_INSTANCE_ID,
+                validate_instance_id,
+            )
+
             force = (query_first(query, "force") or "").strip().lower() in {
-                "1",
-                "true",
-                "yes",
+                "1", "true", "yes",
             }
-            return await self.start(force=force)
+            mode = (query_first(query, "mode") or "replace").strip().lower()
+            if mode not in {"create", "replace"}:
+                raise ChannelConnectError("invalid WeChat connect mode", status=400)
+            raw_instance_id = (
+                query_first(query, "instance_id") or DEFAULT_INSTANCE_ID
+            ).strip()
+            if mode == "create":
+                raw_instance_id = f"wechat-{secrets.token_hex(3)}"
+            try:
+                instance_id = validate_instance_id(raw_instance_id)
+            except ValueError as exc:
+                raise ChannelConnectError(str(exc), status=400) from exc
+            return await self.start(
+                instance_id=instance_id,
+                force=force,
+                actor_user_id=actor_user_id,
+            )
 
         session_id = (query_first(query, "session_id") or "").strip()
         if not session_id:
@@ -51,52 +78,85 @@ class WeixinConnectStore:
             return await self.poll(
                 session_id,
                 verify_code=(query_first(query, "verify_code") or "").strip(),
+                actor_user_id=actor_user_id,
             )
         if action == "cancel":
-            return await self.cancel(session_id)
+            return await self.cancel(session_id, actor_user_id=actor_user_id)
         raise ChannelConnectError(f"unsupported WeChat connect action: {action}", status=404)
 
-    async def start(self, *, force: bool = False) -> dict[str, Any]:
-        await self._cleanup()
+    async def start(
+        self,
+        *,
+        instance_id: str = "default",
+        force: bool = False,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        async with self._start_lock:
+            await self._cleanup()
+            for session_id, session in tuple(self._sessions.items()):
+                if session.instance_id == instance_id:
+                    self._sessions.pop(session_id, None)
+                    await self._close_channel(session.channel)
+            if actor_user_id is not None and sum(
+                session.actor_user_id == actor_user_id
+                for session in self._sessions.values()
+            ) >= _MAX_CONNECT_SESSIONS_PER_ACTOR:
+                raise ChannelConnectError(
+                    "Too many active WeChat connection sessions for user",
+                    status=429,
+                )
+            if len(self._sessions) >= _MAX_CONNECT_SESSIONS:
+                raise ChannelConnectError(
+                    "Too many active WeChat connection sessions",
+                    status=429,
+                )
 
-        channel = self._build_channel()
-        if force:
-            # Preserve the working account until a replacement scan succeeds.
-            channel.connect_reset_pending_credentials()
-        elif channel.connect_load_state():
-            return {
-                "session_id": "",
-                "status": "succeeded",
-                "message": "WeChat is already connected.",
-                "interval_ms": 2000,
-            }
+            channel = self._build_channel(instance_id)
+            if force:
+                channel.connect_reset_pending_credentials()
+            elif channel.connect_load_state():
+                return {
+                    "session_id": "",
+                    "instance_id": instance_id,
+                    "status": "succeeded",
+                    "pairing_required": True,
+                    "message": "WeChat is already connected.",
+                    "interval_ms": 2000,
+                }
 
-        channel.connect_open_client()
-        try:
-            qrcode_id, qr_url = await channel.connect_fetch_qr_code(force=force)
-        except Exception as exc:
-            await self._close_channel(channel)
-            raise ChannelConnectError(
-                f"Unable to start WeChat QR login: {exc}",
-                status=502,
-            ) from exc
+            channel.connect_open_client()
+            try:
+                qrcode_id, qr_url = await channel.connect_fetch_qr_code(force=force)
+            except Exception as exc:
+                await self._close_channel(channel)
+                raise ChannelConnectError(
+                    f"Unable to start WeChat QR login: {exc}",
+                    status=502,
+                ) from exc
 
-        session_id = secrets.token_urlsafe(18)
-        now_wall = time.time()
-        self._sessions[session_id] = WeixinConnectSession(
-            id=session_id,
-            qrcode_id=qrcode_id,
-            qr_url=qr_url,
-            channel=channel,
-            current_poll_base_url=channel.connect_base_url,
-            refresh_count=0,
-            force=force,
-            created_wall=now_wall,
-            deadline=time.monotonic() + 600,
-        )
-        return self._start_payload(self._sessions[session_id])
-
-    async def poll(self, session_id: str, *, verify_code: str = "") -> dict[str, Any]:
+            session_id = secrets.token_urlsafe(18)
+            now_wall = time.time()
+            self._sessions[session_id] = WeixinConnectSession(
+                id=session_id,
+                instance_id=instance_id,
+                qrcode_id=qrcode_id,
+                qr_url=qr_url,
+                channel=channel,
+                current_poll_base_url=channel.connect_base_url,
+                refresh_count=0,
+                force=force,
+                created_wall=now_wall,
+                deadline=time.monotonic() + 600,
+                actor_user_id=actor_user_id,
+            )
+            return self._start_payload(self._sessions[session_id])
+    async def poll(
+        self,
+        session_id: str,
+        *,
+        verify_code: str = "",
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
         await self._cleanup()
         session = self._sessions.get(session_id)
         if session is None:
@@ -105,7 +165,7 @@ class WeixinConnectStore:
                 "status": "expired",
                 "message": "This WeChat login has expired. Start again.",
             }
-
+        _require_session_actor(session, actor_user_id)
         try:
             status_data = await session.channel.connect_poll_qr_code(
                 base_url=session.current_poll_base_url,
@@ -150,7 +210,9 @@ class WeixinConnectStore:
             await self._close_channel(session.channel)
             return {
                 "session_id": session_id,
+                "instance_id": session.instance_id,
                 "status": "succeeded",
+                "pairing_required": True,
                 "message": "WeChat is connected.",
                 "account": str(status_payload.get("ilink_user_id", "") or ""),
             }
@@ -231,7 +293,9 @@ class WeixinConnectStore:
             await self._close_channel(session.channel)
             return {
                 "session_id": session_id,
+                "instance_id": session.instance_id,
                 "status": "succeeded",
+                "pairing_required": True,
                 "message": "WeChat is already connected to this nanobot instance.",
             }
 
@@ -262,12 +326,18 @@ class WeixinConnectStore:
 
         return self._pending_payload(session)
 
-    async def cancel(self, session_id: str) -> dict[str, Any]:
+    async def cancel(
+        self, session_id: str, *, actor_user_id: str | None = None
+    ) -> dict[str, Any]:
+        session = self._sessions.get(session_id)
+        if session is not None:
+            _require_session_actor(session, actor_user_id)
         session = self._sessions.pop(session_id, None)
         if session is not None:
             await self._close_channel(session.channel)
         return {
             "session_id": session_id,
+            **({"instance_id": session.instance_id} if session is not None else {}),
             "status": "cancelled",
             "message": "WeChat login cancelled.",
         }
@@ -285,18 +355,27 @@ class WeixinConnectStore:
                 await self._close_channel(session.channel)
 
     @staticmethod
-    def _build_channel() -> WeixinChannel:
+    def _build_channel(instance_id: str) -> WeixinChannel:
         from nanobot.bus.queue import MessageBus
+        from nanobot.channels.weixin.instances import (
+            upsert_weixin_instance,
+            weixin_default_config,
+            weixin_instance_specs,
+        )
         from nanobot.channels.weixin.runtime import WeixinChannel
 
         section = getattr(load_config().channels, "weixin", None)
-        if section is not None and hasattr(section, "model_dump"):
-            config = section.model_dump(mode="json", by_alias=True)
-        elif isinstance(section, dict):
-            config = dict(cast(dict[str, Any], section))
-        else:
-            config = {}
-        return WeixinChannel(config, MessageBus())
+        canonical = upsert_weixin_instance(
+            section, weixin_default_config(), instance_id, {}
+        )
+        selected = next(
+            spec
+            for spec in weixin_instance_specs(
+                canonical, weixin_default_config(), enabled_only=False
+            )
+            if spec.instance_id == instance_id
+        )
+        return WeixinChannel(selected.config, MessageBus())
 
     @staticmethod
     async def _close_channel(channel: WeixinChannel) -> None:
@@ -306,6 +385,7 @@ class WeixinConnectStore:
     def _start_payload(session: WeixinConnectSession) -> dict[str, Any]:
         return {
             "session_id": session.id,
+            "instance_id": session.instance_id,
             "status": "pending",
             "qr_url": session.qr_url,
             "interval_ms": 2000,
@@ -323,6 +403,7 @@ class WeixinConnectStore:
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "session_id": session.id,
+            "instance_id": session.instance_id,
             "status": "pending",
             "qr_url": session.qr_url,
             "interval_ms": 2000,
@@ -333,6 +414,12 @@ class WeixinConnectStore:
             payload["challenge"] = challenge
             payload["verification_failed"] = verification_failed
         return payload
+
+def _require_session_actor(
+    session: WeixinConnectSession, actor_user_id: str | None
+) -> None:
+    if session.actor_user_id != actor_user_id:
+        raise ChannelConnectError("WeChat connection belongs to another user", status=403)
 
 
 __all__ = ["WeixinConnectStore"]

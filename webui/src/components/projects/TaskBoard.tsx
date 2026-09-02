@@ -1,4 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react";
+import { useTranslation } from "react-i18next";
 import { CheckCircle2, Circle, CircleDot, Loader2, Plus, Trash2, XCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -12,12 +13,12 @@ import { cn } from "@/lib/utils";
 
 const TASK_STATUSES: Array<{
   value: CollaborationTaskStatus;
-  label: string;
+  labelKey: string;
 }> = [
-  { value: "todo", label: "To do" },
-  { value: "in_progress", label: "In progress" },
-  { value: "done", label: "Done" },
-  { value: "cancelled", label: "Cancelled" },
+  { value: "todo", labelKey: "projects.tasks.status.todo" },
+  { value: "in_progress", labelKey: "projects.tasks.status.inProgress" },
+  { value: "done", labelKey: "projects.tasks.status.done" },
+  { value: "cancelled", labelKey: "projects.tasks.status.cancelled" },
 ];
 
 function StatusIcon({ status }: { status: CollaborationTaskStatus }) {
@@ -38,6 +39,7 @@ function TaskRow({
   onStatusChange: (status: CollaborationTaskStatus) => Promise<unknown>;
   onDelete: () => Promise<unknown>;
 }) {
+  const { t } = useTranslation();
   return (
     <li className="flex min-h-12 items-center gap-3 border-t border-border/45 px-3 py-2.5 first:border-t-0 sm:px-4">
       <StatusIcon status={task.status} />
@@ -54,7 +56,7 @@ function TaskRow({
           </p>
         ) : null}
       </div>
-      <label className="sr-only" htmlFor={`task-status-${task.id}`}>Status for {task.title}</label>
+      <label className="sr-only" htmlFor={`task-status-${task.id}`}>{t("projects.tasks.statusFor", { title: task.title })}</label>
       <select
         id={`task-status-${task.id}`}
         value={task.status}
@@ -63,7 +65,7 @@ function TaskRow({
         className="h-11 max-w-32 rounded-control border border-input bg-background px-2 text-xs font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
       >
         {TASK_STATUSES.map((status) => (
-          <option key={status.value} value={status.value}>{status.label}</option>
+          <option key={status.value} value={status.value}>{t(status.labelKey)}</option>
         ))}
       </select>
       <Button
@@ -71,8 +73,8 @@ function TaskRow({
         variant="ghost"
         size="icon"
         disabled={busy}
-        aria-label={`Delete ${task.title}`}
-        title="Delete task"
+        aria-label={t("projects.tasks.deleteTask", { title: task.title })}
+        title={t("projects.tasks.deleteTaskTitle")}
         onClick={() => void onDelete()}
         className="h-11 w-11 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
       >
@@ -91,6 +93,7 @@ function NewTaskForm({
   busy: boolean;
   onCreate: (title: string) => Promise<unknown>;
 }) {
+  const { t } = useTranslation();
   const [title, setTitle] = useState("");
 
   const submit = async (event: FormEvent) => {
@@ -107,19 +110,19 @@ function NewTaskForm({
 
   return (
     <form onSubmit={(event) => void submit(event)} className="flex gap-2 border-t border-border/45 p-3">
-      <label className="sr-only" htmlFor={`new-task-${listId}`}>Task title</label>
+      <label className="sr-only" htmlFor={`new-task-${listId}`}>{t("projects.tasks.taskTitle")}</label>
       <Input
         id={`new-task-${listId}`}
         value={title}
         maxLength={512}
         onChange={(event) => setTitle(event.target.value)}
-        placeholder="Add a task"
+        placeholder={t("projects.personal.addTaskPlaceholder")}
         disabled={busy}
         className="h-11 min-w-0 flex-1 bg-background"
       />
       <Button type="submit" variant="secondary" disabled={!title.trim() || busy} className="h-11 px-3">
         {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-4 w-4" aria-hidden />}
-        <span className="ml-2 hidden sm:inline">Add task</span>
+        <span className="ml-2 hidden sm:inline">{t("projects.tasks.addTask")}</span>
       </Button>
     </form>
   );
@@ -140,6 +143,7 @@ export function TaskBoard({
   onUpdateTaskStatus: (taskId: string, status: CollaborationTaskStatus) => Promise<unknown>;
   onDeleteTask: (taskId: string) => Promise<unknown>;
 }) {
+  const { t } = useTranslation();
   const [listName, setListName] = useState("");
   const tasksByList = useMemo(() => {
     const grouped = new Map<string, CollaborationTask[]>();
@@ -164,34 +168,34 @@ export function TaskBoard({
     <section aria-labelledby="project-tasks-title" className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h2 id="project-tasks-title" className="text-lg font-semibold tracking-tight">Tasks</h2>
+          <h2 id="project-tasks-title" className="text-lg font-semibold tracking-tight">{t("projects.tasks.title")}</h2>
           <p className="mt-1 text-sm leading-5 text-muted-foreground">
-            Keep the project’s next actions close to the conversations that use them.
+            {t("projects.tasks.description")}
           </p>
         </div>
         <form onSubmit={(event) => void submitList(event)} className="flex w-full gap-2 sm:max-w-sm">
-          <label className="sr-only" htmlFor="new-task-list">List name</label>
+          <label className="sr-only" htmlFor="new-task-list">{t("projects.tasks.listName")}</label>
           <Input
             id="new-task-list"
             value={listName}
             maxLength={512}
             onChange={(event) => setListName(event.target.value)}
-            placeholder="New list name"
+            placeholder={t("projects.tasks.newListName")}
             disabled={Boolean(busyKey)}
             className="min-w-0 flex-1"
           />
           <Button type="submit" variant="outline" disabled={!listName.trim() || Boolean(busyKey)} className="shrink-0">
             {busyKey === "list:create" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : <Plus className="mr-2 h-4 w-4" aria-hidden />}
-            Add list
+            {t("projects.tasks.addList")}
           </Button>
         </form>
       </div>
 
       {detail.task_lists.length === 0 ? (
         <div className="rounded-panel bg-settings-surface px-5 py-8 text-center">
-          <p className="text-sm font-medium">Start with a task list</p>
+          <p className="text-sm font-medium">{t("projects.tasks.startList")}</p>
           <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
-            Create a list such as “Next” or “Backlog”, then add the work you want nanobot to keep in context.
+            {t("projects.tasks.startListDescription")}
           </p>
         </div>
       ) : (
@@ -203,7 +207,7 @@ export function TaskBoard({
                 <header className="flex min-h-12 items-center justify-between gap-3 px-4 py-3">
                   <h3 className="text-sm font-semibold">{list.name}</h3>
                   <span className="text-xs tabular-nums text-muted-foreground">
-                    {tasks.length} {tasks.length === 1 ? "task" : "tasks"}
+                    {t("projects.tasks.count", { count: tasks.length })}
                   </span>
                 </header>
                 {tasks.length ? (
@@ -220,7 +224,7 @@ export function TaskBoard({
                   </ul>
                 ) : (
                   <p className="border-t border-border/45 px-4 py-4 text-sm text-muted-foreground">
-                    Add the first task to this list.
+                    {t("projects.tasks.emptyList")}
                   </p>
                 )}
                 <NewTaskForm

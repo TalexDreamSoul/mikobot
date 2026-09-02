@@ -54,16 +54,19 @@ from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import RuntimeEventBus
 from nanobot.collaboration import (
     COLLABORATION_BINDING_METADATA_KEY,
+    COLLABORATION_BOT_METADATA_KEY,
     COLLABORATION_PROJECT_METADATA_KEY,
     COLLABORATION_USER_METADATA_KEY,
     COLLABORATION_VAULT_METADATA_KEY,
     AsyncLocalCollaborationRepository,
+    CollaborationPermissionError,
     CollaborationRepository,
     ConversationScope,
     build_collaboration_repository,
 )
 from nanobot.collaboration.context import collaboration_runtime_context
 from nanobot.collaboration.conversation import canonical_conversation_id
+from nanobot.collaboration.pairing import BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
 from nanobot.config.paths import get_media_dir, get_runtime_subdir
 from nanobot.config.schema import AgentDefaults, ModelPresetConfig
@@ -951,13 +954,21 @@ class AgentLoop:
                 )
         if msg.channel in {"cli", "websocket"}:
             metadata["direct"] = True
-        return await self.collaboration.resolve_scope(
+        scope = await self.collaboration.resolve_scope(
             msg.channel,
             msg.sender_id,
             conversation_id,
             metadata,
             self.workspace,
         )
+        if scope.route_denied or (
+            metadata.get(BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY) is True
+            and scope.is_isolated
+        ):
+            raise CollaborationPermissionError(
+                "channel has no enabled bot-project route"
+            )
+        return scope
 
     @staticmethod
     def _conversation_scope_from_attributes(
@@ -1534,7 +1545,11 @@ class AgentLoop:
                     continue
 
                 raw = msg.content.strip()
-                effective_key = await self._effective_session_key(msg)
+                try:
+                    effective_key = await self._effective_session_key(msg)
+                except CollaborationPermissionError as exc:
+                    logger.warning("Dropping inbound message outside an enabled bot route: {}", exc)
+                    continue
                 if await agent_context.handle_runtime_control(self, msg, self.tools):
                     continue
                 if (
@@ -2123,6 +2138,10 @@ class AgentLoop:
                 )
             else:
                 session.metadata.pop(COLLABORATION_PROJECT_METADATA_KEY, None)
+            if collaboration_scope.bot_id is not None:
+                session.metadata[COLLABORATION_BOT_METADATA_KEY] = collaboration_scope.bot_id
+            else:
+                session.metadata.pop(COLLABORATION_BOT_METADATA_KEY, None)
             if collaboration_scope.binding is not None:
                 session.metadata[COLLABORATION_BINDING_METADATA_KEY] = (
                     collaboration_scope.binding.id

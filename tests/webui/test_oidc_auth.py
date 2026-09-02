@@ -22,8 +22,10 @@ from nanobot.channels.websocket.runtime import (
     WebSocketConfig,
 )
 from nanobot.collaboration import AsyncLocalCollaborationRepository, CollaborationStore
+from nanobot.config.schema import Config, _resolve_tool_config_refs
 from nanobot.webui.gateway_endpoint import WebUIGatewayEndpoint
 from nanobot.webui.gateway_tokens import GatewayTokenStore
+from nanobot.webui.http_utils import http_json_response
 from nanobot.webui.ingress_policy import WebUIIngressPolicy
 from nanobot.webui.oidc_auth import OidcAuthenticator, OidcError, safe_return_to
 from nanobot.webui.ws_http import GatewayHTTPHandler
@@ -31,6 +33,10 @@ from nanobot.webui.ws_http import GatewayHTTPHandler
 _ISSUER = "https://issuer.example"
 _CLIENT_ID = "webui-client"
 _REDIRECT_URI = "https://agent.example/auth/oidc/callback"
+
+# Config may be imported during a circular tool-config import; resolve its
+# forward references after all test dependencies have loaded.
+_resolve_tool_config_refs()
 
 
 def _config(**overrides: object) -> OidcAuthConfig:
@@ -189,6 +195,10 @@ def _callback_request(authorization: dict[str, str], headers: Headers) -> WsRequ
         f"/auth/oidc/callback?code=provider-code&state={authorization['state']}",
         headers,
     )
+
+
+def _connection(request: WsRequest) -> SimpleNamespace:
+    return SimpleNamespace(request=request, remote_address=("127.0.0.1", 8765))
 
 
 async def _http_handler(tmp_path, authenticator: OidcAuthenticator) -> GatewayHTTPHandler:
@@ -555,6 +565,186 @@ async def test_trusted_proxy_token_issue_keeps_an_opaque_non_local_principal(
     assert identity is not None
     _user, local_owner = identity
     assert local_owner is False
+
+
+@pytest.mark.asyncio
+async def test_login_security_http_requires_configured_admin_and_redacts_or_preserves_invalid_secret(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an OIDC admin reads login settings; replies never expose the client secret or persist invalid updates."""
+    provider = _FakeOidcProvider()
+    provider.install(monkeypatch)
+    authenticator = OidcAuthenticator(_config())
+    handler = await _http_handler(tmp_path, authenticator)
+    oidc_config = _config(
+        token_endpoint_auth_method="client_secret_post", client_secret="top-secret-value"
+    )
+    current = Config.model_validate({
+        "channels": {"websocket": {"oidcAuth": oidc_config.model_dump(mode="json", by_alias=True)}}
+    })
+    update_calls = 0
+
+    def load() -> Config:
+        return current
+
+    def update(mutator) -> None:
+        nonlocal update_calls
+        update_calls += 1
+        mutator(current)
+
+    handler.settings = SimpleNamespace(config=SimpleNamespace(load=load, update=update))
+    authorization, flow_headers = await _begin(authenticator, provider)
+    session, _return_to, cookies = await authenticator.callback(
+        flow_headers, {"code": ["provider-code"], "state": [authorization["state"]]}
+    )
+    handler.config.oidc_auth.admin_subjects = [session.principal]
+    browser_headers = Headers({
+        "Cookie": f"nanobot_oidc_session={_cookie_value(cookies, 'nanobot_oidc_session')}"
+    })
+
+    ordinary_token = handler.tokens.issue_api_token(120, principal="oidc:ordinary")
+    ordinary_request = WsRequest(
+        "/api/settings/login-security", Headers({"Authorization": f"Bearer {ordinary_token}"})
+    )
+    ordinary = await handler.dispatch(_connection(ordinary_request), ordinary_request)
+    assert ordinary is not None and ordinary.status_code == 403
+
+    admin_request = WsRequest("/api/settings/login-security", browser_headers)
+    admin = await handler.dispatch(_connection(admin_request), admin_request)
+    assert admin is not None and admin.status_code == 200
+    payload = json.loads(admin.body)["login_security"]
+    assert payload["client_secret_configured"] is True
+    assert "client_secret" not in payload
+    assert "top-secret-value" not in admin.body.decode("utf-8")
+
+    admin_connection = _connection(WsRequest("/", browser_headers))
+    invalid = await handler.dispatch_webui_mutation(
+        admin_connection, "settings.login_security.update",
+        {"enabled": True, "issuer": "http://invalid.example"},
+    )
+    assert invalid.status_code == 400
+    assert json.loads(invalid.body)["fields"][0]["field"] == "issuer"
+    assert update_calls == 0
+    assert oidc_config.client_secret == "top-secret-value"
+
+
+@pytest.mark.asyncio
+async def test_login_security_update_rejects_stale_omitted_secret_without_overwriting_newer_config(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale OIDC update omitting a secret returns 409 without overwriting later configuration."""
+    provider = _FakeOidcProvider()
+    provider.install(monkeypatch)
+    handler = await _http_handler(tmp_path, OidcAuthenticator(_config()))
+    current = Config.model_validate({
+        "channels": {"websocket": {"oidcAuth": _config().model_dump(mode="json", by_alias=True)}}
+    })
+    newer = _config(
+        token_endpoint_auth_method="client_secret_post",
+        client_secret="newer-secret-value",
+        admin_subjects=["oidc:admin-after-race"],
+    )
+    newer_section = {"oidcAuth": newer.model_dump(mode="json", by_alias=True)}
+
+    def load() -> Config:
+        return current
+
+    def update(mutator) -> None:
+        current.channels.websocket = newer_section
+        mutator(current)
+
+    handler.settings = SimpleNamespace(config=SimpleNamespace(load=load, update=update))
+    local_token = handler.tokens.issue_api_token(120)
+    connection = _connection(WsRequest("/", Headers({"Authorization": f"Bearer {local_token}"})))
+
+    response = await handler.dispatch_webui_mutation(
+        connection,
+        "settings.login_security.update",
+        {"enabled": True, "scopes": ["openid", "profile", "email"]},
+    )
+
+    assert response.status_code == 409
+    payload = json.loads(response.body)
+    assert payload == {"error": "OIDC configuration changed; reload and retry", "fields": []}
+    assert "client_secret" not in payload
+    assert "newer-secret-value" not in response.body.decode("utf-8")
+    assert current.channels.websocket == newer_section
+
+
+@pytest.mark.asyncio
+async def test_oidc_user_create_connect_is_allowed_but_other_actor_cannot_poll_or_cancel(
+    tmp_path,
+) -> None:
+    """User-created connect sessions are actor-bound: a different user cannot poll or cancel them."""
+    handler = await _http_handler(tmp_path, OidcAuthenticator(_config()))
+    owner_actor: str | None = None
+
+    async def settings_dispatch(_connection, request, path):
+        nonlocal owner_actor
+        actor = getattr(request, "_nanobot_settings_actor_user_id", None)
+        if path.endswith("/start"):
+            owner_actor = actor
+            return http_json_response({"status": "succeeded"})
+        if path.endswith(("/poll", "/cancel")) and actor != owner_actor:
+            return http_json_response({"error": "connection belongs to another user"}, status=403)
+        return http_json_response({"status": "succeeded"})
+
+    handler.settings_routes = SimpleNamespace(dispatch=settings_dispatch)
+    owner_token = handler.tokens.issue_api_token(120, principal="oidc:connect-owner")
+    owner_connection = _connection(WsRequest(
+        "/", Headers({"Authorization": f"Bearer {owner_token}"})
+    ))
+    created = await handler.dispatch_webui_mutation(
+        owner_connection,
+        "settings.channel.connect.start",
+        {"channel": "weixin", "mode": "create"},
+    )
+    assert created.status_code == 200
+    assert json.loads(created.body)["status"] == "succeeded"
+    assert owner_actor is not None
+
+    other_token = handler.tokens.issue_api_token(120, principal="oidc:connect-other")
+    other_connection = _connection(WsRequest(
+        "/", Headers({"Authorization": f"Bearer {other_token}"})
+    ))
+    for action in ("settings.channel.connect.poll", "settings.channel.connect.cancel"):
+        rejected = await handler.dispatch_webui_mutation(
+            other_connection,
+            action,
+            {"channel": "weixin", "session_id": "session-owner"},
+        )
+        assert rejected.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_oidc_ordinary_users_cannot_mutate_process_global_channel_configuration(
+    tmp_path,
+) -> None:
+    """Channel configure/connect mutations reject OIDC users while a local owner reaches the settings boundary."""
+    handler = await _http_handler(tmp_path, OidcAuthenticator(_config()))
+
+    async def settings_dispatch(_connection, _request, _path):
+        return http_json_response({"ok": True})
+
+    handler.settings_routes = SimpleNamespace(dispatch=settings_dispatch)
+    ordinary_token = handler.tokens.issue_api_token(120, principal="oidc:ordinary")
+    ordinary_connection = _connection(WsRequest(
+        "/", Headers({"Authorization": f"Bearer {ordinary_token}"})
+    ))
+    local_token = handler.tokens.issue_api_token(120)
+    admin_connection = _connection(WsRequest(
+        "/", Headers({"Authorization": f"Bearer {local_token}"})
+    ))
+    actions = (
+        ("settings.channel.connect.start", {"channel": "weixin"}),
+        ("settings.channel.configure", {"channel": "weixin", "values": {}}),
+    )
+
+    for action, payload in actions:
+        rejected = await handler.dispatch_webui_mutation(ordinary_connection, action, payload)
+        assert rejected.status_code == 403
+        allowed = await handler.dispatch_webui_mutation(admin_connection, action, payload)
+        assert allowed.status_code == 200
 
 
 @pytest.mark.asyncio

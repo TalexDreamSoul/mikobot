@@ -6,6 +6,12 @@ from collections.abc import Mapping
 from typing import TypeAlias, cast
 
 from nanobot.collaboration.models import (
+    Bot,
+    BotCapabilityProfile,
+    BotChannelAssignment,
+    BotProjectAssignment,
+    BotProjectChannel,
+    BotState,
     ContextSource,
     ContextSourceKind,
     ConversationBinding,
@@ -15,6 +21,8 @@ from nanobot.collaboration.models import (
     Organization,
     OrganizationMembership,
     OrganizationRole,
+    PairingChallenge,
+    PairingPurpose,
     Persona,
     PersonalTask,
     Project,
@@ -46,6 +54,13 @@ def decode_user_row(row: Row) -> User:
         updated_at_ms=_integer(row, "updated_at_ms"),
         default_vault_id=_optional_string(row, "default_vault_id"),
         default_persona_id=_optional_string(row, "default_persona_id"),
+        default_organization_id=(
+            _optional_string(row, "default_organization_id")
+            if "default_organization_id" in row else None
+        ),
+        default_bot_id=(
+            _optional_string(row, "default_bot_id") if "default_bot_id" in row else None
+        ),
     )
 
 
@@ -78,6 +93,79 @@ def decode_persona_row(row: Row) -> Persona:
         instructions=_string(row, "instructions"),
         created_at_ms=_integer(row, "created_at_ms"),
         updated_at_ms=_integer(row, "updated_at_ms"),
+    )
+
+
+def decode_bot_row(row: Row) -> Bot:
+    return Bot(
+        id=_string(row, "id"),
+        organization_id=_string(row, "organization_id"),
+        owner_user_id=_string(row, "owner_user_id"),
+        name=_string(row, "name"),
+        avatar_url=_optional_string(row, "avatar_url"),
+        persona_id=_optional_string(row, "persona_id"),
+        state=BotState(_string(row, "state")),
+        created_at_ms=_integer(row, "created_at_ms"),
+        updated_at_ms=_integer(row, "updated_at_ms"),
+    )
+
+
+def decode_bot_project_assignment_row(row: Row) -> BotProjectAssignment:
+    return BotProjectAssignment(
+        bot_id=_string(row, "bot_id"),
+        project_id=_string(row, "project_id"),
+        assigned_by_user_id=_string(row, "assigned_by_user_id"),
+        created_at_ms=_integer(row, "created_at_ms"),
+    )
+
+
+def decode_bot_channel_assignment_row(row: Row) -> BotChannelAssignment:
+    return BotChannelAssignment(
+        bot_id=_string(row, "bot_id"),
+        channel_type=_string(row, "channel_type"),
+        instance_id=_string(row, "instance_id"),
+        claimed_by_user_id=_string(row, "claimed_by_user_id"),
+        created_at_ms=_integer(row, "created_at_ms"),
+    )
+
+
+def decode_bot_project_channel_row(row: Row) -> BotProjectChannel:
+    return BotProjectChannel(
+        bot_id=_string(row, "bot_id"),
+        project_id=_string(row, "project_id"),
+        channel_type=_string(row, "channel_type"),
+        instance_id=_string(row, "instance_id"),
+        enabled=_boolean(row, "enabled"),
+        updated_at_ms=_integer(row, "updated_at_ms"),
+    )
+
+
+def decode_bot_capability_profile_row(row: Row) -> BotCapabilityProfile:
+    return BotCapabilityProfile(
+        bot_id=_string(row, "bot_id"),
+        project_id=_optional_string(row, "project_id"),
+        revision=_integer(row, "revision"),
+        settings=freeze_bounded_json(_required(row, "settings"), "settings"),
+        updated_at_ms=_integer(row, "updated_at_ms"),
+    )
+
+
+def decode_pairing_challenge_row(row: Row) -> PairingChallenge:
+    return PairingChallenge(
+        id=_string(row, "id"),
+        code_digest=_string(row, "code_digest"),
+        requested_by_user_id=_string(row, "requested_by_user_id"),
+        purpose=PairingPurpose(_string(row, "purpose")),
+        organization_id=_string(row, "organization_id"),
+        bot_id=_string(row, "bot_id"),
+        project_id=_optional_string(row, "project_id"),
+        channel_type=_string(row, "channel_type"),
+        instance_id=_string(row, "instance_id"),
+        expires_at_ms=_integer(row, "expires_at_ms"),
+        verified_at_ms=_optional_integer(row, "verified_at_ms"),
+        verified_sender_id=_optional_string(row, "verified_sender_id"),
+        consumed_at_ms=_optional_integer(row, "consumed_at_ms"),
+        created_at_ms=_integer(row, "created_at_ms"),
     )
 
 

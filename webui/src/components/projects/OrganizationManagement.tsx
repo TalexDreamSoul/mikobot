@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useTranslation } from "react-i18next";
 import { Building2, Loader2, Plus, ShieldCheck, Trash2, UserPlus, Users } from "lucide-react";
 
 import {
@@ -21,15 +22,7 @@ import type {
   CollaborationOrganizationRole,
 } from "@/lib/types";
 
-const ORGANIZATION_ROLES: Array<{ value: CollaborationOrganizationRole; label: string }> = [
-  { value: "member", label: "Member" },
-  { value: "admin", label: "Admin" },
-  { value: "owner", label: "Owner" },
-];
-
-function titleCaseRole(role: CollaborationOrganizationRole): string {
-  return role.slice(0, 1).toUpperCase() + role.slice(1);
-}
+const ORGANIZATION_ROLES: CollaborationOrganizationRole[] = ["member", "admin", "owner"];
 
 export function OrganizationManagement({
   open,
@@ -70,6 +63,7 @@ export function OrganizationManagement({
   onAddMember: (memberUserId: string, role: CollaborationOrganizationRole) => Promise<unknown>;
   onRemoveMember: (memberUserId: string) => Promise<unknown>;
 }) {
+  const { t } = useTranslation();
   const [newOrganizationName, setNewOrganizationName] = useState("");
   const [renameName, setRenameName] = useState("");
   const [memberUserId, setMemberUserId] = useState("");
@@ -159,9 +153,9 @@ export function OrganizationManagement({
           closeButtonClassName="right-3 top-3 inline-flex h-11 w-11 items-center justify-center rounded-control sm:right-4 sm:top-4"
         >
           <header className="shrink-0 border-b border-border/55 px-5 py-5 pr-16">
-            <SheetTitle>Organization settings</SheetTitle>
+            <SheetTitle>{t("projects.organizations.title")}</SheetTitle>
             <SheetDescription className="mt-1 leading-5">
-              Choose where projects live and manage access by exact user ID.
+              {t("projects.organizations.description")}
             </SheetDescription>
           </header>
 
@@ -177,9 +171,9 @@ export function OrganizationManagement({
                 <div className="flex items-start gap-3">
                   <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" aria-hidden />
                   <div className="min-w-0">
-                    <h2 id="sharing-id-title" className="text-sm font-semibold">Your sharing ID</h2>
+                    <h2 id="sharing-id-title" className="text-sm font-semibold">{t("projects.organizations.sharingId")}</h2>
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                      Give this exact ID to an organization owner or admin. It does not expose your projects by itself.
+                      {t("projects.organizations.sharingIdDescription")}
                     </p>
                     <code className="mt-2 block select-all break-all rounded-compact bg-background px-3 py-2 text-xs text-foreground">
                       {currentUserId}
@@ -191,21 +185,21 @@ export function OrganizationManagement({
               <section aria-labelledby="create-organization-title">
                 <div className="flex items-center gap-2">
                   <Building2 className="h-4 w-4 text-muted-foreground" aria-hidden />
-                  <h2 id="create-organization-title" className="text-sm font-semibold">Create a shared organization</h2>
+                  <h2 id="create-organization-title" className="text-sm font-semibold">{t("projects.organizations.create")}</h2>
                 </div>
                 <form onSubmit={(event) => void createOrganization(event)} className="mt-3 flex gap-2">
                   <Input
                     value={newOrganizationName}
                     onChange={(event) => setNewOrganizationName(event.target.value)}
-                    placeholder="Organization name"
-                    aria-label="New organization name"
+                    placeholder={t("projects.organizations.namePlaceholder")}
+                    aria-label={t("projects.organizations.newNameAria")}
                     maxLength={256}
                     disabled={Boolean(busyKey)}
                     className="h-11"
                   />
                   <Button type="submit" disabled={!newOrganizationName.trim() || Boolean(busyKey)} className="h-11 shrink-0 px-3">
                     {busyKey === "organization:create" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-4 w-4" aria-hidden />}
-                    <span className="sr-only">Create organization</span>
+                    <span className="sr-only">{t("projects.organizations.create")}</span>
                   </Button>
                 </form>
               </section>
@@ -242,9 +236,9 @@ export function OrganizationManagement({
                 </div>
               ) : !selectedDetail ? (
                 <div className="rounded-panel bg-settings-surface px-4 py-5 text-sm text-muted-foreground">
-                  <p>Organization details are unavailable.</p>
+                  <p>{t("projects.organizations.unavailable")}</p>
                   <Button type="button" variant="outline" onClick={() => void onRefresh()} className="mt-3">
-                    Try again
+                    {t("common.retry")}
                   </Button>
                 </div>
               ) : (
@@ -259,7 +253,12 @@ export function OrganizationManagement({
                           </span>
                         </div>
                         <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                          Your role: {currentMembership ? titleCaseRole(currentMembership.role) : "Unknown"} · {projectCount} visible {projectCount === 1 ? "project" : "projects"}
+                          {t("projects.organizations.roleSummary", {
+                            role: currentMembership
+                              ? t(`projects.organizations.roles.${currentMembership.role}`)
+                              : t("projects.organizations.unknown"),
+                            count: projectCount,
+                          })}
                         </p>
                       </div>
                     </div>
@@ -270,7 +269,7 @@ export function OrganizationManagement({
                     </p>
 
                     <form onSubmit={(event) => void renameOrganization(event)} className="mt-4">
-                      <label htmlFor="organization-rename" className="text-xs font-medium">Organization name</label>
+                      <label htmlFor="organization-rename" className="text-xs font-medium">{t("projects.organizations.name")}</label>
                       <div className="mt-1.5 flex gap-2">
                         <Input
                           id="organization-rename"
@@ -290,7 +289,7 @@ export function OrganizationManagement({
                         </Button>
                       </div>
                       {!canAdminister ? (
-                        <p className="mt-1.5 text-xs text-muted-foreground">Only owners and admins can rename this organization.</p>
+                        <p className="mt-1.5 text-xs text-muted-foreground">{t("projects.organizations.renameRestricted")}</p>
                       ) : null}
                     </form>
                   </section>
@@ -299,9 +298,9 @@ export function OrganizationManagement({
                     <header className="flex items-start gap-3 px-4 py-4">
                       <Users className="mt-0.5 h-4 w-4 text-muted-foreground" aria-hidden />
                       <div>
-                        <h2 id="organization-members-title" className="text-sm font-semibold">Members</h2>
+                        <h2 id="organization-members-title" className="text-sm font-semibold">{t("projects.organizations.members")}</h2>
                         <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                          Roles govern organization administration. User IDs are shown because no public member directory is available.
+                          {t("projects.organizations.membersDescription")}
                         </p>
                       </div>
                     </header>
@@ -319,7 +318,7 @@ export function OrganizationManagement({
                                   {member.user_id}
                                   {member.user_id === currentUserId ? <span className="ml-1 text-xs font-normal text-muted-foreground">(you)</span> : null}
                                 </p>
-                                <p className="mt-0.5 text-xs text-muted-foreground">{titleCaseRole(member.role)}</p>
+                                <p className="mt-0.5 text-xs text-muted-foreground">{t(`projects.organizations.roles.${member.role}`)}</p>
                               </div>
                               <Button
                                 type="button"
@@ -344,26 +343,26 @@ export function OrganizationManagement({
                         })}
                       </ul>
                     ) : (
-                      <p className="border-t border-border/45 px-4 py-5 text-sm text-muted-foreground">No members are visible.</p>
+                      <p className="border-t border-border/45 px-4 py-5 text-sm text-muted-foreground">{t("projects.organizations.noMembers")}</p>
                     )}
 
                     <form onSubmit={(event) => void addMember(event)} className="border-t border-border/45 p-4">
                       <div className="flex items-center gap-2">
                         <UserPlus className="h-4 w-4 text-muted-foreground" aria-hidden />
-                        <h3 className="text-sm font-semibold">Add or update a member</h3>
+                        <h3 className="text-sm font-semibold">{t("projects.organizations.addMember")}</h3>
                       </div>
-                      <label htmlFor="organization-member-user-id" className="mt-3 block text-xs font-medium">Exact user ID</label>
+                      <label htmlFor="organization-member-user-id" className="mt-3 block text-xs font-medium">{t("projects.organizations.exactUserId")}</label>
                       <Input
                         id="organization-member-user-id"
                         value={memberUserId}
                         onChange={(event) => setMemberUserId(event.target.value)}
-                        placeholder="User ID"
+                        placeholder={t("projects.members.userIdPlaceholder")}
                         autoComplete="off"
                         maxLength={128}
                         disabled={!canAdminister || Boolean(busyKey)}
                         className="mt-1.5 h-11 bg-background"
                       />
-                      <label htmlFor="organization-member-role" className="mt-3 block text-xs font-medium">Role</label>
+                      <label htmlFor="organization-member-role" className="mt-3 block text-xs font-medium">{t("projects.organizations.role")}</label>
                       <select
                         id="organization-member-role"
                         value={memberRole}
@@ -371,7 +370,9 @@ export function OrganizationManagement({
                         disabled={!isOwner || Boolean(busyKey)}
                         className="mt-1.5 h-11 w-full rounded-control border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
                       >
-                        {availableRoles.map((role) => <option key={role.value} value={role.value}>{role.label}</option>)}
+                        {availableRoles.map((role) => (
+                          <option key={role} value={role}>{t(`projects.organizations.roles.${role}`)}</option>
+                        ))}
                       </select>
                       <Button
                         type="submit"
@@ -379,22 +380,22 @@ export function OrganizationManagement({
                         className="mt-3 h-11 w-full"
                       >
                         {busyKey?.startsWith("organization:member:add:") ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : null}
-                        {existingMember ? "Update member role" : "Add member"}
+                        {existingMember ? t("projects.organizations.updateMemberRole") : t("projects.organizations.addMemberAction")}
                       </Button>
                       {!canAdminister ? (
-                        <p className="mt-2 text-xs text-muted-foreground">Only owners and admins can manage members.</p>
+                        <p className="mt-2 text-xs text-muted-foreground">{t("projects.organizations.manageRestricted")}</p>
                       ) : adminTargetBlocked ? (
-                        <p className="mt-2 text-xs text-muted-foreground">Admins cannot change or remove another admin or owner.</p>
+                        <p className="mt-2 text-xs text-muted-foreground">{t("projects.organizations.adminTargetBlocked")}</p>
                       ) : isAdmin ? (
-                        <p className="mt-2 text-xs text-muted-foreground">Admins can add, update, and remove members only. Owner role is required to grant admin or owner access.</p>
+                        <p className="mt-2 text-xs text-muted-foreground">{t("projects.organizations.adminScope")}</p>
                       ) : null}
                     </form>
                   </section>
 
                   <section aria-labelledby="organization-danger-title" className="rounded-panel border border-destructive/20 p-4">
-                    <h2 id="organization-danger-title" className="text-sm font-semibold">Delete organization</h2>
+                    <h2 id="organization-danger-title" className="text-sm font-semibold">{t("projects.organizations.delete")}</h2>
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                      Only empty shared organizations can be deleted. This action permanently removes its membership roster.
+                      {t("projects.organizations.deleteDescription")}
                     </p>
                     <Button
                       type="button"
@@ -418,18 +419,21 @@ export function OrganizationManagement({
       <AlertDialog open={Boolean(memberToRemove)} onOpenChange={(next) => !next && setMemberToRemove(null)}>
         <AlertDialogContent className="w-[min(calc(100vw-2rem),24rem)]">
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove organization member?</AlertDialogTitle>
+            <AlertDialogTitle>{t("projects.organizations.removeMemberTitle")}</AlertDialogTitle>
             <AlertDialogDescription className="break-words">
-              Remove {memberToRemove?.user_id} from {organization?.name}? The server will preserve owner and access invariants.
+              {t("projects.organizations.removeMemberDescription", {
+                user: memberToRemove?.user_id,
+                organization: organization?.name,
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => void removeMember()}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              Remove member
+              {t("projects.organizations.removeMemberAction")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -438,20 +442,20 @@ export function OrganizationManagement({
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <AlertDialogContent className="w-[min(calc(100vw-2rem),24rem)]">
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete {organization?.name}?</AlertDialogTitle>
+            <AlertDialogTitle>{t("projects.organizations.deleteConfirmTitle", { name: organization?.name })}</AlertDialogTitle>
             <AlertDialogDescription>
-              This permanently deletes the empty organization and its membership roster. This action cannot be undone.
+              {t("projects.organizations.deleteConfirmDescription")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 void onDelete().then(() => setDeleteOpen(false)).catch(() => undefined);
               }}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              Delete organization
+              {t("projects.organizations.deleteAction")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

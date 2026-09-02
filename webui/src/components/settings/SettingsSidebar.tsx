@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   Globe2,
   ImageIcon,
+  KeyRound,
   LogOut,
   MessageCircle,
   Mic,
@@ -39,6 +40,7 @@ const SETTINGS_NAV_ITEMS: Array<{ key: SettingsSectionKey; icon: LucideIcon; fal
   { key: "voice", icon: Mic, fallback: "Voice" },
   { key: "browser", icon: Globe2, fallback: "Web" },
   { key: "channels", icon: MessageCircle, fallback: "Channels" },
+  { key: "login-security", icon: KeyRound, fallback: "Login & Security" },
   { key: "runtime", icon: Server, fallback: "System" },
   { key: "advanced", icon: ShieldCheck, fallback: "Security" },
 ];

@@ -12,6 +12,7 @@ from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
 from nanobot.collaboration.models import (
+    Bot,
     ContextSource,
     ContextSourceKind,
     ConversationBinding,
@@ -19,8 +20,11 @@ from nanobot.collaboration.models import (
     ConversationScopeKind,
     ExtensionProfile,
 )
+from nanobot.collaboration.pairing import BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY
 from nanobot.collaboration.postgres.base import PostgresRepositoryBase
 from nanobot.collaboration.postgres.rows import (
+    decode_bot_capability_profile_row,
+    decode_bot_row,
     decode_context_source_row,
     decode_conversation_binding_row,
     decode_extension_profile_row,
@@ -250,6 +254,7 @@ class PostgresContextMixin(PostgresRepositoryBase):
         channel, sender_id, chat_id = _key(channel, "channel", limit=128), _key(sender_id, "sender_id"), _key(chat_id, "chat_id")
         metadata = metadata if metadata is not None else {}
         thread_id = _thread_id(metadata)
+        require_bot_route = metadata.get(BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY) is True
         suffix = _scope_suffix(channel, chat_id, thread_id)
         async with self._identity_transaction(channel, sender_id) as connection:
             identity = await self._fetch_one(connection, """
@@ -261,7 +266,8 @@ class PostgresContextMixin(PostgresRepositoryBase):
         user_id = _identifier(identity["user_id"], "user_id")
         async with self._actor_transaction(user_id) as connection:
             user_row = await self._fetch_one(connection, """
-                SELECT id, display_name, default_project_id, default_vault_id, default_persona_id, created_at_ms, updated_at_ms
+                SELECT id, display_name, default_project_id, default_vault_id, default_persona_id,
+                       default_organization_id, default_bot_id, created_at_ms, updated_at_ms
                 FROM nanobot_collaboration.collaboration_users WHERE id = %s
                 """, (user_id,))
             if user_row is None:
@@ -288,11 +294,19 @@ class PostgresContextMixin(PostgresRepositoryBase):
                 binding = decode_conversation_binding_row(binding_rows[0])
                 project = await self._project_for_member(connection, binding.project_id, user.id)
                 if project is not None:
-                    return await self._project_scope(connection, ConversationScopeKind.BOUND, user, project, binding, suffix)
+                    return await self._project_scope(
+                        connection, ConversationScopeKind.BOUND, user, project, binding,
+                        suffix, channel, default_workspace,
+                        require_bot_route=require_bot_route,
+                    )
             if _is_direct(chat_id, sender_id, metadata) and user.default_project_id is not None:
                 project = await self._project_for_member(connection, user.default_project_id, user.id)
                 if project is not None:
-                    return await self._project_scope(connection, ConversationScopeKind.DIRECT, user, project, None, suffix)
+                    return await self._project_scope(
+                        connection, ConversationScopeKind.DIRECT, user, project, None,
+                        suffix, channel, default_workspace,
+                        require_bot_route=require_bot_route,
+                    )
         return _isolated_scope(user.id, default_workspace, suffix, user)
 
     async def _member_organization(self, connection: _Connection, project_id: str, user_id: str) -> str:
@@ -325,14 +339,116 @@ class PostgresContextMixin(PostgresRepositoryBase):
             """, (user_id, project_id))
         return decode_project_row(row) if row is not None else None
 
-    async def _project_scope(self, connection: _Connection, kind: ConversationScopeKind, user: User, project: Project, binding: ConversationBinding | None, suffix: str) -> ConversationScope:
-        profile_row = await self._fetch_one(connection, """
-            SELECT project_id, user_id, revision, settings, updated_at_ms
-            FROM nanobot_collaboration.collaboration_extension_profiles
-            WHERE organization_id = %s AND project_id = %s AND user_id = %s
-            """, (project.organization_id, project.id, user.id))
-        profile = decode_extension_profile_row(profile_row) if profile_row is not None else ExtensionProfile(project.id, user.id, 0, {}, 0)
-        persona = await self._default_persona(connection, user)
+    async def _project_scope(
+        self,
+        connection: _Connection,
+        kind: ConversationScopeKind,
+        user: User,
+        project: Project,
+        binding: ConversationBinding | None,
+        suffix: str,
+        channel: str,
+        default_workspace: str | Path,
+        *,
+        require_bot_route: bool,
+    ) -> ConversationScope:
+        bot_row = await self._fetch_one(
+            connection,
+            """
+            SELECT bot.id, bot.organization_id, bot.owner_user_id, bot.name,
+                   bot.avatar_url, bot.persona_id, bot.state, bot.created_at_ms,
+                   bot.updated_at_ms
+            FROM nanobot_collaboration.collaboration_bot_channel_assignments AS assignment
+            JOIN nanobot_collaboration.collaboration_bots AS bot
+              ON bot.organization_id = assignment.organization_id
+             AND bot.id = assignment.bot_id
+             AND bot.state = 'active'
+            JOIN nanobot_collaboration.collaboration_bot_project_assignments AS project_assignment
+              ON project_assignment.organization_id = bot.organization_id
+             AND project_assignment.bot_id = bot.id
+             AND project_assignment.project_id = %s
+            JOIN nanobot_collaboration.collaboration_bot_project_channels AS route
+              ON route.organization_id = bot.organization_id
+             AND route.bot_id = bot.id
+             AND route.project_id = project_assignment.project_id
+             AND route.channel_type = assignment.channel_type
+             AND route.instance_id = assignment.instance_id
+             AND route.enabled = TRUE
+            WHERE (CASE WHEN assignment.instance_id = 'default' THEN assignment.channel_type
+                        ELSE assignment.channel_type || '.' || assignment.instance_id END) = %s
+            ORDER BY bot.updated_at_ms DESC, bot.id
+            LIMIT 1
+            """,
+            (project.id, channel),
+        )
+        if bot_row is None and require_bot_route:
+            return _isolated_scope(
+                user.id, default_workspace, suffix, user, route_denied=True
+            )
+        if bot_row is None:
+            claimed_row = await self._fetch_one(
+                connection,
+                """
+                SELECT 1
+                FROM nanobot_collaboration.collaboration_channel_claim_registry
+                WHERE (CASE WHEN instance_id = 'default' THEN channel_type
+                            ELSE channel_type || '.' || instance_id END) = %s
+                LIMIT 1
+                """,
+                (channel,),
+            )
+            if claimed_row is not None:
+                return _isolated_scope(
+                    user.id, default_workspace, suffix, user, route_denied=True
+                )
+        if bot_row is None and user.default_bot_id is not None:
+            bot_row = await self._fetch_one(
+                connection,
+                """
+                SELECT bot.id, bot.organization_id, bot.owner_user_id, bot.name,
+                       bot.avatar_url, bot.persona_id, bot.state, bot.created_at_ms,
+                       bot.updated_at_ms
+                FROM nanobot_collaboration.collaboration_bots AS bot
+                JOIN nanobot_collaboration.collaboration_bot_project_assignments AS project_assignment
+                  ON project_assignment.organization_id = bot.organization_id
+                 AND project_assignment.bot_id = bot.id
+                 AND project_assignment.project_id = %s
+                WHERE bot.id = %s AND bot.state = 'active'
+                LIMIT 1
+                """,
+                (project.id, user.default_bot_id),
+            )
+        bot: Bot | None = decode_bot_row(bot_row) if bot_row is not None else None
+        profile = None
+        if bot is not None:
+            bot_profile_row = await self._fetch_one(
+                connection,
+                """
+                SELECT bot_id, project_id, revision, settings, updated_at_ms
+                FROM nanobot_collaboration.collaboration_bot_capability_profiles
+                WHERE organization_id = %s AND bot_id = %s
+                  AND scope_project_id IN (%s, '')
+                ORDER BY CASE WHEN scope_project_id = %s THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (bot.organization_id, bot.id, project.id, project.id),
+            )
+            if bot_profile_row is not None:
+                bot_profile = decode_bot_capability_profile_row(bot_profile_row)
+                profile = ExtensionProfile(
+                    project.id, user.id, bot_profile.revision,
+                    bot_profile.settings, bot_profile.updated_at_ms,
+                )
+        if profile is None:
+            profile_row = await self._fetch_one(connection, """
+                SELECT project_id, user_id, revision, settings, updated_at_ms
+                FROM nanobot_collaboration.collaboration_extension_profiles
+                WHERE organization_id = %s AND project_id = %s AND user_id = %s
+                """, (project.organization_id, project.id, user.id))
+            profile = decode_extension_profile_row(profile_row) if profile_row is not None else ExtensionProfile(project.id, user.id, 0, {}, 0)
+        persona = await self._default_persona(
+            connection, user, bot.persona_id if bot is not None else None
+        )
         vault_id = persona.default_vault_id if persona is not None else user.default_vault_id
         if vault_id is None:
             raise CollaborationStoreFormatError("authorized user has no default vault")
@@ -341,21 +457,31 @@ class PostgresContextMixin(PostgresRepositoryBase):
             """, (vault_id,))
         if vault is None:
             raise CollaborationStoreFormatError("authorized user has no default vault")
-        return ConversationScope(kind, user.id, project.id, user, project, binding, profile, profile.revision, project.workspace_path, suffix, vault_id, persona.id if persona else None)
+        return ConversationScope(
+            kind, user.id, project.id, user, project, binding, profile, profile.revision,
+            project.workspace_path, suffix, vault_id, persona.id if persona else None,
+            bot.id if bot is not None else None, bot,
+        )
 
-    async def _default_persona(self, connection: _Connection, user: User) -> Persona | None:
-        if user.default_persona_id is None:
-            return None
-        row = await self._fetch_one(connection, """
-            SELECT id, owner_user_id, name, default_vault_id, instructions, created_at_ms, updated_at_ms
-            FROM nanobot_collaboration.collaboration_personas WHERE id = %s
-            """, (user.default_persona_id,))
-        if row is None:
-            return None
-        persona = decode_persona_row(row)
-        if persona.owner_user_id != user.id:
-            raise CollaborationStoreFormatError("default persona is not user-owned")
-        return persona
+    async def _default_persona(
+        self, connection: _Connection, user: User, persona_id: str | None = None
+    ) -> Persona | None:
+        candidate_ids = [
+            candidate_id
+            for candidate_id in (persona_id, user.default_persona_id)
+            if candidate_id is not None
+        ]
+        for candidate_id in dict.fromkeys(candidate_ids):
+            row = await self._fetch_one(connection, """
+                SELECT id, owner_user_id, name, default_vault_id, instructions, created_at_ms, updated_at_ms
+                FROM nanobot_collaboration.collaboration_personas WHERE id = %s
+                """, (candidate_id,))
+            if row is None:
+                continue
+            persona = decode_persona_row(row)
+            if persona.owner_user_id == user.id:
+                return persona
+        return None
 
 
 def _identifier(value: object, field: str) -> str:
@@ -425,8 +551,27 @@ def _scope_suffix(channel: str, chat_id: str, thread_id: str | None) -> str:
     return "collab-" + sha256("\x00".join(("v1", channel, chat_id, thread_id or "")).encode()).hexdigest()[:24]
 
 
-def _isolated_scope(user_id: str | None, default_workspace: str | Path, suffix: str, user: User | None = None) -> ConversationScope:
+def _isolated_scope(
+    user_id: str | None,
+    default_workspace: str | Path,
+    suffix: str,
+    user: User | None = None,
+    *,
+    route_denied: bool = False,
+) -> ConversationScope:
     workspace = str(default_workspace).strip()
     if not workspace or len(workspace) > 16_000 or any(ord(char) < 32 for char in workspace):
         raise CollaborationStoreFormatError("invalid workspace_path")
-    return ConversationScope(ConversationScopeKind.ISOLATED, user_id, None, user, None, None, None, 0, None, suffix)
+    return ConversationScope(
+        ConversationScopeKind.ISOLATED,
+        user_id,
+        None,
+        user,
+        None,
+        None,
+        None,
+        0,
+        None,
+        suffix,
+        route_denied=route_denied,
+    )

@@ -15,6 +15,7 @@ import {
   providerFormFromRow,
 } from "@/components/settings/models/ProviderSettings";
 import { AppearanceSettings, OverviewSettings } from "@/components/settings/overview/OverviewSettings";
+import { LoginSecuritySettingsPanel } from "@/components/settings/security/LoginSecuritySettings";
 import { SettingsSidebar, standaloneSectionTitle } from "@/components/settings/SettingsSidebar";
 import {
   NanobotFeatureInstallDialog,
@@ -393,6 +394,8 @@ export function SettingsPage({
             isRestarting={isRestarting || hostEngineApplying}
           />
         );
+      case "login-security":
+        return <LoginSecuritySettingsPanel />;
       case "apps":
         return (
           <AppsCatalogSettings

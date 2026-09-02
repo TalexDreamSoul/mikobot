@@ -10,6 +10,12 @@ from nanobot.config.schema import CollaborationConfig
 
 from .local_repository import AsyncLocalCollaborationRepository
 from .models import (
+    Bot,
+    BotCapabilityProfile,
+    BotChannelAssignment,
+    BotProjectAssignment,
+    BotProjectChannel,
+    BotState,
     ContextSource,
     ContextSourceKind,
     ConversationBinding,
@@ -19,6 +25,8 @@ from .models import (
     Organization,
     OrganizationMembership,
     OrganizationRole,
+    PairingChallenge,
+    PairingPurpose,
     Persona,
     PersonalTask,
     Project,
@@ -185,6 +193,70 @@ class CollaborationRepository(Protocol):
     async def list_organization_members(
         self, organization_id: str, user_id: str
     ) -> list[OrganizationMembership]: ...
+
+
+    async def create_bot(
+        self, actor_user_id: str, organization_id: str, name: str, *,
+        avatar_url: str | None = None, persona_id: str | None = None,
+    ) -> Bot: ...
+
+    async def get_bot(self, actor_user_id: str, bot_id: str) -> Bot | None: ...
+
+    async def list_bots(
+        self, actor_user_id: str, *, organization_id: str | None = None
+    ) -> list[Bot]: ...
+
+    async def update_bot(
+        self, bot_id: str, actor_user_id: str, *, name: str | None = None,
+        avatar_url: str | None = None, persona_id: str | None = None,
+        state_value: BotState | None = None,
+    ) -> Bot: ...
+
+    async def delete_bot(self, bot_id: str, actor_user_id: str) -> bool: ...
+
+    async def update_user_defaults(
+        self, user_id: str, *, organization_id: str, bot_id: str,
+        project_id: str | None = None,
+    ) -> User: ...
+
+    async def list_bot_projects(
+        self, actor_user_id: str, bot_id: str
+    ) -> list[BotProjectAssignment]: ...
+
+    async def list_bot_channels(
+        self, actor_user_id: str, bot_id: str
+    ) -> list[BotChannelAssignment]: ...
+
+    async def list_bot_project_channels(
+        self, actor_user_id: str, bot_id: str, project_id: str
+    ) -> list[BotProjectChannel]: ...
+
+    async def get_bot_capability_profile(
+        self, actor_user_id: str, bot_id: str, *, project_id: str | None = None
+    ) -> BotCapabilityProfile: ...
+
+    async def update_bot_capability_profile(
+        self, actor_user_id: str, bot_id: str, settings: Mapping[str, object], *,
+        project_id: str | None = None, expected_revision: int | None = None,
+    ) -> BotCapabilityProfile: ...
+
+    async def create_pairing_challenge(
+        self, actor_user_id: str, *, purpose: PairingPurpose, organization_id: str,
+        bot_id: str, channel_type: str, instance_id: str,
+        project_id: str | None = None, ttl_seconds: int = 600,
+    ) -> tuple[PairingChallenge, str]: ...
+
+    async def get_pairing_challenge(
+        self, actor_user_id: str, challenge_id: str
+    ) -> PairingChallenge | None: ...
+
+    async def verify_pairing_challenge(
+        self, code: str, *, channel_type: str, instance_id: str, sender_id: str
+    ) -> PairingChallenge: ...
+
+    async def consume_pairing_challenge(
+        self, actor_user_id: str, challenge_id: str
+    ) -> PairingChallenge: ...
 
     async def create_project(
         self,

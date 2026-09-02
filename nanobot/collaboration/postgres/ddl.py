@@ -544,4 +544,378 @@ REVOKE ALL ON FUNCTION nanobot_collaboration.lock_organization_owner_key(), nano
 RESET ROLE;
 """
 
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, INITIAL_SCHEMA_DDL), (2, MIGRATION_2_DDL))
+MIGRATION_3_DDL = r"""
+ALTER TABLE nanobot_collaboration.collaboration_users
+    ADD COLUMN IF NOT EXISTS default_organization_id varchar(128),
+    ADD COLUMN IF NOT EXISTS default_bot_id varchar(128);
+
+CREATE TABLE IF NOT EXISTS nanobot_collaboration.collaboration_bots (
+    id varchar(128) PRIMARY KEY,
+    organization_id varchar(128) NOT NULL,
+    owner_user_id varchar(128) NOT NULL,
+    name varchar(256) NOT NULL CHECK (pg_catalog.length(pg_catalog.btrim(name)) > 0),
+    avatar_url varchar(4096),
+    persona_id varchar(128) REFERENCES nanobot_collaboration.collaboration_personas(id) ON DELETE SET NULL,
+    state varchar(16) NOT NULL CHECK (state IN ('active', 'disabled')),
+    created_at_ms bigint NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms bigint NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    UNIQUE (organization_id, id),
+    FOREIGN KEY (organization_id, owner_user_id)
+        REFERENCES nanobot_collaboration.collaboration_organization_memberships
+        (organization_id, user_id) ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS nanobot_collaboration.collaboration_bot_project_assignments (
+    organization_id varchar(128) NOT NULL,
+    bot_id varchar(128) NOT NULL,
+    project_id varchar(128) NOT NULL,
+    assigned_by_user_id varchar(128) NOT NULL,
+    created_at_ms bigint NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (organization_id, bot_id, project_id),
+    FOREIGN KEY (organization_id, bot_id)
+        REFERENCES nanobot_collaboration.collaboration_bots (organization_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, project_id)
+        REFERENCES nanobot_collaboration.collaboration_projects (organization_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, assigned_by_user_id)
+        REFERENCES nanobot_collaboration.collaboration_organization_memberships
+        (organization_id, user_id) ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS nanobot_collaboration.collaboration_bot_channel_assignments (
+    organization_id varchar(128) NOT NULL,
+    bot_id varchar(128) NOT NULL,
+    channel_type varchar(128) NOT NULL CHECK (pg_catalog.length(pg_catalog.btrim(channel_type)) > 0),
+    instance_id varchar(128) NOT NULL CHECK (pg_catalog.length(pg_catalog.btrim(instance_id)) > 0),
+    claimed_by_user_id varchar(128) NOT NULL,
+    created_at_ms bigint NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (channel_type, instance_id),
+    UNIQUE (organization_id, bot_id, channel_type, instance_id),
+    FOREIGN KEY (organization_id, bot_id)
+        REFERENCES nanobot_collaboration.collaboration_bots (organization_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, claimed_by_user_id)
+        REFERENCES nanobot_collaboration.collaboration_organization_memberships
+        (organization_id, user_id) ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS nanobot_collaboration.collaboration_bot_project_channels (
+    organization_id varchar(128) NOT NULL,
+    bot_id varchar(128) NOT NULL,
+    project_id varchar(128) NOT NULL,
+    channel_type varchar(128) NOT NULL,
+    instance_id varchar(128) NOT NULL,
+    enabled boolean NOT NULL DEFAULT true,
+    updated_at_ms bigint NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (organization_id, bot_id, project_id, channel_type, instance_id),
+    FOREIGN KEY (organization_id, bot_id, project_id)
+        REFERENCES nanobot_collaboration.collaboration_bot_project_assignments
+        (organization_id, bot_id, project_id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, bot_id, channel_type, instance_id)
+        REFERENCES nanobot_collaboration.collaboration_bot_channel_assignments
+        (organization_id, bot_id, channel_type, instance_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS nanobot_collaboration.collaboration_bot_capability_profiles (
+    organization_id varchar(128) NOT NULL,
+    bot_id varchar(128) NOT NULL,
+    project_id varchar(128),
+    scope_project_id varchar(128) NOT NULL,
+    revision integer NOT NULL CHECK (revision >= 0),
+    settings jsonb NOT NULL CHECK (pg_catalog.octet_length(settings::text) <= 65536),
+    updated_at_ms bigint NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (organization_id, bot_id, scope_project_id),
+    CHECK ((project_id IS NULL AND scope_project_id = '') OR project_id = scope_project_id),
+    FOREIGN KEY (organization_id, bot_id)
+        REFERENCES nanobot_collaboration.collaboration_bots (organization_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, project_id)
+        REFERENCES nanobot_collaboration.collaboration_projects (organization_id, id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS nanobot_collaboration.collaboration_pairing_challenges (
+    id varchar(128) PRIMARY KEY,
+    code_digest char(64) NOT NULL UNIQUE,
+    requested_by_user_id varchar(128) NOT NULL,
+    purpose varchar(32) NOT NULL CHECK (purpose IN ('claim_channel', 'assign_bot_project')),
+    organization_id varchar(128) NOT NULL,
+    bot_id varchar(128) NOT NULL,
+    project_id varchar(128),
+    channel_type varchar(128) NOT NULL,
+    instance_id varchar(128) NOT NULL,
+    expires_at_ms bigint NOT NULL CHECK (expires_at_ms >= 0),
+    verified_at_ms bigint,
+    verified_sender_id varchar(512),
+    consumed_at_ms bigint,
+    created_at_ms bigint NOT NULL CHECK (created_at_ms >= 0),
+    CHECK (expires_at_ms >= created_at_ms),
+    CHECK ((verified_at_ms IS NULL) = (verified_sender_id IS NULL)),
+    FOREIGN KEY (organization_id, bot_id)
+        REFERENCES nanobot_collaboration.collaboration_bots (organization_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, project_id)
+        REFERENCES nanobot_collaboration.collaboration_projects (organization_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, requested_by_user_id)
+        REFERENCES nanobot_collaboration.collaboration_organization_memberships
+        (organization_id, user_id) ON DELETE CASCADE
+);
+
+ALTER TABLE nanobot_collaboration.collaboration_users NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_organizations NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_projects NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_extension_profiles NO FORCE ROW LEVEL SECURITY;
+INSERT INTO nanobot_collaboration.collaboration_bots (
+    id, organization_id, owner_user_id, name, avatar_url, persona_id, state,
+    created_at_ms, updated_at_ms
+)
+SELECT 'bot-' || pg_catalog.substr(pg_catalog.md5(user_row.id), 1, 24),
+       organization.id, user_row.id, 'Personal bot', NULL, user_row.default_persona_id,
+       'active', user_row.created_at_ms, user_row.updated_at_ms
+FROM nanobot_collaboration.collaboration_users AS user_row
+JOIN nanobot_collaboration.collaboration_organizations AS organization
+  ON organization.created_by_user_id = user_row.id AND organization.is_personal
+ON CONFLICT (id) DO NOTHING;
+UPDATE nanobot_collaboration.collaboration_users AS user_row
+SET default_organization_id = COALESCE(
+        (SELECT project.organization_id
+         FROM nanobot_collaboration.collaboration_projects AS project
+         JOIN nanobot_collaboration.collaboration_project_memberships AS membership
+           ON membership.organization_id = project.organization_id
+          AND membership.project_id = project.id
+          AND membership.user_id = user_row.id
+         WHERE project.id = user_row.default_project_id),
+        organization.id
+    ),
+    default_bot_id = CASE
+        WHEN COALESCE(
+            (SELECT project.organization_id
+             FROM nanobot_collaboration.collaboration_projects AS project
+             JOIN nanobot_collaboration.collaboration_project_memberships AS membership
+               ON membership.organization_id = project.organization_id
+              AND membership.project_id = project.id
+              AND membership.user_id = user_row.id
+             WHERE project.id = user_row.default_project_id),
+            organization.id
+        ) = organization.id THEN bot.id
+        ELSE NULL
+    END
+FROM nanobot_collaboration.collaboration_organizations AS organization
+JOIN nanobot_collaboration.collaboration_bots AS bot
+  ON bot.organization_id = organization.id
+ AND bot.owner_user_id = organization.created_by_user_id
+WHERE organization.created_by_user_id = user_row.id
+  AND organization.is_personal;
+INSERT INTO nanobot_collaboration.collaboration_bot_project_assignments (
+    organization_id, bot_id, project_id, assigned_by_user_id, created_at_ms
+)
+SELECT project.organization_id, bot.id, project.id, user_row.id,
+       user_row.created_at_ms
+FROM nanobot_collaboration.collaboration_users AS user_row
+JOIN nanobot_collaboration.collaboration_projects AS project
+  ON project.id = user_row.default_project_id
+JOIN nanobot_collaboration.collaboration_bots AS bot
+  ON bot.id = user_row.default_bot_id
+ AND bot.organization_id = project.organization_id
+ON CONFLICT DO NOTHING;
+INSERT INTO nanobot_collaboration.collaboration_bot_capability_profiles (
+    organization_id, bot_id, project_id, scope_project_id, revision, settings, updated_at_ms
+)
+SELECT project.organization_id, bot.id, profile.project_id,
+       profile.project_id, profile.revision, profile.settings, profile.updated_at_ms
+FROM nanobot_collaboration.collaboration_extension_profiles AS profile
+JOIN nanobot_collaboration.collaboration_users AS user_row
+  ON user_row.id = profile.user_id
+ AND user_row.default_bot_id IS NOT NULL
+ AND user_row.default_project_id = profile.project_id
+JOIN nanobot_collaboration.collaboration_projects AS project
+  ON project.id = profile.project_id
+JOIN nanobot_collaboration.collaboration_bots AS bot
+  ON bot.id = user_row.default_bot_id
+ AND bot.organization_id = project.organization_id
+ON CONFLICT DO NOTHING;
+ALTER TABLE nanobot_collaboration.collaboration_users FORCE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_organizations FORCE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_projects FORCE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_extension_profiles FORCE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_constraint
+        WHERE conname = 'collaboration_users_default_organization_fk'
+          AND conrelid = 'nanobot_collaboration.collaboration_users'::pg_catalog.regclass
+    ) THEN
+        ALTER TABLE nanobot_collaboration.collaboration_users
+            ADD CONSTRAINT collaboration_users_default_organization_fk
+            FOREIGN KEY (default_organization_id)
+            REFERENCES nanobot_collaboration.collaboration_organizations(id) ON DELETE SET NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_constraint
+        WHERE conname = 'collaboration_users_default_bot_fk'
+          AND conrelid = 'nanobot_collaboration.collaboration_users'::pg_catalog.regclass
+    ) THEN
+        ALTER TABLE nanobot_collaboration.collaboration_users
+            ADD CONSTRAINT collaboration_users_default_bot_fk
+            FOREIGN KEY (default_bot_id)
+            REFERENCES nanobot_collaboration.collaboration_bots(id) ON DELETE SET NULL;
+    END IF;
+END
+$$;
+
+ALTER TABLE nanobot_collaboration.collaboration_bots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_bots FORCE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_bot_project_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_bot_project_assignments FORCE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_bot_channel_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_bot_channel_assignments FORCE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_bot_project_channels ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_bot_project_channels FORCE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_bot_capability_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_bot_capability_profiles FORCE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_pairing_challenges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_pairing_challenges FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS collaboration_bots_select ON nanobot_collaboration.collaboration_bots;
+CREATE POLICY collaboration_bots_select ON nanobot_collaboration.collaboration_bots FOR SELECT
+USING (nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin','member']::varchar[]));
+DROP POLICY IF EXISTS collaboration_bots_insert ON nanobot_collaboration.collaboration_bots;
+CREATE POLICY collaboration_bots_insert ON nanobot_collaboration.collaboration_bots FOR INSERT
+WITH CHECK (owner_user_id = nanobot_collaboration.nanobot_current_user_id() AND nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]));
+DROP POLICY IF EXISTS collaboration_bots_update ON nanobot_collaboration.collaboration_bots;
+CREATE POLICY collaboration_bots_update ON nanobot_collaboration.collaboration_bots FOR UPDATE
+USING (owner_user_id = nanobot_collaboration.nanobot_current_user_id() OR nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]))
+WITH CHECK (owner_user_id = nanobot_collaboration.nanobot_current_user_id() OR nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]));
+DROP POLICY IF EXISTS collaboration_bots_delete ON nanobot_collaboration.collaboration_bots;
+CREATE POLICY collaboration_bots_delete ON nanobot_collaboration.collaboration_bots FOR DELETE
+USING (owner_user_id = nanobot_collaboration.nanobot_current_user_id() OR nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]));
+
+DROP POLICY IF EXISTS collaboration_bot_projects_select ON nanobot_collaboration.collaboration_bot_project_assignments;
+CREATE POLICY collaboration_bot_projects_select ON nanobot_collaboration.collaboration_bot_project_assignments FOR SELECT
+USING (nanobot_collaboration.nanobot_has_project_role(organization_id, project_id, ARRAY['owner','member']::varchar[]));
+DROP POLICY IF EXISTS collaboration_bot_projects_write ON nanobot_collaboration.collaboration_bot_project_assignments;
+CREATE POLICY collaboration_bot_projects_write ON nanobot_collaboration.collaboration_bot_project_assignments FOR ALL
+USING (nanobot_collaboration.nanobot_has_project_role(organization_id, project_id, ARRAY['owner']::varchar[]) AND nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]))
+WITH CHECK (nanobot_collaboration.nanobot_has_project_role(organization_id, project_id, ARRAY['owner']::varchar[]) AND nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]));
+
+DROP POLICY IF EXISTS collaboration_bot_channels_select ON nanobot_collaboration.collaboration_bot_channel_assignments;
+CREATE POLICY collaboration_bot_channels_select ON nanobot_collaboration.collaboration_bot_channel_assignments FOR SELECT
+USING (nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin','member']::varchar[]));
+DROP POLICY IF EXISTS collaboration_bot_channels_write ON nanobot_collaboration.collaboration_bot_channel_assignments;
+CREATE POLICY collaboration_bot_channels_write ON nanobot_collaboration.collaboration_bot_channel_assignments FOR ALL
+USING (claimed_by_user_id = nanobot_collaboration.nanobot_current_user_id() OR nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]))
+WITH CHECK (claimed_by_user_id = nanobot_collaboration.nanobot_current_user_id() OR nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]));
+
+DROP POLICY IF EXISTS collaboration_bot_project_channels_select ON nanobot_collaboration.collaboration_bot_project_channels;
+CREATE POLICY collaboration_bot_project_channels_select ON nanobot_collaboration.collaboration_bot_project_channels FOR SELECT
+USING (nanobot_collaboration.nanobot_has_project_role(organization_id, project_id, ARRAY['owner','member']::varchar[]));
+DROP POLICY IF EXISTS collaboration_bot_project_channels_write ON nanobot_collaboration.collaboration_bot_project_channels;
+CREATE POLICY collaboration_bot_project_channels_write ON nanobot_collaboration.collaboration_bot_project_channels FOR ALL
+USING (nanobot_collaboration.nanobot_has_project_role(organization_id, project_id, ARRAY['owner']::varchar[]) AND nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]))
+WITH CHECK (nanobot_collaboration.nanobot_has_project_role(organization_id, project_id, ARRAY['owner']::varchar[]) AND nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]));
+
+DROP POLICY IF EXISTS collaboration_bot_profiles_select ON nanobot_collaboration.collaboration_bot_capability_profiles;
+CREATE POLICY collaboration_bot_profiles_select ON nanobot_collaboration.collaboration_bot_capability_profiles FOR SELECT
+USING (project_id IS NULL AND nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin','member']::varchar[]) OR project_id IS NOT NULL AND nanobot_collaboration.nanobot_has_project_role(organization_id, project_id, ARRAY['owner','member']::varchar[]));
+DROP POLICY IF EXISTS collaboration_bot_profiles_write ON nanobot_collaboration.collaboration_bot_capability_profiles;
+CREATE POLICY collaboration_bot_profiles_write ON nanobot_collaboration.collaboration_bot_capability_profiles FOR ALL
+USING (nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]) AND (project_id IS NULL OR nanobot_collaboration.nanobot_has_project_role(organization_id, project_id, ARRAY['owner']::varchar[])))
+WITH CHECK (nanobot_collaboration.nanobot_has_organization_role(organization_id, ARRAY['owner','admin']::varchar[]) AND (project_id IS NULL OR nanobot_collaboration.nanobot_has_project_role(organization_id, project_id, ARRAY['owner']::varchar[])));
+
+DROP POLICY IF EXISTS collaboration_pairing_select ON nanobot_collaboration.collaboration_pairing_challenges;
+CREATE POLICY collaboration_pairing_select ON nanobot_collaboration.collaboration_pairing_challenges FOR SELECT
+USING (requested_by_user_id = nanobot_collaboration.nanobot_current_user_id() OR (nanobot_collaboration.nanobot_current_user_id() IS NULL AND consumed_at_ms IS NULL AND expires_at_ms >= pg_catalog.floor(pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()) * 1000)::bigint AND (CASE WHEN instance_id = 'default' THEN channel_type ELSE channel_type || '.' || instance_id END) = NULLIF(pg_catalog.current_setting('nanobot.identity_channel', true), '')));
+DROP POLICY IF EXISTS collaboration_pairing_insert ON nanobot_collaboration.collaboration_pairing_challenges;
+CREATE POLICY collaboration_pairing_insert ON nanobot_collaboration.collaboration_pairing_challenges FOR INSERT
+WITH CHECK (requested_by_user_id = nanobot_collaboration.nanobot_current_user_id());
+DROP POLICY IF EXISTS collaboration_pairing_update ON nanobot_collaboration.collaboration_pairing_challenges;
+CREATE POLICY collaboration_pairing_update ON nanobot_collaboration.collaboration_pairing_challenges FOR UPDATE
+USING (requested_by_user_id = nanobot_collaboration.nanobot_current_user_id())
+WITH CHECK (requested_by_user_id = nanobot_collaboration.nanobot_current_user_id());
+DROP POLICY IF EXISTS collaboration_pairing_delete ON nanobot_collaboration.collaboration_pairing_challenges;
+CREATE POLICY collaboration_pairing_delete ON nanobot_collaboration.collaboration_pairing_challenges FOR DELETE
+USING (requested_by_user_id = nanobot_collaboration.nanobot_current_user_id());
+
+GRANT USAGE, CREATE ON SCHEMA nanobot_collaboration TO nanobot_collaboration_policy_owner;
+ALTER TABLE nanobot_collaboration.collaboration_bots OWNER TO nanobot_collaboration_policy_owner;
+ALTER TABLE nanobot_collaboration.collaboration_bot_project_assignments OWNER TO nanobot_collaboration_policy_owner;
+ALTER TABLE nanobot_collaboration.collaboration_bot_channel_assignments OWNER TO nanobot_collaboration_policy_owner;
+ALTER TABLE nanobot_collaboration.collaboration_bot_project_channels OWNER TO nanobot_collaboration_policy_owner;
+ALTER TABLE nanobot_collaboration.collaboration_bot_capability_profiles OWNER TO nanobot_collaboration_policy_owner;
+ALTER TABLE nanobot_collaboration.collaboration_pairing_challenges OWNER TO nanobot_collaboration_policy_owner;
+REVOKE CREATE ON SCHEMA nanobot_collaboration FROM nanobot_collaboration_policy_owner;
+"""
+
+MIGRATION_4_DDL = r"""
+SET LOCAL ROLE nanobot_collaboration_policy_owner;
+DROP POLICY IF EXISTS collaboration_pairing_select ON nanobot_collaboration.collaboration_pairing_challenges;
+CREATE POLICY collaboration_pairing_select ON nanobot_collaboration.collaboration_pairing_challenges FOR SELECT
+USING (requested_by_user_id = nanobot_collaboration.nanobot_current_user_id() OR (nanobot_collaboration.nanobot_current_user_id() IS NULL AND consumed_at_ms IS NULL AND expires_at_ms >= pg_catalog.floor(pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()) * 1000)::bigint AND (CASE WHEN instance_id = 'default' THEN channel_type ELSE channel_type || '.' || instance_id END) = NULLIF(pg_catalog.current_setting('nanobot.identity_channel', true), '')));
+RESET ROLE;
+"""
+
+MIGRATION_5_DDL = r"""
+GRANT USAGE, CREATE ON SCHEMA nanobot_collaboration
+    TO nanobot_collaboration_policy_owner;
+SET LOCAL ROLE nanobot_collaboration_policy_owner;
+CREATE TABLE IF NOT EXISTS nanobot_collaboration.collaboration_channel_claim_registry (
+    channel_type varchar(128) NOT NULL,
+    instance_id varchar(128) NOT NULL,
+    PRIMARY KEY (channel_type, instance_id),
+    CHECK (pg_catalog.length(pg_catalog.btrim(channel_type)) > 0),
+    CHECK (pg_catalog.length(pg_catalog.btrim(instance_id)) > 0)
+);
+REVOKE ALL ON TABLE nanobot_collaboration.collaboration_channel_claim_registry FROM PUBLIC;
+ALTER TABLE nanobot_collaboration.collaboration_channel_claim_registry
+    OWNER TO nanobot_collaboration_policy_owner;
+
+CREATE OR REPLACE FUNCTION nanobot_collaboration.nanobot_sync_channel_claim_registry()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, nanobot_collaboration
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' OR (
+        TG_OP = 'UPDATE'
+        AND (OLD.channel_type, OLD.instance_id) IS DISTINCT FROM
+            (NEW.channel_type, NEW.instance_id)
+    ) THEN
+        DELETE FROM nanobot_collaboration.collaboration_channel_claim_registry
+        WHERE channel_type = OLD.channel_type AND instance_id = OLD.instance_id;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        INSERT INTO nanobot_collaboration.collaboration_channel_claim_registry
+            (channel_type, instance_id)
+        VALUES (NEW.channel_type, NEW.instance_id)
+        ON CONFLICT DO NOTHING;
+    END IF;
+    RETURN COALESCE(NEW, OLD);
+END
+$$;
+ALTER TABLE nanobot_collaboration.collaboration_bot_channel_assignments
+    NO FORCE ROW LEVEL SECURITY;
+ALTER FUNCTION nanobot_collaboration.nanobot_sync_channel_claim_registry()
+    OWNER TO nanobot_collaboration_policy_owner;
+
+SET LOCAL row_security = off;
+INSERT INTO nanobot_collaboration.collaboration_channel_claim_registry
+    (channel_type, instance_id)
+SELECT channel_type, instance_id
+FROM nanobot_collaboration.collaboration_bot_channel_assignments
+ON CONFLICT DO NOTHING;
+
+DROP TRIGGER IF EXISTS collaboration_sync_channel_claim_registry
+    ON nanobot_collaboration.collaboration_bot_channel_assignments;
+CREATE TRIGGER collaboration_sync_channel_claim_registry
+AFTER INSERT OR UPDATE OF channel_type, instance_id OR DELETE
+ON nanobot_collaboration.collaboration_bot_channel_assignments
+FOR EACH ROW EXECUTE FUNCTION
+    nanobot_collaboration.nanobot_sync_channel_claim_registry();
+ALTER TABLE nanobot_collaboration.collaboration_bot_channel_assignments
+    FORCE ROW LEVEL SECURITY;
+RESET ROLE;
+SET LOCAL row_security = on;
+REVOKE CREATE ON SCHEMA nanobot_collaboration
+    FROM nanobot_collaboration_policy_owner;
+"""
+
+
+MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (1, INITIAL_SCHEMA_DDL),
+    (2, MIGRATION_2_DDL),
+    (3, MIGRATION_3_DDL),
+    (4, MIGRATION_4_DDL),
+    (5, MIGRATION_5_DDL),
+)

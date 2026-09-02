@@ -12,10 +12,11 @@ from websockets.http11 import Request as WsRequest
 
 from nanobot.channels.websocket.runtime import TrustedProxyAuthConfig, WebSocketConfig
 from nanobot.collaboration import AsyncLocalCollaborationRepository, CollaborationStore
-from nanobot.collaboration.models import COLLABORATION_USER_METADATA_KEY
+from nanobot.collaboration.models import COLLABORATION_USER_METADATA_KEY, PairingPurpose
 from nanobot.cron.types import CronJob, CronPayload, CronSchedule
 from nanobot.session.manager import SessionManager
 from nanobot.webui.forking import handle_webui_fork_chat
+from nanobot.webui.http_utils import http_json_response
 from nanobot.webui.inbound_commands import WebUICommandRouter
 from nanobot.webui.oidc_auth import OidcAuthenticator
 from nanobot.webui.session_access import WebuiSessionAccess
@@ -300,6 +301,50 @@ async def test_collaboration_extension_profile_rejects_plugins_and_accepts_avail
     }
 
 
+@pytest.mark.asyncio
+async def test_collaboration_http_exposes_selected_bot_summary_detail_and_owner_mutations(tmp_path) -> None:
+    """The authenticated owner can select a created bot while another user cannot discover its detail."""
+    handler = await _handler(tmp_path)
+    owner = _local_connection()
+    index_request = _request("/api/collaboration", {"Authorization": "Bearer local-token"})
+    index = await handler.dispatch(_connection(index_request), index_request)
+    assert index is not None and index.status_code == 200
+    organization_id = _json(index)["organizations"][0]["id"]
+
+    created = await handler.dispatch_webui_mutation(
+        owner, "collaboration.bot.create",
+        {"organization_id": organization_id, "name": "Release bot"},
+    )
+    assert created.status_code == 200
+    bot = _json(created)["bot"]
+    selected = await handler.dispatch_webui_mutation(
+        owner, "collaboration.user.defaults",
+        {"organization_id": organization_id, "bot_id": bot["id"], "project_id": None},
+    )
+    assert selected.status_code == 200
+    assert _json(selected)["user"]["default_bot_id"] == bot["id"]
+
+    refreshed_request = _request("/api/collaboration", {"Authorization": "Bearer local-token"})
+    refreshed = await handler.dispatch(_connection(refreshed_request), refreshed_request)
+    assert refreshed is not None and refreshed.status_code == 200
+    summary = _json(refreshed)
+    assert summary["active_bot_id"] == bot["id"]
+    assert {item["id"] for item in summary["bots"]} >= {bot["id"]}
+
+    detail_request = _request(
+        f"/api/collaboration/bots/{bot['id']}", {"Authorization": "Bearer local-token"}
+    )
+    detail = await handler.dispatch(_connection(detail_request), detail_request)
+    assert detail is not None and detail.status_code == 200
+    assert _json(detail)["bot"] == bot
+    assert _json(detail)["channels"] == []
+    assert _json(detail)["projects"] == []
+
+    foreign = _proxy_connection("unrelated-user", f"/api/collaboration/bots/{bot['id']}")
+    hidden = await handler.dispatch(foreign, foreign.request)
+    assert hidden is not None and hidden.status_code == 404
+
+
 
 @pytest.mark.asyncio
 async def test_proxy_user_cannot_read_or_mutate_foreign_collaboration_resources(tmp_path) -> None:
@@ -503,3 +548,81 @@ async def test_proxy_session_boundary_hides_foreign_legacy_and_automation_resour
     )
     fork_host.send_webui_protocol_error.assert_awaited_once_with(bob, "fork source not found")
     fork_host.attach_webui_fork.assert_not_awaited()
+
+
+async def _claim_channel_instance(
+    handler: GatewayHTTPHandler, connection: Any, instance_id: str
+) -> None:
+    """Claim one channel instance through the local repository's pairing flow."""
+    index = await handler.dispatch(connection, connection.request)
+    assert index is not None and index.status_code == 200
+    actor_id = _json(index)["user"]["id"]
+    bot = (await handler.collaboration.list_bots(actor_id))[0]
+    challenge, code = await handler.collaboration.create_pairing_challenge(
+        actor_id,
+        purpose=PairingPurpose.CLAIM_CHANNEL,
+        organization_id=bot.organization_id,
+        bot_id=bot.id,
+        channel_type="weixin",
+        instance_id=instance_id,
+    )
+    await handler.collaboration.verify_pairing_challenge(
+        code,
+        channel_type="weixin",
+        instance_id=instance_id,
+        sender_id=f"{instance_id}-sender",
+    )
+    await handler.collaboration.consume_pairing_challenge(actor_id, challenge.id)
+
+
+@pytest.mark.asyncio
+async def test_ordinary_claimed_channel_owner_can_use_channel_control_mutation(tmp_path) -> None:
+    """A claimed channel owner may reach channel control without system-admin privileges."""
+    handler = await _handler(tmp_path)
+    connection = _proxy_connection("ordinary-channel-owner")
+    async def settings_dispatch(_connection, _request, path):
+        if path == "/api/settings/channels/configure":
+            return http_json_response({"status": "ok"})
+        return None
+
+    handler.settings_routes = SimpleNamespace(
+        dispatch=settings_dispatch,
+        is_mutation_path=lambda _path: False,
+    )
+
+    await _claim_channel_instance(handler, connection, "claimed")
+    response = await handler.dispatch_webui_mutation(
+        connection,
+        "settings.channel.configure",
+        {"name": "weixin", "instance_id": "claimed", "values": {}},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_ordinary_user_cannot_use_channel_control_mutation_for_unclaimed_instance(
+    tmp_path,
+) -> None:
+    """An ordinary collaboration user cannot mutate an unclaimed channel instance."""
+    handler = await _handler(tmp_path)
+    connection = _proxy_connection("ordinary-channel-user")
+    async def settings_dispatch(_connection, _request, path):
+        if path == "/api/settings/channels/configure":
+            return http_json_response({"status": "unexpected"})
+        return None
+
+    handler.settings_routes = SimpleNamespace(
+        dispatch=settings_dispatch,
+        is_mutation_path=lambda _path: False,
+    )
+
+    index = await handler.dispatch(connection, connection.request)
+    assert index is not None and index.status_code == 200
+    response = await handler.dispatch_webui_mutation(
+        connection,
+        "settings.channel.configure",
+        {"name": "weixin", "instance_id": "unclaimed", "values": {}},
+    )
+
+    assert response.status_code == 403

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shlex
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -60,6 +61,7 @@ def webui_skill_detail_payload(
             entry,
             metadata=metadata,
             disabled_skills=disabled_skills,
+            include_files=True,
         ),
         "requirements": loader.get_skill_requirements(name),
         "install_options": _install_options(metadata),
@@ -161,20 +163,54 @@ def _skill_payload(
     *,
     metadata: dict[str, Any] | None = None,
     disabled_skills: set[str] | None = None,
+    include_files: bool = False,
 ) -> dict[str, Any]:
     name = entry["name"]
     metadata = metadata if metadata is not None else loader.get_skill_metadata(name)
     available, unavailable_reason = loader.get_skill_availability(name)
     source = entry.get("source", "unknown")
-    return {
+    payload: dict[str, Any] = {
         "name": name,
         "description": _description(metadata, name),
         "source": source,
+        "logical_path": f"{source}/{name}/SKILL.md",
         "enabled": name not in (disabled_skills or set()),
         "deletable": source == "workspace",
         "available": available,
         "unavailable_reason": unavailable_reason,
     }
+    if include_files:
+        payload["files"] = _safe_skill_files(entry)
+    return payload
+
+
+def _safe_skill_files(entry: Mapping[str, str]) -> list[dict[str, object]]:
+    skill_file = Path(entry["path"]).expanduser().resolve(strict=False)
+    root = skill_file.parent
+    blocked_markers = ("secret", "token", "credential", "password", ".env")
+    files: list[dict[str, object]] = []
+    try:
+        candidates = sorted(root.rglob("*"), key=lambda path: path.as_posix())
+    except OSError:
+        return files
+    for candidate in candidates:
+        if len(files) >= 128:
+            break
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            resolved = candidate.resolve(strict=True)
+            relative = resolved.relative_to(root.resolve(strict=True)).as_posix()
+            if any(part.startswith(".") for part in Path(relative).parts):
+                continue
+            lowered = relative.casefold()
+            if any(marker in lowered for marker in blocked_markers):
+                continue
+            size = resolved.stat().st_size
+        except (OSError, ValueError):
+            continue
+        files.append({"path": relative, "size": size})
+    return files
 
 
 def _description(metadata: dict[str, Any] | None, fallback: str) -> str:

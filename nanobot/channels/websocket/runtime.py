@@ -204,6 +204,7 @@ class OidcAuthConfig(Base):
     client_secret: str = ""
     redirect_uri: str = ""
     scopes: list[str] = Field(default_factory=lambda: ["openid", "profile", "email"])
+    admin_subjects: list[str] = Field(default_factory=list)
     token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"] = "none"
     session_ttl_s: int = Field(default=3600, ge=60, le=86_400)
     flow_ttl_s: int = Field(default=300, ge=30, le=600)
@@ -258,6 +259,22 @@ class OidcAuthConfig(Base):
                 normalized.append(scope)
         if "openid" not in normalized:
             raise ValueError("OIDC scopes must include openid")
+        return normalized
+
+    @field_validator("admin_subjects")
+    @classmethod
+    def validate_admin_subjects(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            subject = value.strip()
+            if (
+                not subject
+                or len(subject) > 512
+                or any(ord(character) < 0x21 for character in subject)
+            ):
+                raise ValueError("OIDC admin subjects must be bounded visible text")
+            if subject not in normalized:
+                normalized.append(subject)
         return normalized
 
     @model_validator(mode="after")

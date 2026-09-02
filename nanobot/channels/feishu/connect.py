@@ -18,6 +18,9 @@ from nanobot.channels.connect import ChannelConnectError, QueryParams, query_fir
 from nanobot.channels.feishu import runtime as feishu
 from nanobot.channels.feishu.instances import DEFAULT_INSTANCE_ID, validate_instance_id
 
+_MAX_CONNECT_SESSIONS = 32
+_MAX_CONNECT_SESSIONS_PER_ACTOR = 4
+
 
 @dataclass(slots=True)
 class FeishuConnectSession:
@@ -31,6 +34,7 @@ class FeishuConnectSession:
     expire_in: int
     created_wall: float
     deadline: float
+    actor_user_id: str | None = None
     last_error: str | None = None
 
 
@@ -48,21 +52,27 @@ class FeishuConnectStore:
 
     async def handle(self, action: str, query: QueryParams) -> dict[str, Any]:
         """Handle one generic settings connection action."""
+        actor_user_id = (query_first(query, "_actor_user_id") or "").strip() or None
         if action == "start":
             return await asyncio.to_thread(
                 self.start,
                 domain=(query_first(query, "domain") or "feishu").strip(),
                 instance_id=(query_first(query, "instance_id") or "default").strip(),
                 mode=(query_first(query, "mode") or "replace").strip(),
+                actor_user_id=actor_user_id,
             )
 
         session_id = (query_first(query, "session_id") or "").strip()
         if not session_id:
             raise ChannelConnectError("missing Feishu connect session")
         if action == "poll":
-            return await asyncio.to_thread(self.poll, session_id)
+            return await asyncio.to_thread(
+                self.poll, session_id, actor_user_id=actor_user_id
+            )
         if action == "cancel":
-            return await asyncio.to_thread(self.cancel, session_id)
+            return await asyncio.to_thread(
+                self.cancel, session_id, actor_user_id=actor_user_id
+            )
         raise ChannelConnectError(f"unsupported Feishu connect action: {action}", status=404)
 
     def start(
@@ -71,40 +81,61 @@ class FeishuConnectStore:
         domain: str = "feishu",
         instance_id: str = DEFAULT_INSTANCE_ID,
         mode: str = "replace",
+        actor_user_id: str | None = None,
     ) -> dict[str, Any]:
         domain = _normalize_domain(domain)
         instance_id = _resolve_instance_id(instance_id, mode)
-        self._cleanup()
-        try:
-            feishu._init_registration(domain)
-            begin = feishu._begin_registration(domain)
-        except (RuntimeError, OSError, json.JSONDecodeError, httpx.HTTPError) as exc:
-            raise ChannelConnectError(
-                f"Unable to start Feishu/Lark connection: {exc}",
-                status=502,
-            ) from exc
+        with self._completion_lock:
+            self._cleanup()
+            for session_id, session in tuple(self._sessions.items()):
+                if session.instance_id == instance_id:
+                    self._sessions.pop(session_id, None)
+            if actor_user_id is not None and sum(
+                session.actor_user_id == actor_user_id
+                for session in self._sessions.values()
+            ) >= _MAX_CONNECT_SESSIONS_PER_ACTOR:
+                raise ChannelConnectError(
+                    "Too many active Feishu connection sessions for user",
+                    status=429,
+                )
+            if len(self._sessions) >= _MAX_CONNECT_SESSIONS:
+                raise ChannelConnectError(
+                    "Too many active Feishu connection sessions",
+                    status=429,
+                )
+            try:
+                feishu._init_registration(domain)
+                begin = feishu._begin_registration(domain)
+            except (RuntimeError, OSError, json.JSONDecodeError, httpx.HTTPError) as exc:
+                raise ChannelConnectError(
+                    f"Unable to start Feishu/Lark connection: {exc}",
+                    status=502,
+                ) from exc
 
-        session_id = secrets.token_urlsafe(18)
-        now_wall = time.time()
-        now = time.monotonic()
-        expire_in = int(begin["expire_in"])
-        interval = max(2, int(begin["interval"]))
-        session = FeishuConnectSession(
-            id=session_id,
-            instance_id=instance_id,
-            instance_name=_default_instance_name(instance_id),
-            device_code=str(begin["device_code"]),
-            qr_url=str(begin["qr_url"]),
-            domain=domain,
-            interval=interval,
-            expire_in=expire_in,
-            created_wall=now_wall,
-            deadline=now + expire_in,
-        )
-        self._sessions[session_id] = session
-        return _start_payload(session)
+            session_id = secrets.token_urlsafe(18)
+            now_wall = time.time()
+            now = time.monotonic()
+            expire_in = int(begin["expire_in"])
+            interval = max(2, int(begin["interval"]))
+            session = FeishuConnectSession(
+                id=session_id,
+                instance_id=instance_id,
+                instance_name=_default_instance_name(instance_id),
+                device_code=str(begin["device_code"]),
+                qr_url=str(begin["qr_url"]),
+                domain=domain,
+                interval=interval,
+                expire_in=expire_in,
+                created_wall=now_wall,
+                deadline=now + expire_in,
+                actor_user_id=actor_user_id,
+            )
+            self._sessions[session_id] = session
+            return _start_payload(session)
 
-    def poll(self, session_id: str) -> dict[str, Any]:
+    def poll(
+        self, session_id: str, *, actor_user_id: str | None = None
+    ) -> dict[str, Any]:
         self._cleanup()
         session = self._sessions.get(session_id)
         if session is None:
@@ -113,6 +144,7 @@ class FeishuConnectStore:
                 "status": "expired",
                 "message": "This Feishu connection has expired. Start again.",
             }
+        _require_session_actor(session, actor_user_id)
 
         if time.monotonic() >= session.deadline:
             self._sessions.pop(session_id, None)
@@ -141,6 +173,7 @@ class FeishuConnectStore:
                         "status": "cancelled",
                         "message": "Feishu connection cancelled.",
                     }
+                _require_session_actor(session, actor_user_id)
                 session.domain = str(result.get("domain") or session.domain)
                 session.instance_id = feishu.save_registration_result(
                     result,
@@ -152,6 +185,7 @@ class FeishuConnectStore:
                     "session_id": session_id,
                     "instance_id": session.instance_id,
                     "status": "succeeded",
+                    "pairing_required": True,
                     "message": "Feishu is connected.",
                     "domain": session.domain,
                     "app_id": result.get("app_id"),
@@ -170,9 +204,14 @@ class FeishuConnectStore:
 
         return _pending_payload(session)
 
-    def cancel(self, session_id: str) -> dict[str, Any]:
+    def cancel(
+        self, session_id: str, *, actor_user_id: str | None = None
+    ) -> dict[str, Any]:
         with self._completion_lock:
-            session = self._sessions.pop(session_id, None)
+            session = self._sessions.get(session_id)
+            if session is not None:
+                _require_session_actor(session, actor_user_id)
+            self._sessions.pop(session_id, None)
         return {
             "session_id": session_id,
             "instance_id": session.instance_id if session else DEFAULT_INSTANCE_ID,
@@ -182,9 +221,20 @@ class FeishuConnectStore:
 
     def _cleanup(self) -> None:
         now = time.monotonic()
-        expired = [session_id for session_id, session in self._sessions.items() if now >= session.deadline]
+        expired = [
+            session_id
+            for session_id, session in self._sessions.items()
+            if now >= session.deadline
+        ]
         for session_id in expired:
             self._sessions.pop(session_id, None)
+
+
+def _require_session_actor(
+    session: FeishuConnectSession, actor_user_id: str | None
+) -> None:
+    if session.actor_user_id != actor_user_id:
+        raise ChannelConnectError("Feishu connection belongs to another user", status=403)
 
 
 def _normalize_domain(domain: str) -> str:

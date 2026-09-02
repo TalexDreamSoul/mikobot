@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { useTranslation } from "react-i18next";
 import { FileText, Loader2, Plus, Trash2, Type } from "lucide-react";
 
 import { ToggleButton } from "@/components/settings/ToggleButton";
@@ -17,14 +18,14 @@ const CUSTOM_CONTENT_LIMIT = 8_000;
 
 function documentPathError(value: string): string | null {
   const path = value.trim();
-  if (!path) return "Enter a document path.";
-  if (path.length > DOCUMENT_PATH_LIMIT) return "The path is too long.";
-  if (path.includes("\0")) return "The path contains an invalid character.";
+  if (!path) return "projects.context.errors.pathRequired";
+  if (path.length > DOCUMENT_PATH_LIMIT) return "projects.context.errors.pathTooLong";
+  if (path.includes("\0")) return "projects.context.errors.pathInvalid";
   if (path.startsWith("~") || path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(path)) {
-    return "Use a path relative to this project’s workspace.";
+    return "projects.context.errors.pathRelative";
   }
   if (path.split(/[\\/]+/).includes("..")) {
-    return "The path must stay inside this project’s workspace.";
+    return "projects.context.errors.pathOutside";
   }
   return null;
 }
@@ -40,14 +41,15 @@ function SourceRow({
   onToggle: (enabled: boolean) => Promise<unknown>;
   onDelete: () => Promise<unknown>;
 }) {
+  const { t } = useTranslation();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const documentPath = typeof source.config.path === "string" ? source.config.path : "";
   const customContent = typeof source.config.content === "string" ? source.config.content : "";
   const detail = source.kind === "document"
-    ? documentPath || "Document path unavailable"
+    ? documentPath || t("projects.context.documentUnavailable")
     : source.kind === "custom"
-      ? `${customContent.length.toLocaleString()} characters of custom text`
-      : source.kind;
+      ? t("projects.context.customCharacterCount", { count: customContent.length })
+      : t(`projects.context.types.${source.kind}`);
 
   const remove = async () => {
     try {
@@ -71,17 +73,17 @@ function SourceRow({
           checked={source.enabled}
           disabled={busy}
           onChange={(enabled) => void onToggle(enabled)}
-          ariaLabel={`${source.enabled ? "Disable" : "Enable"} ${source.name}`}
-          label={source.enabled ? "Enabled" : "Disabled"}
+          ariaLabel={t(source.enabled ? "projects.context.disableSource" : "projects.context.enableSource", { name: source.name })}
+          label={source.enabled ? t("common.enabled") : t("common.disabled")}
         />
         {confirmDelete ? (
           <div className="flex items-center gap-1">
             <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setConfirmDelete(false)}>
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={() => void remove()}>
               {busy ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" aria-hidden /> : null}
-              Delete
+              {t("common.delete")}
             </Button>
           </div>
         ) : (
@@ -91,8 +93,8 @@ function SourceRow({
             size="icon"
             disabled={busy}
             onClick={() => setConfirmDelete(true)}
-            aria-label={`Delete ${source.name}`}
-            title="Delete source"
+            aria-label={t("projects.context.deleteSource", { name: source.name })}
+            title={t("projects.context.deleteSourceTitle")}
             className="h-10 w-10 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
           >
             <Trash2 className="h-4 w-4" aria-hidden />
@@ -120,6 +122,7 @@ export function ContextSourcesPanel({
   onToggle: (sourceId: string, enabled: boolean) => Promise<unknown>;
   onDelete: (sourceId: string) => Promise<unknown>;
 }) {
+  const { t } = useTranslation();
   const [name, setName] = useState("");
   const [kind, setKind] = useState<CollaborationEditableContextSourceKind>("document");
   const [value, setValue] = useState("");
@@ -136,11 +139,11 @@ export function ContextSourcesPanel({
     const cleanName = name.trim();
     const cleanValue = value.trim();
     const nextError = !cleanName
-      ? "Enter a source name."
+      ? "projects.context.errors.nameRequired"
       : kind === "document"
         ? documentPathError(cleanValue)
         : !cleanValue
-          ? "Enter the custom text to share with this project."
+          ? "projects.context.errors.customRequired"
           : null;
     setValidationError(nextError);
     if (nextError || creating) return;
@@ -156,28 +159,28 @@ export function ContextSourcesPanel({
   return (
     <section aria-labelledby="project-context-title" className="space-y-5">
       <div>
-        <h2 id="project-context-title" className="text-lg font-semibold tracking-tight">Context sources</h2>
+        <h2 id="project-context-title" className="text-lg font-semibold tracking-tight">{t("projects.context.title")}</h2>
         <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-          Add bounded project material that nanobot may read as data when it is useful. Document paths cannot leave the project workspace.
+          {t("projects.context.description")}
         </p>
       </div>
 
       <form onSubmit={(event) => void submit(event)} className="rounded-panel bg-settings-surface p-4 sm:p-5">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <label htmlFor="context-source-name" className="mb-1.5 block text-xs font-medium">Source name</label>
+            <label htmlFor="context-source-name" className="mb-1.5 block text-xs font-medium">{t("projects.context.sourceName")}</label>
             <Input
               id="context-source-name"
               value={name}
               maxLength={512}
               onChange={(event) => setName(event.target.value)}
-              placeholder={kind === "document" ? "Project brief" : "Team conventions"}
+              placeholder={t(kind === "document" ? "projects.context.documentNamePlaceholder" : "projects.context.customNamePlaceholder")}
               disabled={creating}
               aria-invalid={Boolean(validationError && !name.trim())}
             />
           </div>
           <fieldset>
-            <legend className="mb-1.5 block text-xs font-medium">Source type</legend>
+            <legend className="mb-1.5 block text-xs font-medium">{t("projects.context.sourceType")}</legend>
             <div className="grid grid-cols-2 rounded-control bg-muted p-1">
               {(["document", "custom"] as const).map((option) => (
                 <button
@@ -192,7 +195,7 @@ export function ContextSourcesPanel({
                     kind === option ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  {option === "custom" ? "Custom text" : "Document"}
+                  {t(option === "custom" ? "projects.context.customText" : "projects.context.document")}
                 </button>
               ))}
             </div>
@@ -202,7 +205,7 @@ export function ContextSourcesPanel({
         <div className="mt-4">
           {kind === "document" ? (
             <>
-              <label htmlFor="context-document-path" className="mb-1.5 block text-xs font-medium">Relative path</label>
+              <label htmlFor="context-document-path" className="mb-1.5 block text-xs font-medium">{t("projects.context.relativePath")}</label>
               <Input
                 id="context-document-path"
                 value={value}
@@ -217,12 +220,12 @@ export function ContextSourcesPanel({
                 aria-describedby="context-document-help"
               />
               <p id="context-document-help" className="mt-1.5 text-xs leading-5 text-muted-foreground">
-                Plain-text content is read up to {CUSTOM_CONTENT_LIMIT.toLocaleString()} characters and must remain inside this project’s workspace.
+                {t("projects.context.documentHelp", { count: CUSTOM_CONTENT_LIMIT.toLocaleString() })}
               </p>
             </>
           ) : (
             <>
-              <label htmlFor="context-custom-text" className="mb-1.5 block text-xs font-medium">Custom text</label>
+              <label htmlFor="context-custom-text" className="mb-1.5 block text-xs font-medium">{t("projects.context.customText")}</label>
               <Textarea
                 id="context-custom-text"
                 value={value}
@@ -231,7 +234,7 @@ export function ContextSourcesPanel({
                   setValue(event.target.value);
                   setValidationError(null);
                 }}
-                placeholder="Add stable reference information, not instructions or secrets."
+                placeholder={t("projects.context.customPlaceholder")}
                 disabled={creating}
                 aria-invalid={Boolean(validationError)}
                 className="min-h-32 resize-y bg-background"
@@ -243,20 +246,20 @@ export function ContextSourcesPanel({
           )}
         </div>
 
-        {validationError ? <p role="alert" className="mt-3 text-sm text-destructive">{validationError}</p> : null}
+        {validationError ? <p role="alert" className="mt-3 text-sm text-destructive">{t(validationError)}</p> : null}
         <div className="mt-4 flex justify-end">
           <Button type="submit" disabled={creating || !name.trim() || !value.trim()} className="w-full sm:w-auto">
             {creating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : <Plus className="mr-2 h-4 w-4" aria-hidden />}
-            Add source
+            {t("projects.context.addSource")}
           </Button>
         </div>
       </form>
 
       {detail.context_sources.length === 0 ? (
         <div className="rounded-panel bg-settings-surface px-5 py-8 text-center">
-          <p className="text-sm font-medium">No context sources yet</p>
+          <p className="text-sm font-medium">{t("projects.context.empty")}</p>
           <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
-            Add a project document or a short piece of stable custom reference text above.
+            {t("projects.context.emptyDescription")}
           </p>
         </div>
       ) : (

@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { useTranslation } from "react-i18next";
 import { Loader2, Shield, Trash2, UserPlus, Users } from "lucide-react";
 
 import {
@@ -20,14 +21,7 @@ import type {
   CollaborationProjectRole,
 } from "@/lib/types";
 
-const PROJECT_ROLES: Array<{ value: CollaborationProjectRole; label: string }> = [
-  { value: "member", label: "Member" },
-  { value: "owner", label: "Owner" },
-];
-
-function roleLabel(role: CollaborationProjectRole): string {
-  return role === "owner" ? "Owner" : "Member";
-}
+const PROJECT_ROLES: CollaborationProjectRole[] = ["member", "owner"];
 
 export function ProjectMembersPanel({
   detail,
@@ -46,6 +40,7 @@ export function ProjectMembersPanel({
   onAddMember: (memberUserId: string, role: CollaborationProjectRole) => Promise<unknown>;
   onRemoveMember: (memberUserId: string) => Promise<unknown>;
 }) {
+  const { t } = useTranslation();
   const [memberUserId, setMemberUserId] = useState("");
   const [role, setRole] = useState<CollaborationProjectRole>("member");
   const [memberToRemove, setMemberToRemove] = useState<CollaborationProjectMember | null>(null);
@@ -80,9 +75,9 @@ export function ProjectMembersPanel({
     <>
       <section aria-labelledby="project-members-title" className="space-y-5">
         <div>
-          <h2 id="project-members-title" className="text-lg font-semibold tracking-tight">Members</h2>
+          <h2 id="project-members-title" className="text-lg font-semibold tracking-tight">{t("projects.members.title")}</h2>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-            Project membership controls access to this project’s tasks, context, and extensions. Organization membership alone does not grant project access.
+            {t("projects.members.description")}
           </p>
         </div>
 
@@ -90,9 +85,13 @@ export function ProjectMembersPanel({
           <header className="flex items-start gap-3 px-4 py-4 sm:px-5">
             <Users className="mt-0.5 h-4 w-4 text-muted-foreground" aria-hidden />
             <div className="min-w-0">
-              <h3 id="project-member-roster-title" className="text-sm font-semibold">Project roster</h3>
+              <h3 id="project-member-roster-title" className="text-sm font-semibold">{t("projects.members.roster")}</h3>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                Your role is {currentMembership ? roleLabel(currentMembership.role) : "not available"}. User IDs are shown because no public directory is available.
+                {t("projects.members.currentRole", {
+                  role: currentMembership
+                    ? t(`projects.members.roles.${currentMembership.role}`)
+                    : t("projects.members.notAvailable"),
+                })}
               </p>
             </div>
           </header>
@@ -105,9 +104,9 @@ export function ProjectMembersPanel({
                   <div className="min-w-0 flex-1">
                     <p className="break-all text-sm font-medium">
                       {member.user_id}
-                      {member.user_id === currentUserId ? <span className="ml-1 text-xs font-normal text-muted-foreground">(you)</span> : null}
+                      {member.user_id === currentUserId ? <span className="ml-1 text-xs font-normal text-muted-foreground">({t("projects.members.you")})</span> : null}
                     </p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">{roleLabel(member.role)}</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">{t(`projects.members.roles.${member.role}`)}</p>
                   </div>
                   {canManage ? (
                     <Button
@@ -116,8 +115,8 @@ export function ProjectMembersPanel({
                       size="icon"
                       disabled={Boolean(busyKey)}
                       onClick={() => setMemberToRemove(member)}
-                      aria-label={`Remove ${member.user_id} from project`}
-                      title="Remove project member"
+                      aria-label={t("projects.members.removeAria", { user: member.user_id })}
+                      title={t("projects.members.removeTitle")}
                       className="h-11 w-11 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                     >
                       {busyKey === `project:member:remove:${member.user_id}`
@@ -129,7 +128,7 @@ export function ProjectMembersPanel({
               ))}
             </ul>
           ) : (
-            <p className="border-t border-border/45 px-4 py-5 text-sm text-muted-foreground sm:px-5">No project members are visible.</p>
+            <p className="border-t border-border/45 px-4 py-5 text-sm text-muted-foreground sm:px-5">{t("projects.members.empty")}</p>
           )}
         </section>
 
@@ -138,16 +137,16 @@ export function ProjectMembersPanel({
             <div className="flex items-start gap-3">
               <UserPlus className="mt-0.5 h-4 w-4 text-muted-foreground" aria-hidden />
               <div>
-                <h3 id="add-project-member-title" className="text-sm font-semibold">Add or update a project member</h3>
+                <h3 id="add-project-member-title" className="text-sm font-semibold">{t("projects.members.add")}</h3>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  Choose an organization member or enter an exact user ID. The server rejects users who are not members of this organization and preserves the final owner.
+                  {t("projects.members.addDescription")}
                 </p>
               </div>
             </div>
 
             <form onSubmit={(event) => void addMember(event)} className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem_auto] sm:items-end">
               <div className="min-w-0">
-                <label htmlFor="project-organization-member" className="text-xs font-medium">Choose from organization</label>
+                <label htmlFor="project-organization-member" className="text-xs font-medium">{t("projects.members.chooseFromOrganization")}</label>
                 <select
                   id="project-organization-member"
                   value=""
@@ -155,20 +154,20 @@ export function ProjectMembersPanel({
                   disabled={organizationLoading || !organizationMembers.length || Boolean(busyKey)}
                   className="mt-1.5 h-11 w-full rounded-control border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
                 >
-                  <option value="">{organizationLoading ? "Loading organization members…" : "Select a user ID"}</option>
+                  <option value="">{organizationLoading ? t("projects.members.loadingOrganization") : t("projects.members.selectUser")}</option>
                   {organizationMembers.map((member) => (
                     <option key={member.user_id} value={member.user_id}>{member.user_id}</option>
                   ))}
                 </select>
                 {!organizationLoading && !organizationMembers.length ? (
-                  <p className="mt-1.5 text-xs leading-5 text-muted-foreground">Organization roster unavailable; enter the exact user ID below.</p>
+                  <p className="mt-1.5 text-xs leading-5 text-muted-foreground">{t("projects.members.rosterUnavailable")}</p>
                 ) : null}
-                <label htmlFor="project-member-user-id" className="mt-3 block text-xs font-medium">Or exact user ID</label>
+                <label htmlFor="project-member-user-id" className="mt-3 block text-xs font-medium">{t("projects.members.exactUserId")}</label>
                 <Input
                   id="project-member-user-id"
                   value={memberUserId}
                   onChange={(event) => setMemberUserId(event.target.value)}
-                  placeholder="User ID"
+                  placeholder={t("projects.members.userIdPlaceholder")}
                   autoComplete="off"
                   maxLength={128}
                   disabled={Boolean(busyKey)}
@@ -176,7 +175,7 @@ export function ProjectMembersPanel({
                 />
               </div>
               <div>
-                <label htmlFor="project-member-role" className="text-xs font-medium">Project role</label>
+                <label htmlFor="project-member-role" className="text-xs font-medium">{t("projects.members.projectRole")}</label>
                 <select
                   id="project-member-role"
                   value={role}
@@ -184,20 +183,22 @@ export function ProjectMembersPanel({
                   disabled={Boolean(busyKey)}
                   className="mt-1.5 h-11 w-full rounded-control border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
                 >
-                  {PROJECT_ROLES.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  {PROJECT_ROLES.map((option) => (
+                    <option key={option} value={option}>{t(`projects.members.roles.${option}`)}</option>
+                  ))}
                 </select>
               </div>
               <Button type="submit" disabled={!memberUserId.trim() || Boolean(busyKey)} className="h-11 w-full sm:w-auto">
                 {busyKey?.startsWith("project:member:add:") ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : null}
-                {existingMember ? "Update role" : "Add member"}
+                {existingMember ? t("projects.members.updateRole") : t("projects.members.addMember")}
               </Button>
             </form>
           </section>
         ) : (
           <section className="rounded-panel bg-settings-surface px-4 py-5 sm:px-5">
-            <p className="text-sm font-medium">Read-only membership</p>
+            <p className="text-sm font-medium">{t("projects.members.readOnly")}</p>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              Only a project owner can add, change, or remove project members.
+              {t("projects.members.readOnlyDescription")}
             </p>
           </section>
         )}
@@ -206,18 +207,21 @@ export function ProjectMembersPanel({
       <AlertDialog open={Boolean(memberToRemove)} onOpenChange={(next) => !next && setMemberToRemove(null)}>
         <AlertDialogContent className="w-[min(calc(100vw-2rem),24rem)]">
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove project member?</AlertDialogTitle>
+            <AlertDialogTitle>{t("projects.members.removeConfirmTitle")}</AlertDialogTitle>
             <AlertDialogDescription className="break-words">
-              Remove {memberToRemove?.user_id} from {detail.project.name}? They will lose access to this project. The server will reject removing the final owner.
+              {t("projects.members.removeConfirmDescription", {
+                user: memberToRemove?.user_id,
+                project: detail.project.name,
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="h-11">Cancel</AlertDialogCancel>
+            <AlertDialogCancel className="h-11">{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => void removeMember()}
               className="h-11 bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              Remove member
+              {t("projects.members.removeMember")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

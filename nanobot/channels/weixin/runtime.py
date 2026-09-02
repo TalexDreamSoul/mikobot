@@ -27,6 +27,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
+from filelock import FileLock
 from loguru import logger
 from pydantic import Field, model_validator
 
@@ -308,9 +309,18 @@ class WeixinChannel(BaseChannel):
 
     def __init__(self, config: Any, bus: MessageBus):
         if isinstance(config, dict):
-            config = WeixinConfig.model_validate(config)
+            raw_config = cast(dict[str, object], config)
+            raw_instance_id = str(
+                raw_config.get("instanceId")
+                or raw_config.get("instance_id")
+                or "default"
+            )
+            config = WeixinConfig.model_validate(raw_config)
+        else:
+            raw_instance_id = "default"
         super().__init__(config, bus)
         self.config: WeixinConfig = config
+        self.instance_id = raw_instance_id
 
         # State
         self._client: httpx.AsyncClient | None = None
@@ -489,32 +499,45 @@ class WeixinChannel(BaseChannel):
         self._persist_connect_credentials(token=token, base_url=base_url)
 
     def _persist_connect_credentials(self, *, token: str, base_url: str) -> None:
-        """Write the QR-login token and base_url back to config.json.
-
-        The connect flow saves account state to ``account.json`` (via
-        ``_save_state``), but the WebUI's post-connect ``enable`` step calls
-        ``set_channel_config_enabled`` which reads config.json. Without
-        persisting the token here, that step would overwrite it with the
-        default empty value, losing the freshly obtained credential.
-        """
+        """Persist QR credentials to this exact managed Weixin instance."""
+        from nanobot.channels.weixin.instances import (
+            update_weixin_instance_preserving_shape,
+            weixin_default_config,
+        )
         from nanobot.config.loader import get_config_path, load_config, save_config
 
         try:
-            full_config = load_config()
-            section = getattr(full_config.channels, "weixin", None)
-            if section is not None and hasattr(section, "model_dump"):
-                values = section.model_dump(mode="json", by_alias=True)
-            elif isinstance(section, dict):
-                values = dict(cast(dict[str, Any], section))
-            else:
-                values = {}
-            values["token"] = token
-            if base_url:
-                values["baseUrl"] = base_url
-            setattr(full_config.channels, "weixin", values)
-            save_config(full_config, get_config_path())
+            config_path = get_config_path()
+            config_lock = FileLock(
+                str(config_path.with_suffix(f"{config_path.suffix}.lock"))
+            )
+            with config_lock:
+                full_config = load_config(config_path)
+                section = getattr(full_config.channels, "weixin", None)
+                # Keep a live, deny-by-default listener so the external Pair Code
+                # can be verified; normal routing requires collaboration assignment.
+                values: dict[str, Any] = {
+                    "token": token,
+                    "stateDir": self.config.state_dir,
+                    "enabled": False,
+                    "pairingRequired": True,
+                    "allowFrom": [],
+                }
+                if base_url:
+                    values["baseUrl"] = base_url
+                updated = update_weixin_instance_preserving_shape(
+                    section,
+                    weixin_default_config(),
+                    self.instance_id,
+                    values,
+                )
+                setattr(full_config.channels, "weixin", updated)
+                save_config(full_config, config_path)
         except Exception:
-            self.logger.exception("Failed to persist WeChat credentials to config.json")
+            self.logger.exception(
+                "Failed to persist WeChat credentials for instance {}",
+                self.instance_id,
+            )
 
     # ------------------------------------------------------------------
     # HTTP helpers  (matches api.ts buildHeaders / apiFetch)
@@ -1171,13 +1194,47 @@ class WeixinChannel(BaseChannel):
         while len(self._processed_ids) > 1000:
             self._processed_ids.popitem(last=False)
 
-        ctx_token = msg.get("context_token", "")
-        if not self.is_allowed(from_user_id):
-            if from_user_id.endswith("@chatroom"):
+        ctx_token = str(msg.get("context_token", "") or "")
+        raw_preflight_items: object = msg.get("item_list") or []
+        raw_preflight_list = (
+            cast(list[object], raw_preflight_items)
+            if isinstance(raw_preflight_items, list)
+            else []
+        )
+        preflight_items = [
+            cast(dict[str, Any], item)
+            for item in raw_preflight_list
+            if isinstance(item, dict)
+        ]
+        preflight_parts: list[str] = []
+        for item in preflight_items:
+            if item.get("type", 0) != ITEM_TEXT:
+                continue
+            raw_text_item: object = item.get("text_item")
+            if not isinstance(raw_text_item, dict):
+                continue
+            text_item = cast(dict[str, object], raw_text_item)
+            text = text_item.get("text")
+            if isinstance(text, str) and text.strip():
+                preflight_parts.append(text.strip())
+        preflight_content = "\n".join(preflight_parts)
+        is_dm = not from_user_id.endswith("@chatroom")
+        if await self._consume_assignment_pairing(
+            from_user_id,
+            from_user_id,
+            preflight_content,
+            is_dm=is_dm,
+        ):
+            return
+        assignment_allowed = await self._assignment_sender_is_authorized(from_user_id)
+        if self.require_assignment_authorization and not assignment_allowed:
+            return
+        if not assignment_allowed and not self.is_allowed(from_user_id):
+            if not is_dm:
                 await self._handle_message(
                     sender_id=from_user_id,
                     chat_id=from_user_id,
-                    content="",
+                    content=preflight_content,
                     metadata={"message_id": msg_id},
                     is_dm=False,
                 )
@@ -1194,13 +1251,13 @@ class WeixinChannel(BaseChannel):
             previous_ctx_token = self._context_tokens.get(from_user_id, "")
             had_ctx_token_at = from_user_id in self._context_token_at
             previous_ctx_token_at = self._context_token_at.get(from_user_id, 0.0)
-            self._context_tokens[from_user_id] = ctx_token
+            self._context_tokens[from_user_id] = str(ctx_token)
             self._context_token_at[from_user_id] = time.time()
             try:
                 await self._handle_message(
                     sender_id=from_user_id,
                     chat_id=from_user_id,
-                    content="",
+                    content=preflight_content,
                     metadata={"message_id": msg_id},
                     is_dm=True,
                 )

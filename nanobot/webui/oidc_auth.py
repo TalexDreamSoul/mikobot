@@ -154,6 +154,12 @@ class OidcAuthenticator:
     def enabled(self) -> bool:
         return self._config.enabled
 
+
+    async def validate_configuration(self) -> None:
+        """Resolve and validate provider discovery without starting a login flow."""
+        if self.enabled:
+            await self._discovery()
+
     def session(self, headers: Any) -> OidcSession | None:
         self._purge()
         value = _cookie_values(headers).get("nanobot_oidc_session")

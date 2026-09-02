@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import time
@@ -14,7 +15,14 @@ from typing import TypeAlias, TypedDict, TypeVar, cast
 
 from filelock import FileLock
 
+from nanobot.collaboration.capabilities import normalize_bot_capability_settings
 from nanobot.collaboration.models import (
+    Bot,
+    BotCapabilityProfile,
+    BotChannelAssignment,
+    BotProjectAssignment,
+    BotProjectChannel,
+    BotState,
     ContextSource,
     ContextSourceKind,
     ConversationBinding,
@@ -26,6 +34,8 @@ from nanobot.collaboration.models import (
     Organization,
     OrganizationMembership,
     OrganizationRole,
+    PairingChallenge,
+    PairingPurpose,
     Persona,
     PersonalTask,
     Project,
@@ -43,9 +53,16 @@ from nanobot.collaboration.models import (
     freeze_json,
     thaw_json,
 )
+from nanobot.collaboration.pairing import (
+    BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY,
+    assignment_code_digest,
+    new_assignment_code,
+    normalize_assignment_code,
+    runtime_channel_key,
+)
 from nanobot.config.paths import get_runtime_subdir
 
-_SCHEMA = 5
+_SCHEMA = 6
 _MAX_FILE_BYTES = 2 * 1024 * 1024
 _MAX_ITEMS = 10_000
 _MAX_STRING = 512
@@ -65,6 +82,12 @@ class _StoreState(TypedDict):
     identities: dict[str, _Record]
     vaults: dict[str, _Record]
     personas: dict[str, _Record]
+    bots: dict[str, _Record]
+    botProjectAssignments: dict[str, _Record]
+    botChannelAssignments: dict[str, _Record]
+    botProjectChannels: dict[str, _Record]
+    botCapabilityProfiles: dict[str, _Record]
+    pairingChallenges: dict[str, _Record]
     shareGrants: dict[str, _Record]
     personalTasks: dict[str, _Record]
     organizations: dict[str, _Record]
@@ -134,13 +157,13 @@ class CollaborationStore:
                 owner = User(_new_id(), "Local owner", None, now, now)
                 state["users"][owner.id] = _encode_user(owner)
                 state["localOwnerId"] = owner.id
-            self._ensure_personal_organization(state, owner, now)
+            organization = self._ensure_personal_organization(state, owner, now)
             vault_value = state["vaults"].get(owner.default_vault_id) if owner.default_vault_id else None
             if vault_value is None:
                 vault = Vault(_new_id(), owner.id, "Private", VaultKind.PRIVATE, now, now)
                 state["vaults"][vault.id] = _encode_vault(vault)
                 owner = User(owner.id, owner.display_name, owner.default_project_id,
-                             owner.created_at_ms, now, vault.id, owner.default_persona_id)
+                             owner.created_at_ms, now, vault.id, owner.default_persona_id, owner.default_organization_id, owner.default_bot_id)
                 state["users"][owner.id] = _encode_user(owner)
             project_value = state["projects"].get(
                 owner.default_project_id) if owner.default_project_id is not None else None
@@ -153,7 +176,7 @@ class CollaborationStore:
                 state["memberships"][_member_key(project.id, owner.id)] = _encode_membership(
                     ProjectMembership(project.id, owner.id, MembershipRole.OWNER, now))
                 owner = User(owner.id, owner.display_name, project.id, owner.created_at_ms, now,
-                             owner.default_vault_id, owner.default_persona_id)
+                             owner.default_vault_id, owner.default_persona_id, owner.default_organization_id, owner.default_bot_id)
                 state["users"][owner.id] = _encode_user(owner)
             elif project.workspace_path != workspace:
                 project = Project(project.id, project.name, workspace, project.created_by_user_id,
@@ -162,6 +185,7 @@ class CollaborationStore:
             if _member_key(project.id, owner.id) not in state["memberships"]:
                 state["memberships"][_member_key(project.id, owner.id)] = _encode_membership(
                     ProjectMembership(project.id, owner.id, MembershipRole.OWNER, now))
+            owner = self._ensure_default_bot(state, owner, organization, project.id, now)
             self._save(state)
             return owner, project
 
@@ -180,7 +204,8 @@ class CollaborationStore:
             )
             state["users"][user.id] = _encode_user(user)
             state["vaults"][vault.id] = _encode_vault(vault)
-            self._ensure_personal_organization(state, user, now)
+            organization = self._ensure_personal_organization(state, user, now)
+            user = self._ensure_default_bot(state, user, organization, None, now)
             self._save(state)
             return user
 
@@ -200,6 +225,8 @@ class CollaborationStore:
                 _now(),
                 user.default_vault_id,
                 user.default_persona_id,
+                user.default_organization_id,
+                user.default_bot_id,
             )
             state["users"][updated.id] = _encode_user(updated)
             self._save(state)
@@ -230,7 +257,9 @@ class CollaborationStore:
                 user.created_at_ms,
                 _now(),
                 user.default_vault_id,
-                user.default_persona_id)
+                user.default_persona_id,
+                user.default_organization_id,
+                user.default_bot_id)
             state["users"][user.id] = _encode_user(updated)
             self._save(state)
             return updated
@@ -277,8 +306,11 @@ class CollaborationStore:
             vault = self._require_vault(state, vault_id)
             if vault.owner_user_id != user.id:
                 raise CollaborationPermissionError("only the owner may select a default vault")
-            updated = User(user.id, user.display_name, user.default_project_id,
-                           user.created_at_ms, _now(), vault.id, user.default_persona_id)
+            updated = User(
+                user.id, user.display_name, user.default_project_id, user.created_at_ms, _now(),
+                vault.id, user.default_persona_id, user.default_organization_id,
+                user.default_bot_id,
+            )
             state["users"][user.id] = _encode_user(updated)
             self._save(state)
             return updated
@@ -299,8 +331,11 @@ class CollaborationStore:
             )
             state["personas"][persona.id] = _encode_persona(persona)
             if user.default_persona_id is None:
-                user = User(user.id, user.display_name, user.default_project_id,
-                            user.created_at_ms, now, user.default_vault_id, persona.id)
+                user = User(
+                    user.id, user.display_name, user.default_project_id, user.created_at_ms, now,
+                    user.default_vault_id, persona.id, user.default_organization_id,
+                    user.default_bot_id,
+                )
                 state["users"][user.id] = _encode_user(user)
             self._save(state)
             return persona
@@ -325,8 +360,11 @@ class CollaborationStore:
                 value = state["personas"].get(persona_id)
                 if value is None or _persona(value).owner_user_id != user.id:
                     raise CollaborationPermissionError("persona is not user-owned")
-            updated = User(user.id, user.display_name, user.default_project_id,
-                           user.created_at_ms, _now(), user.default_vault_id, persona_id)
+            updated = User(
+                user.id, user.display_name, user.default_project_id, user.created_at_ms, _now(),
+                user.default_vault_id, persona_id, user.default_organization_id,
+                user.default_bot_id,
+            )
             state["users"][updated.id] = _encode_user(updated)
             self._save(state)
             return updated
@@ -545,7 +583,20 @@ class CollaborationStore:
         if existing is not None and existing.default_project_id is not None:
             project = self.get_project(existing.id, existing.default_project_id)
             if project is not None:
-                return existing, project
+                if (
+                    existing.default_bot_id is not None
+                    and existing.default_organization_id is not None
+                ):
+                    return existing, project
+                with self._state() as state:
+                    current = self._require_user(state, existing.id)
+                    now = _now()
+                    organization = self._ensure_personal_organization(state, current, now)
+                    updated = self._ensure_default_bot(
+                        state, current, organization, project.id, now
+                    )
+                    self._save(state)
+                    return updated, _project(state["projects"][project.id])
 
         if local_owner:
             user, project = self.ensure_local_owner(default_workspace)
@@ -587,6 +638,7 @@ class CollaborationStore:
                 membership
             )
             state["identities"][identity_key] = _encode_identity(identity)
+            user = self._ensure_default_bot(state, user, organization, project.id, now)
             self._save(state)
             return user, project
 
@@ -653,10 +705,33 @@ class CollaborationStore:
                 raise CollaborationConflictError("a personal organization cannot be deleted")
             if any(value["organizationId"] == organization_id for value in state["projects"].values()):
                 raise CollaborationConflictError("an organization with projects cannot be deleted")
+            bot_ids = {
+                _bot(value).id
+                for value in state["bots"].values()
+                if _bot(value).organization_id == organization_id
+            }
+            affected_users = {
+                _user(value).id
+                for value in state["users"].values()
+                if _user(value).default_organization_id == organization_id
+                or _user(value).default_bot_id in bot_ids
+            }
+            for collection in (
+                "botProjectAssignments", "botChannelAssignments", "botProjectChannels",
+                "botCapabilityProfiles", "pairingChallenges",
+            ):
+                for key, value in tuple(state[collection].items()):
+                    if value["botId"] in bot_ids:
+                        del state[collection][key]
+            for key, value in tuple(state["bots"].items()):
+                if key in bot_ids:
+                    del state["bots"][key]
             del state["organizations"][organization_id]
             for key, value in tuple(state["organizationMemberships"].items()):
                 if value["organizationId"] == organization_id:
                     del state["organizationMemberships"][key]
+            for user_id in affected_users:
+                self._restore_personal_defaults(state, user_id, _now())
             self._save(state)
             return True
 
@@ -756,11 +831,26 @@ class CollaborationStore:
                     state["tasks"][task_key] = _encode_task(Task(
                         task.id, task.project_id, task.task_list_id, task.title, task.status,
                         task.description, None, task.position, task.created_at_ms, _now()))
-                user = self._require_user(state, user_id)
-                if user.default_project_id == project_id:
-                    state["users"][user_id] = _encode_user(User(
-                        user.id, user.display_name, None, user.created_at_ms, _now(),
-                        user.default_vault_id, user.default_persona_id))
+            user = self._require_user(state, user_id)
+            raw_bot = (
+                state["bots"].get(user.default_bot_id)
+                if user.default_bot_id is not None
+                else None
+            )
+            default_bot_invalid = user.default_bot_id is not None and (
+                raw_bot is None
+                or not self._can_view_bot(state, _bot(raw_bot), user.id)
+            )
+            default_project_invalid = (
+                user.default_project_id is not None
+                and _member_key(user.default_project_id, user.id) not in state["memberships"]
+            )
+            if (
+                user.default_organization_id == organization_id
+                or default_bot_invalid
+                or default_project_invalid
+            ):
+                self._restore_personal_defaults(state, user_id, _now())
             for grant_id, grant_value in tuple(state["shareGrants"].items()):
                 grant = _share_grant(grant_value)
                 if grant.grantee_user_id != user_id:
@@ -782,6 +872,512 @@ class CollaborationStore:
                  if value["organizationId"] == organization_id),
                 key=lambda item: (item.created_at_ms, item.user_id),
             )
+
+
+    # -- bots, channels, capabilities, and assignment pairing -----------------
+
+    def create_bot(
+        self,
+        actor_user_id: str,
+        organization_id: str,
+        name: str,
+        *,
+        avatar_url: str | None = None,
+        persona_id: str | None = None,
+    ) -> Bot:
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        organization_id = _id(organization_id, "organization_id")
+        with self._state() as state:
+            self._require_organization_admin(state, organization_id, actor_user_id)
+            if persona_id is not None:
+                persona_id = _id(persona_id, "persona_id")
+                raw_persona = state["personas"].get(persona_id)
+                if raw_persona is None or _persona(raw_persona).owner_user_id != actor_user_id:
+                    raise CollaborationPermissionError("bot persona must be user-owned")
+            now = _now()
+            bot = Bot(
+                id=_new_id(),
+                organization_id=organization_id,
+                owner_user_id=actor_user_id,
+                name=_string(name, "name"),
+                avatar_url=_optional_text(avatar_url, "avatar_url"),
+                persona_id=persona_id,
+                state=BotState.ACTIVE,
+                created_at_ms=now,
+                updated_at_ms=now,
+            )
+            state["bots"][bot.id] = _encode_bot(bot)
+            self._save(state)
+            return bot
+
+    def get_bot(self, actor_user_id: str, bot_id: str) -> Bot | None:
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        bot_id = _id(bot_id, "bot_id")
+        with self._state() as state:
+            self._require_user(state, actor_user_id)
+            raw_bot = state["bots"].get(bot_id)
+            if raw_bot is None:
+                return None
+            bot = _bot(raw_bot)
+            return bot if self._can_view_bot(state, bot, actor_user_id) else None
+
+    def list_bots(
+        self, actor_user_id: str, *, organization_id: str | None = None
+    ) -> list[Bot]:
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        organization_id = (
+            _id(organization_id, "organization_id")
+            if organization_id is not None
+            else None
+        )
+        with self._state() as state:
+            self._require_user(state, actor_user_id)
+            if organization_id is not None:
+                self._require_organization_member(state, organization_id, actor_user_id)
+            bots = [
+                bot
+                for raw_bot in state["bots"].values()
+                if (bot := _bot(raw_bot))
+                and (organization_id is None or bot.organization_id == organization_id)
+                and self._can_view_bot(state, bot, actor_user_id)
+            ]
+            return sorted(bots, key=lambda bot: (bot.updated_at_ms, bot.id), reverse=True)
+
+    def update_bot(
+        self,
+        bot_id: str,
+        actor_user_id: str,
+        *,
+        name: str | None = None,
+        avatar_url: str | None = None,
+        persona_id: str | None = None,
+        state_value: BotState | None = None,
+    ) -> Bot:
+        bot_id = _id(bot_id, "bot_id")
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        with self._state() as state:
+            bot = self._require_bot_manager(state, bot_id, actor_user_id)
+            next_persona_id = bot.persona_id
+            if persona_id is not None:
+                persona_id = _id(persona_id, "persona_id")
+                raw_persona = state["personas"].get(persona_id)
+                if raw_persona is None or _persona(raw_persona).owner_user_id != bot.owner_user_id:
+                    raise CollaborationPermissionError("bot persona must be owner-owned")
+                next_persona_id = persona_id
+            updated = Bot(
+                id=bot.id,
+                organization_id=bot.organization_id,
+                owner_user_id=bot.owner_user_id,
+                name=_string(name, "name") if name is not None else bot.name,
+                avatar_url=(
+                    _optional_text(avatar_url, "avatar_url")
+                    if avatar_url is not None else bot.avatar_url
+                ),
+                persona_id=next_persona_id,
+                state=state_value if state_value is not None else bot.state,
+                created_at_ms=bot.created_at_ms,
+                updated_at_ms=_now(),
+            )
+            state["bots"][bot.id] = _encode_bot(updated)
+            self._save(state)
+            return updated
+
+    def delete_bot(self, bot_id: str, actor_user_id: str) -> bool:
+        bot_id = _id(bot_id, "bot_id")
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        with self._state() as state:
+            self._require_bot_manager(state, bot_id, actor_user_id)
+            if any(_user(value).default_bot_id == bot_id for value in state["users"].values()):
+                raise CollaborationConflictError("a default bot cannot be deleted")
+            del state["bots"][bot_id]
+            for collection in (
+                "botProjectAssignments", "botChannelAssignments",
+                "botProjectChannels", "botCapabilityProfiles", "pairingChallenges",
+            ):
+                for key, value in tuple(state[collection].items()):
+                    if value["botId"] == bot_id:
+                        del state[collection][key]
+            self._save(state)
+            return True
+
+    def update_user_defaults(
+        self,
+        user_id: str,
+        *,
+        organization_id: str,
+        bot_id: str,
+        project_id: str | None = None,
+    ) -> User:
+        user_id = _id(user_id, "user_id")
+        organization_id = _id(organization_id, "organization_id")
+        bot_id = _id(bot_id, "bot_id")
+        project_id = _id(project_id, "project_id") if project_id is not None else None
+        with self._state() as state:
+            user = self._require_user(state, user_id)
+            self._require_organization_member(state, organization_id, user_id)
+            bot = self._require_bot(state, bot_id)
+            if bot.organization_id != organization_id or not self._can_view_bot(state, bot, user_id):
+                raise CollaborationPermissionError("bot is unavailable in this organization")
+            if project_id is not None:
+                project = self._require_project(state, project_id)
+                self._require_member(state, project_id, user_id)
+                if project.organization_id != organization_id:
+                    raise CollaborationPermissionError("project is outside the organization")
+                if _bot_project_key(bot.id, project.id) not in state["botProjectAssignments"]:
+                    raise CollaborationPermissionError("bot is not assigned to the project")
+            updated = User(
+                user.id, user.display_name, project_id, user.created_at_ms, _now(),
+                user.default_vault_id, user.default_persona_id, organization_id, bot_id,
+            )
+            state["users"][user.id] = _encode_user(updated)
+            self._save(state)
+            return updated
+
+    def list_bot_projects(self, actor_user_id: str, bot_id: str) -> list[BotProjectAssignment]:
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        bot_id = _id(bot_id, "bot_id")
+        with self._state() as state:
+            bot = self._require_bot(state, bot_id)
+            if not self._can_view_bot(state, bot, actor_user_id):
+                raise CollaborationPermissionError("bot is unavailable")
+            return sorted(
+                (
+                    assignment
+                    for value in state["botProjectAssignments"].values()
+                    if (assignment := _bot_project_assignment(value)).bot_id == bot_id
+                ),
+                key=lambda assignment: (assignment.created_at_ms, assignment.project_id),
+            )
+
+    def list_bot_channels(self, actor_user_id: str, bot_id: str) -> list[BotChannelAssignment]:
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        bot_id = _id(bot_id, "bot_id")
+        with self._state() as state:
+            bot = self._require_bot(state, bot_id)
+            if not self._can_view_bot(state, bot, actor_user_id):
+                raise CollaborationPermissionError("bot is unavailable")
+            return sorted(
+                (
+                    assignment
+                    for value in state["botChannelAssignments"].values()
+                    if (assignment := _bot_channel_assignment(value)).bot_id == bot_id
+                ),
+                key=lambda assignment: (
+                    assignment.channel_type, assignment.instance_id
+                ),
+            )
+
+    def list_bot_project_channels(
+        self, actor_user_id: str, bot_id: str, project_id: str
+    ) -> list[BotProjectChannel]:
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        bot_id = _id(bot_id, "bot_id")
+        project_id = _id(project_id, "project_id")
+        with self._state() as state:
+            bot = self._require_bot(state, bot_id)
+            if not self._can_view_bot(state, bot, actor_user_id):
+                raise CollaborationPermissionError("bot is unavailable")
+            self._require_member(state, project_id, actor_user_id)
+            return sorted(
+                (
+                    route
+                    for value in state["botProjectChannels"].values()
+                    if (route := _bot_project_channel(value)).bot_id == bot_id
+                    and route.project_id == project_id
+                ),
+                key=lambda route: (route.channel_type, route.instance_id),
+            )
+
+    def get_bot_capability_profile(
+        self, actor_user_id: str, bot_id: str, *, project_id: str | None = None
+    ) -> BotCapabilityProfile:
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        bot_id = _id(bot_id, "bot_id")
+        project_id = _id(project_id, "project_id") if project_id is not None else None
+        with self._state() as state:
+            bot = self._require_bot(state, bot_id)
+            if not self._can_view_bot(state, bot, actor_user_id):
+                raise CollaborationPermissionError("bot is unavailable")
+            if project_id is not None:
+                self._require_member(state, project_id, actor_user_id)
+            value = state["botCapabilityProfiles"].get(
+                _bot_profile_key(bot_id, project_id)
+            )
+            return (
+                _bot_capability_profile(value)
+                if value is not None
+                else BotCapabilityProfile(bot_id, project_id, 0, _json_object({}, "settings"), 0)
+            )
+
+    def update_bot_capability_profile(
+        self,
+        actor_user_id: str,
+        bot_id: str,
+        settings: Mapping[str, object],
+        *,
+        project_id: str | None = None,
+        expected_revision: int | None = None,
+    ) -> BotCapabilityProfile:
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        bot_id = _id(bot_id, "bot_id")
+        project_id = _id(project_id, "project_id") if project_id is not None else None
+        settings = normalize_bot_capability_settings(settings)
+        if expected_revision is not None and (
+            isinstance(expected_revision, bool) or expected_revision < 0
+        ):
+            raise ValueError("expected_revision must be non-negative")
+        with self._state() as state:
+            self._require_bot_manager(state, bot_id, actor_user_id)
+            if project_id is not None:
+                self._require_owner(state, project_id, actor_user_id)
+                if _bot_project_key(bot_id, project_id) not in state["botProjectAssignments"]:
+                    raise CollaborationPermissionError("bot is not assigned to project")
+            key = _bot_profile_key(bot_id, project_id)
+            prior_value = state["botCapabilityProfiles"].get(key)
+            prior = (
+                _bot_capability_profile(prior_value)
+                if prior_value is not None
+                else BotCapabilityProfile(bot_id, project_id, 0, _json_object({}, "settings"), 0)
+            )
+            if expected_revision is not None and prior.revision != expected_revision:
+                raise CollaborationConflictError("bot capability revision changed")
+            profile = BotCapabilityProfile(
+                bot_id, project_id, prior.revision + 1, settings, _now()
+            )
+            state["botCapabilityProfiles"][key] = _encode_bot_capability_profile(profile)
+            self._save(state)
+            return profile
+
+    def create_pairing_challenge(
+        self,
+        actor_user_id: str,
+        *,
+        purpose: PairingPurpose,
+        organization_id: str,
+        bot_id: str,
+        channel_type: str,
+        instance_id: str,
+        project_id: str | None = None,
+        ttl_seconds: int = 600,
+    ) -> tuple[PairingChallenge, str]:
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        organization_id = _id(organization_id, "organization_id")
+        bot_id = _id(bot_id, "bot_id")
+        channel_type = _key(channel_type, "channel_type")
+        instance_id = _key(instance_id, "instance_id")
+        project_id = _id(project_id, "project_id") if project_id is not None else None
+        purpose = _pairing_purpose(purpose)
+        if isinstance(ttl_seconds, bool) or not 60 <= ttl_seconds <= 900:
+            raise ValueError("pairing challenge TTL must be between 60 and 900 seconds")
+        with self._state() as state:
+            bot = self._require_bot_manager(state, bot_id, actor_user_id)
+            if bot.organization_id != organization_id:
+                raise CollaborationPermissionError("bot is outside the organization")
+            if purpose is PairingPurpose.CLAIM_CHANNEL:
+                if project_id is not None:
+                    raise ValueError("channel claim must not include a project")
+            else:
+                if project_id is None:
+                    raise ValueError("bot project assignment requires project_id")
+                project = self._require_project(state, project_id)
+                self._require_owner(state, project_id, actor_user_id)
+                if project.organization_id != organization_id:
+                    raise CollaborationPermissionError("project is outside the organization")
+                channel = state["botChannelAssignments"].get(
+                    _channel_instance_key(channel_type, instance_id)
+                )
+                if channel is None or _bot_channel_assignment(channel).bot_id != bot_id:
+                    raise CollaborationPermissionError("channel is not claimed by this bot")
+            now = _now()
+            for key, value in tuple(state["pairingChallenges"].items()):
+                challenge = _pairing_challenge(value)
+                if challenge.expires_at_ms < now or challenge.consumed_at_ms is not None:
+                    del state["pairingChallenges"][key]
+            actor_challenges = sum(
+                1
+                for value in state["pairingChallenges"].values()
+                if _pairing_challenge(value).requested_by_user_id == actor_user_id
+            )
+            if actor_challenges >= 32:
+                raise CollaborationConflictError("too many active pairing challenges for user")
+            if len(state["pairingChallenges"]) >= 4096:
+                raise CollaborationConflictError("pairing challenge storage is full")
+            code = new_assignment_code()
+            challenge = PairingChallenge(
+                id=_new_id(),
+                code_digest=assignment_code_digest(code),
+                requested_by_user_id=actor_user_id,
+                purpose=purpose,
+                organization_id=organization_id,
+                bot_id=bot_id,
+                project_id=project_id,
+                channel_type=channel_type,
+                instance_id=instance_id,
+                expires_at_ms=now + ttl_seconds * 1000,
+                verified_at_ms=None,
+                verified_sender_id=None,
+                consumed_at_ms=None,
+                created_at_ms=now,
+            )
+            state["pairingChallenges"][challenge.id] = _encode_pairing_challenge(challenge)
+            self._save(state)
+            return challenge, code
+
+    def get_pairing_challenge(
+        self, actor_user_id: str, challenge_id: str
+    ) -> PairingChallenge | None:
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        challenge_id = _id(challenge_id, "challenge_id")
+        with self._state() as state:
+            value = state["pairingChallenges"].get(challenge_id)
+            if value is None:
+                return None
+            challenge = _pairing_challenge(value)
+            return challenge if challenge.requested_by_user_id == actor_user_id else None
+
+    def verify_pairing_challenge(
+        self,
+        code: str,
+        *,
+        channel_type: str,
+        instance_id: str,
+        sender_id: str,
+    ) -> PairingChallenge:
+        digest = assignment_code_digest(normalize_assignment_code(code))
+        channel_type = _key(channel_type, "channel_type")
+        instance_id = _key(instance_id, "instance_id")
+        sender_id = _key(sender_id, "sender_id")
+        with self._state() as state:
+            now = _now()
+            challenge: PairingChallenge | None = None
+            for value in state["pairingChallenges"].values():
+                candidate = _pairing_challenge(value)
+                if (
+                    candidate.channel_type == channel_type
+                    and candidate.instance_id == instance_id
+                    and candidate.consumed_at_ms is None
+                    and candidate.expires_at_ms >= now
+                    and hmac.compare_digest(candidate.code_digest, digest)
+                ):
+                    challenge = candidate
+                    break
+            if challenge is None:
+                raise CollaborationNotFoundError("pairing challenge not found or expired")
+            if challenge.verified_at_ms is not None:
+                if challenge.verified_sender_id != sender_id:
+                    raise CollaborationConflictError("pairing challenge was verified by another sender")
+                return challenge
+            identity_key = _identity_key(
+                runtime_channel_key(channel_type, instance_id), sender_id
+            )
+            identity_value = state["identities"].get(identity_key)
+            if identity_value is not None:
+                identity = _identity(identity_value)
+                if identity.user_id != challenge.requested_by_user_id:
+                    raise CollaborationConflictError("channel sender belongs to another user")
+            else:
+                state["identities"][identity_key] = _encode_identity(
+                    UserIdentity(
+                        challenge.requested_by_user_id,
+                        runtime_channel_key(channel_type, instance_id),
+                        sender_id,
+                        now,
+                    )
+                )
+            verified = PairingChallenge(
+                challenge.id, challenge.code_digest, challenge.requested_by_user_id,
+                challenge.purpose, challenge.organization_id, challenge.bot_id,
+                challenge.project_id, challenge.channel_type, challenge.instance_id,
+                challenge.expires_at_ms, now, sender_id, None, challenge.created_at_ms,
+            )
+            state["pairingChallenges"][verified.id] = _encode_pairing_challenge(verified)
+            self._save(state)
+            return verified
+
+    def consume_pairing_challenge(
+        self, actor_user_id: str, challenge_id: str
+    ) -> PairingChallenge:
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        challenge_id = _id(challenge_id, "challenge_id")
+        with self._state() as state:
+            raw_challenge = state["pairingChallenges"].get(challenge_id)
+            if raw_challenge is None:
+                raise CollaborationNotFoundError("pairing challenge not found")
+            challenge = _pairing_challenge(raw_challenge)
+            now = _now()
+            if challenge.requested_by_user_id != actor_user_id:
+                raise CollaborationPermissionError("pairing challenge belongs to another user")
+            if challenge.expires_at_ms < now:
+                raise CollaborationConflictError("pairing challenge expired")
+            if challenge.verified_at_ms is None or challenge.verified_sender_id is None:
+                raise CollaborationConflictError("pairing challenge is not verified")
+            if challenge.consumed_at_ms is not None:
+                raise CollaborationConflictError("pairing challenge was already consumed")
+            bot = self._require_bot_manager(state, challenge.bot_id, actor_user_id)
+            if challenge.purpose is PairingPurpose.CLAIM_CHANNEL:
+                key = _channel_instance_key(challenge.channel_type, challenge.instance_id)
+                existing = state["botChannelAssignments"].get(key)
+                if existing is not None and _bot_channel_assignment(existing).bot_id != bot.id:
+                    raise CollaborationConflictError("channel instance is already claimed")
+                state["botChannelAssignments"][key] = _encode_bot_channel_assignment(
+                    BotChannelAssignment(
+                        bot.id, challenge.channel_type, challenge.instance_id,
+                        actor_user_id, now,
+                    )
+                )
+            else:
+                project_id = challenge.project_id
+                if project_id is None:
+                    raise CollaborationStoreFormatError("assignment challenge lacks project")
+                self._require_owner(state, project_id, actor_user_id)
+                project = self._require_project(state, project_id)
+                if project.organization_id != bot.organization_id:
+                    raise CollaborationPermissionError("bot and project organizations differ")
+                channel_key = _channel_instance_key(
+                    challenge.channel_type, challenge.instance_id
+                )
+                channel = state["botChannelAssignments"].get(channel_key)
+                if channel is None or _bot_channel_assignment(channel).bot_id != bot.id:
+                    raise CollaborationPermissionError("channel is not claimed by this bot")
+                project_key = _bot_project_key(bot.id, project_id)
+                if project_key not in state["botProjectAssignments"]:
+                    state["botProjectAssignments"][project_key] = (
+                        _encode_bot_project_assignment(
+                            BotProjectAssignment(bot.id, project_id, actor_user_id, now)
+                        )
+                    )
+                route = BotProjectChannel(
+                    bot.id, project_id, challenge.channel_type, challenge.instance_id, True, now
+                )
+                state["botProjectChannels"][
+                    _bot_project_channel_key(
+                        bot.id, project_id, challenge.channel_type, challenge.instance_id
+                    )
+                ] = _encode_bot_project_channel(route)
+                user = self._require_user(state, actor_user_id)
+                state["users"][user.id] = _encode_user(
+                    User(
+                        user.id,
+                        user.display_name,
+                        project_id,
+                        user.created_at_ms,
+                        now,
+                        user.default_vault_id,
+                        user.default_persona_id,
+                        project.organization_id,
+                        bot.id,
+                    )
+                )
+            consumed = PairingChallenge(
+                challenge.id, challenge.code_digest, challenge.requested_by_user_id,
+                challenge.purpose, challenge.organization_id, challenge.bot_id,
+                challenge.project_id, challenge.channel_type, challenge.instance_id,
+                challenge.expires_at_ms, challenge.verified_at_ms,
+                challenge.verified_sender_id, now, challenge.created_at_ms,
+            )
+            state["pairingChallenges"][consumed.id] = _encode_pairing_challenge(consumed)
+            self._save(state)
+            return consumed
 
     # -- projects and membership ---------------------------------------------
     # -- projects and membership ---------------------------------------------
@@ -864,23 +1460,28 @@ class CollaborationStore:
         with self._state() as state:
             self._require_owner(state, project_id, actor_user_id)
             del state["projects"][project_id]
-            for collection in ("memberships", "extensionProfiles", "taskLists",
-                               "tasks", "conversationBindings", "contextSources"):
+            for collection in (
+                "memberships", "extensionProfiles", "taskLists", "tasks",
+                "conversationBindings", "contextSources", "botProjectAssignments",
+                "botProjectChannels", "botCapabilityProfiles", "pairingChallenges",
+            ):
                 for key, value in tuple(state[collection].items()):
                     if value["projectId"] == project_id:
                         del state[collection][key]
+            now = _now()
             for key, value in tuple(state["users"].items()):
                 user = _user(value)
-                if user.default_project_id == project_id:
-                    state["users"][key] = _encode_user(
-                        User(
-                            user.id,
-                            user.display_name,
-                            None,
-                            user.created_at_ms,
-                            _now(),
-                            user.default_vault_id,
-                            user.default_persona_id))
+                raw_bot = (
+                    state["bots"].get(user.default_bot_id)
+                    if user.default_bot_id is not None
+                    else None
+                )
+                default_bot_invalid = user.default_bot_id is not None and (
+                    raw_bot is None
+                    or not self._can_view_bot(state, _bot(raw_bot), user.id)
+                )
+                if user.default_project_id == project_id or default_bot_invalid:
+                    self._restore_personal_defaults(state, key, now)
             self._save(state)
             return True
 
@@ -943,9 +1544,17 @@ class CollaborationStore:
                             task.created_at_ms,
                             _now()))
             user = self._require_user(state, user_id)
-            if user.default_project_id == project_id:
-                state["users"][user_id] = _encode_user(
-                    User(user.id, user.display_name, None, user.created_at_ms, _now(), user.default_vault_id, user.default_persona_id))
+            raw_bot = (
+                state["bots"].get(user.default_bot_id)
+                if user.default_bot_id is not None
+                else None
+            )
+            default_bot_invalid = user.default_bot_id is not None and (
+                raw_bot is None
+                or not self._can_view_bot(state, _bot(raw_bot), user.id)
+            )
+            if user.default_project_id == project_id or default_bot_invalid:
+                self._restore_personal_defaults(state, user_id, _now())
             self._save(state)
             return True
 
@@ -1317,6 +1926,9 @@ class CollaborationStore:
                 if identity is not None
                 else None
             )
+            require_bot_route = (
+                metadata.get(BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY) is True
+            )
             binding_value = state["conversationBindings"].get(
                 _conversation_key(channel, chat_id, thread_id))
             binding = _binding(
@@ -1324,11 +1936,13 @@ class CollaborationStore:
             if binding is not None and user is not None and binding.project_id in state["projects"] and self._is_member(
                     state, binding.project_id, binding.created_by_user_id) and self._is_member(state, binding.project_id, user.id):
                 return self._project_scope(ConversationScopeKind.BOUND, user, _project(
-                    state["projects"][binding.project_id]), binding, state, suffix)
+                    state["projects"][binding.project_id]), binding, state, suffix, channel,
+                    require_bot_route=require_bot_route)
             if _is_direct(chat_id, sender_id, metadata) and user is not None and user.default_project_id is not None and user.default_project_id in state["projects"] and self._is_member(
                     state, user.default_project_id, user.id):
                 return self._project_scope(ConversationScopeKind.DIRECT, user, _project(
-                    state["projects"][user.default_project_id]), None, state, suffix)
+                    state["projects"][user.default_project_id]), None, state, suffix, channel,
+                    require_bot_route=require_bot_route)
             # validates the injected default without using it for isolation
             _workspace(default_workspace)
             return ConversationScope(ConversationScopeKind.ISOLATED,
@@ -1336,14 +1950,86 @@ class CollaborationStore:
 
     # -- lock, normalization, and authorization ------------------------------
 
-    def _project_scope(self, kind: ConversationScopeKind, user: User, project: Project,
-                       binding: ConversationBinding | None, state: _StoreState, suffix: str) -> ConversationScope:
-        value = state["extensionProfiles"].get(_member_key(project.id, user.id))
-        profile = _profile(value) if value is not None else ExtensionProfile(
-            project.id, user.id, 0, _json_object({}, "settings"), 0)
-        persona_id = user.default_persona_id
+    def _project_scope(
+        self,
+        kind: ConversationScopeKind,
+        user: User,
+        project: Project,
+        binding: ConversationBinding | None,
+        state: _StoreState,
+        suffix: str,
+        channel: str,
+        *,
+        require_bot_route: bool,
+    ) -> ConversationScope:
+        bot_id = user.default_bot_id
+        channel_claimed = False
+        for raw_assignment in state["botChannelAssignments"].values():
+            assignment = _bot_channel_assignment(raw_assignment)
+            if runtime_channel_key(assignment.channel_type, assignment.instance_id) != channel:
+                continue
+            channel_claimed = True
+            route_value = state["botProjectChannels"].get(
+                _bot_project_channel_key(
+                    assignment.bot_id,
+                    project.id,
+                    assignment.channel_type,
+                    assignment.instance_id,
+                )
+            )
+            route = _bot_project_channel(route_value) if route_value is not None else None
+            bot_id = assignment.bot_id if route is not None and route.enabled else None
+            break
+        raw_bot = state["bots"].get(bot_id) if bot_id is not None else None
+        bot = _bot(raw_bot) if raw_bot is not None else None
+        if (
+            bot is not None
+            and (
+                bot.state is not BotState.ACTIVE
+                or _bot_project_key(bot.id, project.id) not in state["botProjectAssignments"]
+            )
+        ):
+            bot = None
+        if (require_bot_route or channel_claimed) and bot is None:
+            return ConversationScope(
+                ConversationScopeKind.ISOLATED,
+                user.id,
+                None,
+                user,
+                None,
+                None,
+                None,
+                0,
+                None,
+                suffix,
+                route_denied=True,
+            )
+        bot_profile_value = (
+            state["botCapabilityProfiles"].get(_bot_profile_key(bot.id, project.id))
+            or state["botCapabilityProfiles"].get(_bot_profile_key(bot.id, None))
+            if bot is not None
+            else None
+        )
+        if bot_profile_value is not None:
+            bot_profile = _bot_capability_profile(bot_profile_value)
+            profile = ExtensionProfile(
+                project.id, user.id, bot_profile.revision,
+                bot_profile.settings, bot_profile.updated_at_ms,
+            )
+        else:
+            value = state["extensionProfiles"].get(_member_key(project.id, user.id))
+            profile = _profile(value) if value is not None else ExtensionProfile(
+                project.id, user.id, 0, _json_object({}, "settings"), 0
+            )
+        persona_id = bot.persona_id if bot is not None else user.default_persona_id
         persona_value = state["personas"].get(persona_id) if persona_id is not None else None
         persona = _persona(persona_value) if persona_value is not None else None
+        if persona is not None and persona.owner_user_id != user.id:
+            persona_id = user.default_persona_id
+            persona_value = (
+                state["personas"].get(persona_id) if persona_id is not None else None
+            )
+            persona = _persona(persona_value) if persona_value is not None else None
         if persona is not None and persona.owner_user_id != user.id:
             raise CollaborationStoreFormatError("default persona is not user-owned")
         vault_id = persona.default_vault_id if persona is not None else user.default_vault_id
@@ -1352,6 +2038,7 @@ class CollaborationStore:
         return ConversationScope(
             kind, user.id, project.id, user, project, binding, profile, profile.revision,
             project.workspace_path, suffix, vault_id, persona.id if persona is not None else None,
+            bot.id if bot is not None else None, bot,
         )
 
     def _is_member(self, state: _StoreState,
@@ -1435,6 +2122,201 @@ class CollaborationStore:
                 organization.id, user.id)] = _encode_organization_membership(membership)
             return organization
 
+
+    def _ensure_default_bot(
+        self,
+        state: _StoreState,
+        user: User,
+        organization: Organization,
+        project_id: str | None,
+        now: int,
+    ) -> User:
+        current_project = (
+            _project(state["projects"][project_id])
+            if project_id is not None and project_id in state["projects"]
+            else None
+        )
+        if user.default_bot_id is not None and user.default_organization_id is not None:
+            raw_selected = state["bots"].get(user.default_bot_id)
+            if raw_selected is not None:
+                selected = _bot(raw_selected)
+                if (
+                    selected.organization_id == user.default_organization_id
+                    and self._can_view_bot(state, selected, user.id)
+                    and (
+                        current_project is None
+                        or current_project.organization_id == user.default_organization_id
+                    )
+                ):
+                    return user
+        bot: Bot | None = None
+        if user.default_bot_id is not None:
+            raw_bot = state["bots"].get(user.default_bot_id)
+            if raw_bot is not None:
+                candidate = _bot(raw_bot)
+                if (
+                    candidate.owner_user_id == user.id
+                    and candidate.organization_id == organization.id
+                ):
+                    bot = candidate
+        if bot is None:
+            existing = sorted(
+                (
+                    candidate
+                    for raw_bot in state["bots"].values()
+                    if (candidate := _bot(raw_bot)).owner_user_id == user.id
+                    and candidate.organization_id == organization.id
+                ),
+                key=lambda candidate: (candidate.created_at_ms, candidate.id),
+            )
+            if existing:
+                bot = existing[0]
+            else:
+                bot = Bot(
+                    id=_new_id(),
+                    organization_id=organization.id,
+                    owner_user_id=user.id,
+                    name="Personal bot",
+                    avatar_url=None,
+                    persona_id=user.default_persona_id,
+                    state=BotState.ACTIVE,
+                    created_at_ms=now,
+                    updated_at_ms=now,
+                )
+                state["bots"][bot.id] = _encode_bot(bot)
+        if (
+            current_project is not None
+            and current_project.organization_id == organization.id
+            and bot.owner_user_id == user.id
+        ):
+            self._require_member(state, current_project.id, user.id)
+            assignment_key = _bot_project_key(bot.id, current_project.id)
+            if assignment_key not in state["botProjectAssignments"]:
+                state["botProjectAssignments"][assignment_key] = (
+                    _encode_bot_project_assignment(
+                        BotProjectAssignment(bot.id, current_project.id, user.id, now)
+                    )
+                )
+        preserve_shared_defaults = (
+            current_project is not None
+            and user.default_project_id == current_project.id
+            and user.default_organization_id is not None
+            and user.default_organization_id != organization.id
+            and user.default_bot_id is None
+            and current_project.organization_id == user.default_organization_id
+        )
+        reset_project_id = (
+            current_project.id
+            if current_project is not None and current_project.organization_id == organization.id
+            else None
+        )
+        if reset_project_id is None:
+            personal_projects = sorted(
+                (
+                    _project(value)
+                    for value in state["projects"].values()
+                    if value["organizationId"] == organization.id
+                    and _member_key(str(value["id"]), user.id) in state["memberships"]
+                ),
+                key=lambda project: (project.created_at_ms, project.id),
+            )
+            if personal_projects:
+                reset_project_id = personal_projects[0].id
+        if preserve_shared_defaults or (
+            user.default_organization_id == organization.id
+            and user.default_bot_id == bot.id
+        ):
+            return user
+        updated = User(
+            user.id,
+            user.display_name,
+            reset_project_id,
+            user.created_at_ms,
+            now,
+            user.default_vault_id,
+            user.default_persona_id,
+            organization.id,
+            bot.id,
+        )
+        state["users"][updated.id] = _encode_user(updated)
+        return updated
+
+    def _restore_personal_defaults(
+        self, state: _StoreState, user_id: str, now: int
+    ) -> User:
+        user = self._require_user(state, user_id)
+        organization = self._ensure_personal_organization(state, user, now)
+        personal_projects = sorted(
+            (
+                _project(value)
+                for value in state["projects"].values()
+                if value["organizationId"] == organization.id
+                and _member_key(str(value["id"]), user.id) in state["memberships"]
+            ),
+            key=lambda project: (project.created_at_ms, project.id),
+        )
+        if not personal_projects:
+            workspace = self.root / "workspaces" / user.id / "default"
+            workspace.mkdir(parents=True, exist_ok=True)
+            with suppress(OSError):
+                workspace.chmod(0o700)
+            project = Project(
+                _new_id(),
+                "Personal project",
+                _workspace(workspace),
+                user.id,
+                now,
+                now,
+                organization.id,
+            )
+            membership = ProjectMembership(
+                project.id, user.id, MembershipRole.OWNER, now
+            )
+            state["projects"][project.id] = _encode_project(project)
+            state["memberships"][_member_key(project.id, user.id)] = _encode_membership(
+                membership
+            )
+            personal_projects = [project]
+        current_project = next(
+            (
+                project
+                for project in personal_projects
+                if project.id == user.default_project_id
+            ),
+            None,
+        )
+        project = current_project or (personal_projects[0] if personal_projects else None)
+        reset = User(
+            user.id,
+            user.display_name,
+            project.id if project is not None else None,
+            user.created_at_ms,
+            now,
+            user.default_vault_id,
+            user.default_persona_id,
+            organization.id,
+            None,
+        )
+        state["users"][user.id] = _encode_user(reset)
+        restored = self._ensure_default_bot(
+            state,
+            reset,
+            organization,
+            project.id if project is not None else None,
+            now,
+        )
+        if project is not None and restored.default_bot_id is not None:
+            assignment_key = _bot_project_key(restored.default_bot_id, project.id)
+            if assignment_key not in state["botProjectAssignments"]:
+                state["botProjectAssignments"][assignment_key] = (
+                    _encode_bot_project_assignment(
+                        BotProjectAssignment(
+                            restored.default_bot_id, project.id, restored.id, now
+                        )
+                    )
+                )
+        return restored
+
     def _require_owner(
             self, state: _StoreState, project_id: str, user_id: str) -> ProjectMembership:
         membership = self._require_member(state, project_id, user_id)
@@ -1448,6 +2330,38 @@ class CollaborationStore:
         if value is None:
             raise CollaborationNotFoundError("user not found")
         return _user(value)
+
+
+    def _require_bot(self, state: _StoreState, bot_id: str) -> Bot:
+        value = state["bots"].get(bot_id)
+        if value is None:
+            raise CollaborationNotFoundError("bot not found")
+        return _bot(value)
+
+    def _require_bot_manager(
+        self, state: _StoreState, bot_id: str, user_id: str
+    ) -> Bot:
+        bot = self._require_bot(state, bot_id)
+        if bot.owner_user_id == user_id:
+            return bot
+        self._require_organization_admin(state, bot.organization_id, user_id)
+        return bot
+
+    def _can_view_bot(self, state: _StoreState, bot: Bot, user_id: str) -> bool:
+        if bot.owner_user_id == user_id:
+            return True
+        membership = state["organizationMemberships"].get(
+            _organization_member_key(bot.organization_id, user_id)
+        )
+        if membership is not None and _organization_membership(membership).role in {
+            OrganizationRole.OWNER, OrganizationRole.ADMIN
+        }:
+            return True
+        return any(
+            assignment["botId"] == bot.id
+            and _member_key(str(assignment["projectId"]), user_id) in state["memberships"]
+            for assignment in state["botProjectAssignments"].values()
+        )
 
 
     def _require_vault(self, state: _StoreState, vault_id: str) -> Vault:
@@ -1608,6 +2522,12 @@ def _empty() -> _StoreState:
         "identities": {},
         "vaults": {},
         "personas": {},
+        "bots": {},
+        "botProjectAssignments": {},
+        "botChannelAssignments": {},
+        "botProjectChannels": {},
+        "botCapabilityProfiles": {},
+        "pairingChallenges": {},
         "shareGrants": {},
         "personalTasks": {},
         "organizations": {},
@@ -1630,6 +2550,11 @@ def _legacy_vault_id(user_id: str) -> str:
 def _legacy_organization_id(user_id: str) -> str:
     digest = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:24]
     return f"organization-{digest}"
+
+
+def _legacy_bot_id(user_id: str) -> str:
+    digest = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:24]
+    return f"bot-{digest}"
 
 
 def _migrate_v1(data: Mapping[str, object]) -> dict[str, object]:
@@ -1765,10 +2690,107 @@ def _migrate_v4(data: Mapping[str, object]) -> dict[str, object]:
                 "role": OrganizationRole.MEMBER.value,
                 "createdAtMs": grant.get("createdAtMs"),
             }
-    migrated["schemaVersion"] = _SCHEMA
+    migrated["schemaVersion"] = 5
     migrated["organizations"] = organizations
     migrated["organizationMemberships"] = organization_memberships
     migrated["projects"] = scoped_projects
+    return migrated
+
+
+def _migrate_v5(data: Mapping[str, object]) -> dict[str, object]:
+    """Create one default bot per user and initialize assignment collections."""
+    migrated: dict[str, object] = dict(data)
+    raw_users = _mapping(migrated.get("users"), "invalid legacy users")
+    raw_organizations = _mapping(
+        migrated.get("organizations"), "invalid legacy organizations"
+    )
+    raw_personas = _mapping(migrated.get("personas"), "invalid legacy personas")
+    raw_profiles = _mapping(
+        migrated.get("extensionProfiles"), "invalid legacy extension profiles"
+    )
+    raw_projects = _mapping(migrated.get("projects"), "invalid legacy projects")
+    personal_organizations: dict[str, str] = {}
+    for raw_organization in raw_organizations.values():
+        organization = _mapping(raw_organization, "invalid legacy organization")
+        if organization.get("isPersonal") is True:
+            owner_user_id = organization.get("createdByUserId")
+            organization_id = organization.get("id")
+            if isinstance(owner_user_id, str) and isinstance(organization_id, str):
+                personal_organizations[owner_user_id] = organization_id
+
+    users: dict[str, object] = {}
+    bots: dict[str, object] = {}
+    bot_projects: dict[str, object] = {}
+    bot_profiles: dict[str, object] = {}
+    for user_id, raw_user in raw_users.items():
+        user = dict(_mapping(raw_user, "invalid legacy user"))
+        organization_id = personal_organizations.get(user_id)
+        if organization_id is None:
+            raise CollaborationStoreFormatError(
+                "legacy user personal organization is missing"
+            )
+        bot_id = _legacy_bot_id(user_id)
+        persona_id = user.get("defaultPersonaId")
+        if not isinstance(persona_id, str) or persona_id not in raw_personas:
+            persona_id = None
+        created_at_ms = user.get("createdAtMs")
+        updated_at_ms = user.get("updatedAtMs")
+        bots[bot_id] = {
+            "id": bot_id,
+            "organizationId": organization_id,
+            "ownerUserId": user_id,
+            "name": "Personal bot",
+            "avatarUrl": None,
+            "personaId": persona_id,
+            "state": BotState.ACTIVE.value,
+            "createdAtMs": created_at_ms,
+            "updatedAtMs": updated_at_ms,
+        }
+        default_project_id = user.get("defaultProjectId")
+        default_project_organization_id: str | None = None
+        if isinstance(default_project_id, str):
+            raw_project = raw_projects.get(default_project_id)
+            if raw_project is not None:
+                project = _mapping(raw_project, "invalid legacy project")
+                raw_project_organization_id = project.get("organizationId")
+                if isinstance(raw_project_organization_id, str):
+                    default_project_organization_id = raw_project_organization_id
+        if (
+            isinstance(default_project_id, str)
+            and default_project_organization_id == organization_id
+        ):
+            bot_projects[_bot_project_key(bot_id, default_project_id)] = {
+                "botId": bot_id,
+                "projectId": default_project_id,
+                "assignedByUserId": user_id,
+                "createdAtMs": created_at_ms,
+            }
+            raw_profile = raw_profiles.get(_member_key(default_project_id, user_id))
+            if raw_profile is not None:
+                profile = _mapping(raw_profile, "invalid legacy extension profile")
+                bot_profiles[_bot_profile_key(bot_id, default_project_id)] = {
+                    "botId": bot_id,
+                    "projectId": default_project_id,
+                    "revision": profile.get("revision"),
+                    "settings": profile.get("settings"),
+                    "updatedAtMs": profile.get("updatedAtMs"),
+                }
+        user["defaultOrganizationId"] = default_project_organization_id or organization_id
+        user["defaultBotId"] = bot_id if user["defaultOrganizationId"] == organization_id else None
+        users[user_id] = user
+
+    migrated.update(
+        {
+            "schemaVersion": _SCHEMA,
+            "users": users,
+            "bots": bots,
+            "botProjectAssignments": bot_projects,
+            "botChannelAssignments": {},
+            "botProjectChannels": {},
+            "botCapabilityProfiles": bot_profiles,
+            "pairingChallenges": {},
+        }
+    )
     return migrated
 
 
@@ -1783,6 +2805,8 @@ def _normalize(data: object) -> _StoreState:
         root = _migrate_v3(root)
     if root.get("schemaVersion") == 4:
         root = _migrate_v4(root)
+    if root.get("schemaVersion") == 5:
+        root = _migrate_v5(root)
     if set(root) != set(_empty()) or root.get("schemaVersion") != _SCHEMA:
         raise CollaborationStoreFormatError(
             "unsupported collaboration store schema")
@@ -1799,6 +2823,35 @@ def _normalize(data: object) -> _StoreState:
                                                 _encode_vault, lambda vault: vault.id)
     result["personas"] = _normalize_collection(root["personas"], "personas", _persona,
                                                   _encode_persona, lambda persona: persona.id)
+    result["bots"] = _normalize_collection(
+        root["bots"], "bots", _bot, _encode_bot, lambda bot: bot.id
+    )
+    result["botProjectAssignments"] = _normalize_collection(
+        root["botProjectAssignments"], "botProjectAssignments",
+        _bot_project_assignment, _encode_bot_project_assignment,
+        lambda assignment: _bot_project_key(assignment.bot_id, assignment.project_id),
+    )
+    result["botChannelAssignments"] = _normalize_collection(
+        root["botChannelAssignments"], "botChannelAssignments",
+        _bot_channel_assignment, _encode_bot_channel_assignment,
+        lambda assignment: _channel_instance_key(assignment.channel_type, assignment.instance_id),
+    )
+    result["botProjectChannels"] = _normalize_collection(
+        root["botProjectChannels"], "botProjectChannels",
+        _bot_project_channel, _encode_bot_project_channel,
+        lambda route: _bot_project_channel_key(
+            route.bot_id, route.project_id, route.channel_type, route.instance_id
+        ),
+    )
+    result["botCapabilityProfiles"] = _normalize_collection(
+        root["botCapabilityProfiles"], "botCapabilityProfiles",
+        _bot_capability_profile, _encode_bot_capability_profile,
+        lambda profile: _bot_profile_key(profile.bot_id, profile.project_id),
+    )
+    result["pairingChallenges"] = _normalize_collection(
+        root["pairingChallenges"], "pairingChallenges",
+        _pairing_challenge, _encode_pairing_challenge, lambda challenge: challenge.id,
+    )
     result["shareGrants"] = _normalize_collection(root["shareGrants"], "shareGrants", _share_grant,
                                                      _encode_share_grant, lambda grant: grant.id)
     result["personalTasks"] = _normalize_collection(root["personalTasks"], "personalTasks",
@@ -1900,6 +2953,75 @@ def _references(state: _StoreState) -> None:
             raise CollaborationStoreFormatError("user personal organization is missing")
     if set(personal_organizations) != set(users):
         raise CollaborationStoreFormatError("user personal organization is missing")
+
+    bots = state["bots"]
+    bot_projects = state["botProjectAssignments"]
+    bot_channels = state["botChannelAssignments"]
+    for value in bots.values():
+        bot = _bot(value)
+        if bot.organization_id not in organizations or bot.owner_user_id not in users:
+            raise CollaborationStoreFormatError("invalid bot owner or organization")
+        if _organization_member_key(bot.organization_id, bot.owner_user_id) not in organization_memberships:
+            raise CollaborationStoreFormatError("bot owner is not an organization member")
+        if bot.persona_id is not None:
+            raw_persona = state["personas"].get(bot.persona_id)
+            if raw_persona is None or _persona(raw_persona).owner_user_id != bot.owner_user_id:
+                raise CollaborationStoreFormatError("invalid bot persona")
+    for value in bot_projects.values():
+        assignment = _bot_project_assignment(value)
+        raw_bot = bots.get(assignment.bot_id)
+        raw_project = projects.get(assignment.project_id)
+        if raw_bot is None or raw_project is None or assignment.assigned_by_user_id not in users:
+            raise CollaborationStoreFormatError("invalid bot project assignment")
+        bot = _bot(raw_bot)
+        project = _project(raw_project)
+        if bot.organization_id != project.organization_id:
+            raise CollaborationStoreFormatError("bot and project organizations differ")
+        if _member_key(project.id, assignment.assigned_by_user_id) not in memberships:
+            raise CollaborationStoreFormatError("bot project assigner lacks project membership")
+    for value in bot_channels.values():
+        assignment = _bot_channel_assignment(value)
+        raw_bot = bots.get(assignment.bot_id)
+        if raw_bot is None or assignment.claimed_by_user_id not in users:
+            raise CollaborationStoreFormatError("invalid bot channel assignment")
+        bot = _bot(raw_bot)
+        if _organization_member_key(bot.organization_id, assignment.claimed_by_user_id) not in organization_memberships:
+            raise CollaborationStoreFormatError("channel claimant lacks organization membership")
+    for value in state["botProjectChannels"].values():
+        route = _bot_project_channel(value)
+        if _bot_project_key(route.bot_id, route.project_id) not in bot_projects:
+            raise CollaborationStoreFormatError("bot project channel lacks project assignment")
+        channel = bot_channels.get(_channel_instance_key(route.channel_type, route.instance_id))
+        if channel is None or _bot_channel_assignment(channel).bot_id != route.bot_id:
+            raise CollaborationStoreFormatError("bot project channel lacks channel assignment")
+    for value in state["botCapabilityProfiles"].values():
+        profile = _bot_capability_profile(value)
+        if profile.bot_id not in bots:
+            raise CollaborationStoreFormatError("bot capability profile references missing bot")
+        if profile.project_id is not None and _bot_project_key(
+            profile.bot_id, profile.project_id
+        ) not in bot_projects:
+            raise CollaborationStoreFormatError("bot capability profile lacks project assignment")
+    for value in state["pairingChallenges"].values():
+        challenge = _pairing_challenge(value)
+        if (
+            challenge.requested_by_user_id not in users
+            or challenge.bot_id not in bots
+            or challenge.organization_id not in organizations
+            or _bot(bots[challenge.bot_id]).organization_id
+            != challenge.organization_id
+        ):
+            raise CollaborationStoreFormatError("invalid pairing challenge references")
+        if challenge.project_id is not None:
+            raw_project = projects.get(challenge.project_id)
+            if (
+                raw_project is None
+                or _project(raw_project).organization_id != challenge.organization_id
+            ):
+                raise CollaborationStoreFormatError("pairing challenge project is invalid")
+        if challenge.expires_at_ms < challenge.created_at_ms:
+            raise CollaborationStoreFormatError("invalid pairing challenge lifetime")
+
     for value in state["shareGrants"].values():
         grant = _share_grant(value)
         vault_value = vaults.get(grant.vault_id)
@@ -1948,6 +3070,40 @@ def _references(state: _StoreState) -> None:
             persona = state["personas"].get(user.default_persona_id)
             if persona is None or _persona(persona).owner_user_id != user.id:
                 raise CollaborationStoreFormatError("invalid default persona")
+        if (
+            user.default_organization_id is None
+            or _organization_member_key(user.default_organization_id, user.id)
+            not in organization_memberships
+        ):
+            raise CollaborationStoreFormatError("invalid default organization")
+        if user.default_bot_id is None:
+            continue
+        default_bot = bots.get(user.default_bot_id)
+        if default_bot is None:
+            raise CollaborationStoreFormatError("invalid default bot")
+        bot = _bot(default_bot)
+        organization_membership_value = organization_memberships.get(
+            _organization_member_key(bot.organization_id, user.id)
+        )
+        organization_role = (
+            _organization_membership(organization_membership_value).role
+            if organization_membership_value is not None
+            else None
+        )
+        assigned_project_visible = any(
+            (assignment := _bot_project_assignment(value)).bot_id == bot.id
+            and _member_key(assignment.project_id, user.id) in memberships
+            for value in state["botProjectAssignments"].values()
+        )
+        if (
+            bot.organization_id != user.default_organization_id
+            or not (
+                bot.owner_user_id == user.id
+                or organization_role in {OrganizationRole.OWNER, OrganizationRole.ADMIN}
+                or assigned_project_visible
+            )
+        ):
+            raise CollaborationStoreFormatError("default bot is not visible to user")
     for value in state["taskLists"].values():
         if _task_list(value).project_id not in projects:
             raise CollaborationStoreFormatError("task list project is missing")
@@ -1990,13 +3146,18 @@ def _shape(data: Mapping[str, object], fields: set[str]) -> None:
 
 def _user(data: Mapping[str, object]) -> User:
     required_fields = {"id", "displayName", "createdAtMs", "updatedAtMs"}
-    supported_fields = required_fields | {"defaultProjectId", "defaultVaultId", "defaultPersonaId"}
+    supported_fields = required_fields | {
+        "defaultProjectId", "defaultVaultId", "defaultPersonaId",
+        "defaultOrganizationId", "defaultBotId",
+    }
     fields = set(data)
     if not required_fields <= fields or not fields <= supported_fields:
         raise CollaborationStoreFormatError("record has unsupported shape")
     raw_default_project = data.get("defaultProjectId")
     raw_default_vault = data.get("defaultVaultId")
     raw_default_persona = data.get("defaultPersonaId")
+    raw_default_organization = data.get("defaultOrganizationId")
+    raw_default_bot = data.get("defaultBotId")
     return User(
         _id(data["id"], "id"),
         _string(data["displayName"], "displayName"),
@@ -2005,6 +3166,9 @@ def _user(data: Mapping[str, object]) -> User:
         _time(data["updatedAtMs"]),
         _id(raw_default_vault, "defaultVaultId") if raw_default_vault is not None else None,
         _id(raw_default_persona, "defaultPersonaId") if raw_default_persona is not None else None,
+        _id(raw_default_organization, "defaultOrganizationId")
+        if raw_default_organization is not None else None,
+        _id(raw_default_bot, "defaultBotId") if raw_default_bot is not None else None,
     )
 
 
@@ -2015,6 +3179,8 @@ def _encode_user(x: User) -> _Record:
         "defaultProjectId": x.default_project_id,
         "defaultVaultId": x.default_vault_id,
         "defaultPersonaId": x.default_persona_id,
+        "defaultOrganizationId": x.default_organization_id,
+        "defaultBotId": x.default_bot_id,
         "createdAtMs": x.created_at_ms,
         "updatedAtMs": x.updated_at_ms,
     }
@@ -2069,6 +3235,185 @@ def _encode_persona(x: Persona) -> _Record:
         "instructions": x.instructions,
         "createdAtMs": x.created_at_ms,
         "updatedAtMs": x.updated_at_ms,
+    }
+
+
+def _bot(data: Mapping[str, object]) -> Bot:
+    _shape(
+        data,
+        {
+            "id", "organizationId", "ownerUserId", "name", "avatarUrl",
+            "personaId", "state", "createdAtMs", "updatedAtMs",
+        },
+    )
+    raw_persona_id = data["personaId"]
+    return Bot(
+        id=_id(data["id"], "id"),
+        organization_id=_id(data["organizationId"], "organizationId"),
+        owner_user_id=_id(data["ownerUserId"], "ownerUserId"),
+        name=_string(data["name"], "name"),
+        avatar_url=_optional_text(data["avatarUrl"], "avatarUrl"),
+        persona_id=_id(raw_persona_id, "personaId") if raw_persona_id is not None else None,
+        state=_bot_state(data["state"]),
+        created_at_ms=_time(data["createdAtMs"]),
+        updated_at_ms=_time(data["updatedAtMs"]),
+    )
+
+
+def _encode_bot(bot: Bot) -> _Record:
+    return {
+        "id": bot.id,
+        "organizationId": bot.organization_id,
+        "ownerUserId": bot.owner_user_id,
+        "name": bot.name,
+        "avatarUrl": bot.avatar_url,
+        "personaId": bot.persona_id,
+        "state": bot.state.value,
+        "createdAtMs": bot.created_at_ms,
+        "updatedAtMs": bot.updated_at_ms,
+    }
+
+
+def _bot_project_assignment(data: Mapping[str, object]) -> BotProjectAssignment:
+    _shape(data, {"botId", "projectId", "assignedByUserId", "createdAtMs"})
+    return BotProjectAssignment(
+        bot_id=_id(data["botId"], "botId"),
+        project_id=_id(data["projectId"], "projectId"),
+        assigned_by_user_id=_id(data["assignedByUserId"], "assignedByUserId"),
+        created_at_ms=_time(data["createdAtMs"]),
+    )
+
+
+def _encode_bot_project_assignment(assignment: BotProjectAssignment) -> _Record:
+    return {
+        "botId": assignment.bot_id,
+        "projectId": assignment.project_id,
+        "assignedByUserId": assignment.assigned_by_user_id,
+        "createdAtMs": assignment.created_at_ms,
+    }
+
+
+def _bot_channel_assignment(data: Mapping[str, object]) -> BotChannelAssignment:
+    _shape(data, {"botId", "channelType", "instanceId", "claimedByUserId", "createdAtMs"})
+    return BotChannelAssignment(
+        bot_id=_id(data["botId"], "botId"),
+        channel_type=_key(data["channelType"], "channelType"),
+        instance_id=_key(data["instanceId"], "instanceId"),
+        claimed_by_user_id=_id(data["claimedByUserId"], "claimedByUserId"),
+        created_at_ms=_time(data["createdAtMs"]),
+    )
+
+
+def _encode_bot_channel_assignment(assignment: BotChannelAssignment) -> _Record:
+    return {
+        "botId": assignment.bot_id,
+        "channelType": assignment.channel_type,
+        "instanceId": assignment.instance_id,
+        "claimedByUserId": assignment.claimed_by_user_id,
+        "createdAtMs": assignment.created_at_ms,
+    }
+
+
+def _bot_project_channel(data: Mapping[str, object]) -> BotProjectChannel:
+    _shape(data, {"botId", "projectId", "channelType", "instanceId", "enabled", "updatedAtMs"})
+    enabled = data["enabled"]
+    if not isinstance(enabled, bool):
+        raise CollaborationStoreFormatError("invalid bot project channel enabled state")
+    return BotProjectChannel(
+        bot_id=_id(data["botId"], "botId"),
+        project_id=_id(data["projectId"], "projectId"),
+        channel_type=_key(data["channelType"], "channelType"),
+        instance_id=_key(data["instanceId"], "instanceId"),
+        enabled=enabled,
+        updated_at_ms=_time(data["updatedAtMs"]),
+    )
+
+
+def _encode_bot_project_channel(route: BotProjectChannel) -> _Record:
+    return {
+        "botId": route.bot_id,
+        "projectId": route.project_id,
+        "channelType": route.channel_type,
+        "instanceId": route.instance_id,
+        "enabled": route.enabled,
+        "updatedAtMs": route.updated_at_ms,
+    }
+
+
+def _bot_capability_profile(data: Mapping[str, object]) -> BotCapabilityProfile:
+    _shape(data, {"botId", "projectId", "revision", "settings", "updatedAtMs"})
+    revision = data["revision"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise CollaborationStoreFormatError("invalid bot capability revision")
+    raw_project_id = data["projectId"]
+    return BotCapabilityProfile(
+        bot_id=_id(data["botId"], "botId"),
+        project_id=(
+            _id(raw_project_id, "projectId") if raw_project_id is not None else None
+        ),
+        revision=revision,
+        settings=_json_object(data["settings"], "settings"),
+        updated_at_ms=_time(data["updatedAtMs"]),
+    )
+
+
+def _encode_bot_capability_profile(profile: BotCapabilityProfile) -> _Record:
+    return {
+        "botId": profile.bot_id,
+        "projectId": profile.project_id,
+        "revision": profile.revision,
+        "settings": thaw_json(profile.settings),
+        "updatedAtMs": profile.updated_at_ms,
+    }
+
+
+def _pairing_challenge(data: Mapping[str, object]) -> PairingChallenge:
+    _shape(
+        data,
+        {
+            "id", "codeDigest", "requestedByUserId", "purpose",
+            "organizationId", "botId", "projectId", "channelType",
+            "instanceId", "expiresAtMs", "verifiedAtMs",
+            "verifiedSenderId", "consumedAtMs", "createdAtMs",
+        },
+    )
+    project_id = data["projectId"]
+    verified_at_ms = data["verifiedAtMs"]
+    consumed_at_ms = data["consumedAtMs"]
+    return PairingChallenge(
+        id=_id(data["id"], "id"),
+        code_digest=_key(data["codeDigest"], "codeDigest"),
+        requested_by_user_id=_id(data["requestedByUserId"], "requestedByUserId"),
+        purpose=_pairing_purpose(data["purpose"]),
+        organization_id=_id(data["organizationId"], "organizationId"),
+        bot_id=_id(data["botId"], "botId"),
+        project_id=_id(project_id, "projectId") if project_id is not None else None,
+        channel_type=_key(data["channelType"], "channelType"),
+        instance_id=_key(data["instanceId"], "instanceId"),
+        expires_at_ms=_time(data["expiresAtMs"]),
+        verified_at_ms=_time(verified_at_ms) if verified_at_ms is not None else None,
+        verified_sender_id=_optional_key(data["verifiedSenderId"], "verifiedSenderId"),
+        consumed_at_ms=_time(consumed_at_ms) if consumed_at_ms is not None else None,
+        created_at_ms=_time(data["createdAtMs"]),
+    )
+
+
+def _encode_pairing_challenge(challenge: PairingChallenge) -> _Record:
+    return {
+        "id": challenge.id,
+        "codeDigest": challenge.code_digest,
+        "requestedByUserId": challenge.requested_by_user_id,
+        "purpose": challenge.purpose.value,
+        "organizationId": challenge.organization_id,
+        "botId": challenge.bot_id,
+        "projectId": challenge.project_id,
+        "channelType": challenge.channel_type,
+        "instanceId": challenge.instance_id,
+        "expiresAtMs": challenge.expires_at_ms,
+        "verifiedAtMs": challenge.verified_at_ms,
+        "verifiedSenderId": challenge.verified_sender_id,
+        "consumedAtMs": challenge.consumed_at_ms,
+        "createdAtMs": challenge.created_at_ms,
     }
 
 
@@ -2359,6 +3704,24 @@ def _organization_role(value: object) -> OrganizationRole:
         raise CollaborationStoreFormatError("invalid organization membership role") from exc
 
 
+def _bot_state(value: object) -> BotState:
+    if not isinstance(value, str):
+        raise CollaborationStoreFormatError("invalid bot state")
+    try:
+        return BotState(value)
+    except ValueError as exc:
+        raise CollaborationStoreFormatError("invalid bot state") from exc
+
+
+def _pairing_purpose(value: object) -> PairingPurpose:
+    if not isinstance(value, str):
+        raise CollaborationStoreFormatError("invalid pairing purpose")
+    try:
+        return PairingPurpose(value)
+    except ValueError as exc:
+        raise CollaborationStoreFormatError("invalid pairing purpose") from exc
+
+
 def _role(value: object) -> MembershipRole:
     if not isinstance(value, str):
         raise CollaborationStoreFormatError("invalid membership role")
@@ -2438,6 +3801,26 @@ def _organization_member_key(
 def _member_key(
     project_id: str,
     user_id: str) -> str: return f"{project_id}\x00{user_id}"
+
+
+def _bot_project_key(bot_id: str, project_id: str) -> str:
+    return f"{bot_id}\x00{project_id}"
+
+
+def _channel_instance_key(channel_type: str, instance_id: str) -> str:
+    return f"{channel_type}\x00{instance_id}"
+
+
+def _bot_project_channel_key(
+    bot_id: str, project_id: str, channel_type: str, instance_id: str
+) -> str:
+    return f"{bot_id}\x00{project_id}\x00{channel_type}\x00{instance_id}"
+
+
+def _bot_profile_key(bot_id: str, project_id: str | None) -> str:
+    return f"{bot_id}\x00{project_id or ''}"
+
+
 def _conversation_key(channel: str, conversation_id: str, thread_id: str |
                       None) -> str: return f"{channel}\x00{conversation_id}\x00{thread_id or ''}"
 
