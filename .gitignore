@@ -103,3 +103,7 @@ exp/
 .playwright-mcp/
 bridge/node_modules/
 webui/.verify-*
+
+# Serena MCP workspace state (cache, memories, local project config)
+.serena/
+**/.serena/
