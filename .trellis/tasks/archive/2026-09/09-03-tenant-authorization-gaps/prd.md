@@ -47,6 +47,10 @@ Close the cross-tenant authorization gaps that the archived `09-01-bot-channel-m
 - The chosen mechanism must not repurpose `_SETTINGS_MUTATION_PATHS`, whose meaning is local-browser scoping.
 - It must not break the deliberate self-service connect elevation at `ws_http.py:991-1000`.
 - If a central gate would be riskier than per-handler checks, the per-handler route is acceptable, but every privileged action must be covered and the decision recorded.
+- Recorded outcome: per-handler gates were chosen, because a central privileged-route set is still a blocklist — a new route omitted from it ships unprotected. Each domain is instead fail-closed internally: `_PUBLIC_CAPABILITY_ACTIONS` and `_PUBLIC_MODEL_ACTIONS` are whitelists, and the system domain uses prefix predicates rather than per-action enumeration.
+- Reviewability is carried by a canary test rather than a constant: `test_no_settings_route_reaches_a_member_without_a_recorded_decision` walks `_MODEL_ROUTES`, `_CAPABILITY_ROUTES`, and `_SYSTEM_ROUTES` and fails unless each route either refuses a member or is declared member-reachable / enforced earlier in the stack. Measured today: 33 refused, 6 member-reachable, 4 enforced in `ws_http`.
+- Open defence-in-depth gap: `/api/settings/channels/validate` and `/api/settings/channels/configure` return `200`/`400` for a member at the dispatch layer and are protected only by `ws_http.py` `channel_control_path`. That is the same shape as the test that reached `settings_routes.dispatch` directly and skipped identity derivation. Any second caller of `dispatch` would bypass them.
+
 
 ### R4 — Per-instance media isolation
 
@@ -63,32 +67,54 @@ Close the cross-tenant authorization gaps that the archived `09-01-bot-channel-m
 
 ### R6 — Model and provider routes: decide, then enforce
 
-- `nanobot/webui/settings_models.py` contains **zero** `system_admin` references, yet `provider-update` and `model-configurations/{create,update,delete,migrate}` reach `self.settings.mutate(...)`, which writes the single host-wide `config.json` (`nanobot/webui/settings_services.py:153-167`). Provider settings include API keys — the file has redaction helpers for reading them (`:142-170`) but no gate on writing them.
-- This is the same shape as the capability-route defect, but it carries a product question the other two do not: choosing a model is ordinary member activity, while writing a host-wide provider credential is not. Those two are currently the same route.
-- Required outcome: either gate these routes like the rest of the privileged surface, or separate member-selectable model choice from host-wide provider credentials so the credential write can be gated without removing member functionality.
-- This requirement must not be implemented by guessing. It is recorded here so the decision is made deliberately rather than by omission.
+- `nanobot/webui/settings_models.py` contained **zero** `system_admin` references, yet `provider-update` and `model-configurations/{create,update,delete,migrate}` reach `self.settings.mutate(...)`, which writes the single host-wide `config.json` (`nanobot/webui/settings_services.py:153-167`). Provider settings include API keys — the file has redaction helpers for reading them (`:142-170`) but had no gate on writing them.
+- The product question was whether member model selection travels through these routes. It does not: there is no per-user or per-bot model configuration in `nanobot/collaboration/`, no session-level model switch in `webui/src/lib/api.ts`, and every `model-*`/`provider-*` client call is a settings mutation.
+- **Decision: gate the domain.** A local owner resolves as an administrator (`nanobot/webui/ws_http.py:616-625` returns `local_owner=True` when OIDC is disabled), so single-user installs are unaffected; the gate only takes effect in the OIDC multi-tenant shape, which is the threat model. This matches the posture already applied to the capability routes.
+- Enforcement is a fail-closed whitelist (`_PUBLIC_MODEL_ACTIONS`), so a new model action is protected by default. Only `provider-models`, a read that lists model names for the picker, stays open.
+- The WebUI does not filter Settings sections by role (`SettingsPage.tsx` and `webui/src/lib/types.ts` contain no `isSystemAdmin`). The backend is the sole enforcement point, and a follow-up should hide or disable the sections a member cannot use rather than letting them fail at submit.
 
+
+
+### R7 — No host inventory for callers without host administration
+
+- `/api/settings/nanobot-features` must not disclose package names, extension IDs, revisions, lifecycles, trust, execution location, adapter diagnostics, `runtime_error`, or counts to a caller who is not a system administrator.
+- The inventory is withheld whole rather than sampled. nanobot has no per-member extension visibility model — `ExtensionProfile` (`nanobot/collaboration/models.py:337`) and `BotCapabilityProfile` are opaque settings mappings, not capability inventories — so any partial projection would be a guess about what a member "should" see.
+- The refusal must not be a bare `403`. Settings sections are rendered for every member (`webui/src/components/settings/SettingsPage.tsx` and `webui/src/lib/types.ts` contain no `isSystemAdmin`), so an error status breaks page rendering. Return the payload shape with an explicit restricted marker so the UI states that administration is required instead of claiming nothing is installed.
+- When a per-member visibility model exists, this requirement is what it replaces; until then, withholding is the honest answer.
+
+### R8 — One credential redaction implementation
+
+- Error text reaching an API payload passes through one shared redaction implementation. Two copies drift, and a drift means one surface masks while the other prints — with both surfaces' own tests still green.
+- Redaction runs before truncation. Truncating first can cut a credential mid-value and ship its head.
+- Unbounded third-party exception text is length-capped at the boundary that emits it.
+- Redaction must not damage legible diagnostics. `token expired` and `Secret Santa Bot` stay intact; host paths in an administrator-only MCP diagnostic stay intact because they are the useful part and the reader can already read the config file.
 
 ## Acceptance Criteria
 
-- [ ] AC1: An authenticated non-administrator receives `403` from `pairing-list`, `pairing-approve`, and `pairing-deny`, and no approval is recorded in the pairing store.
-- [ ] AC2: A system administrator, and a local owner in a deployment with no OIDC configured, can still list, approve, and deny pairing requests.
-- [ ] AC3: A non-administrator `web-search-update` carrying an `api_key` returns `403` and `config.json` is byte-identical afterwards.
-- [ ] AC4: `api-update`, `transcription-update`, `network-update`, `image-update`, and `cli-install`/`cli-uninstall` reject non-administrators with `403` rather than `404`.
-- [ ] AC5: The set of privileged Settings routes is readable in one place, and a test fails if a privileged action is added without authorization.
-- [ ] AC6: Two instances of the same channel type receiving an upload with an identical filename produce two distinct stored files, and neither tenant can read or overwrite the other's.
-- [ ] AC7: Weixin and Feishu per-instance credential and state isolation is unchanged, proven by the existing instance tests continuing to pass untouched.
-- [ ] AC8: The deliberate self-service connect elevation still works for a non-administrator claiming their own instance.
-- [ ] AC9: Full `pytest` (both `testpaths`), `ruff`, `basedpyright`, and WebUI tests pass.
-- [ ] AC10: The model/provider routes have an explicit, recorded authorization posture — either gated, or split so that member model selection and host-wide credential writes are different routes with different requirements. An undecided route is not acceptable as a closing state.
+- [x] AC1: An authenticated non-administrator receives `403` from `pairing-list`, `pairing-approve`, and `pairing-deny`, and no approval is recorded in the pairing store.
+- [x] AC2: A system administrator, and a local owner in a deployment with no OIDC configured, can still list, approve, and deny pairing requests.
+- [x] AC3: A non-administrator `web-search-update` carrying an `api_key` returns `403` and `config.json` is byte-identical afterwards.
+- [x] AC4: `api-update`, `transcription-update`, `network-update`, `image-update`, and `cli-install`/`cli-uninstall` reject non-administrators with `403` rather than `404`.
+- [x] AC5: The set of privileged Settings routes is readable in one place, and a test fails if a privileged action is added without authorization.
+- [x] AC6: Two instances of the same channel type receiving an upload with an identical filename produce two distinct stored files, and neither tenant can read or overwrite the other's.
+- [x] AC7: Weixin and Feishu per-instance credential and state isolation is unchanged, proven by the existing instance tests continuing to pass untouched.
+- [x] AC8: The deliberate self-service connect elevation still works for a non-administrator claiming their own instance.
+- [x] AC9: Full `pytest` (both `testpaths`), `ruff`, `basedpyright`, and WebUI tests pass.
+- [x] AC10: The model/provider routes have an explicit, recorded authorization posture — either gated, or split so that member model selection and host-wide credential writes are different routes with different requirements. An undecided route is not acceptable as a closing state.
+- [x] AC11: A non-administrator reading `/api/settings/nanobot-features` receives no package name, extension ID, revision, lifecycle, trust, execution location, diagnostic, or count, and the Settings UI renders an administrator-required state rather than erroring or claiming nothing is installed.
+- [x] AC12: One redaction implementation serves every API error path; `AWS_SECRET_ACCESS_KEY=…`, `sk-…`, and `password: …` are masked, a credential at the truncation boundary cannot ship its head, and `token expired` / `Secret Santa Bot` are byte-identical.
 
 ## Out of Scope
 
 - Sandboxing or otherwise constraining third-party extension code; the unified extension platform task already declares this out of scope and this task does not reopen it.
 - Reworking the Pair Code channel-claim flow (`consume_pairing_challenge`), which is a different mechanism and is not implicated in these findings.
-- Narrowing `/api/settings/nanobot-features` read scope, or changing the extension revision digest. Those are tracked with the unified extension platform, not here.
+- Changing the extension revision digest. That belongs with the unified extension platform.
 - Durable audit storage for authorization decisions.
 - Adding a postgres service to CI so the skipped RLS suite runs. Worth doing, but it is a separate infrastructure change.
+
+### Scope pulled in after the task was written
+
+`/api/settings/nanobot-features` read scope was originally deferred to the unified extension platform. It was pulled in here instead: it is the same tenant-isolation defect as the rest of this task, the extension platform task is not scheduled, and leaving a member-readable host inventory in place while closing every other member-readable surface would have been an arbitrary line. See R7.
 
 ## Key Decisions
 
