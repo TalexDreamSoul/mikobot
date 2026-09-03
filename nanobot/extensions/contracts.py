@@ -10,6 +10,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Protocol, TypeVar, cast
 
+from nanobot.utils.redaction import redact_credentials
+
 __all__ = [
     "ExtensionAction",
     "ExtensionActionContext",
@@ -42,6 +44,10 @@ _MAX_PERMISSIONS = 128
 _MAX_CAPABILITY_LENGTH = 128
 _MAX_CAPABILITIES = 256
 _MAX_MESSAGE_LENGTH = 1_000
+# Redaction runs before the message is cut to its display length, so that a secret
+# straddling the cut is masked rather than half-printed. This bounds the text the
+# redaction patterns have to scan.
+_MAX_RAW_MESSAGE_LENGTH = 4 * _MAX_MESSAGE_LENGTH
 _MAX_ACTION_VALUE_KEYS = 64
 _MAX_ACTION_VALUE_DEPTH = 8
 _MAX_ACTION_VALUE_SCALARS = 1_024
@@ -54,11 +60,29 @@ _MAX_SNAPSHOT_PACKAGES = 4_096
 _MAX_SNAPSHOT_DIAGNOSTICS = 4_096
 _ID_SEGMENT = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?")
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
-_ABSOLUTE_PATH = re.compile(
-    r"(?<![\w:/])/(?!/)|(?<![\w:])~(?:[A-Za-z0-9._-]+)?/|(?<![\w:])[A-Za-z]:[\\/]"
-)
+# CPython's default ``repr`` leaks a heap address, which discloses the ASLR layout.
+_OBJECT_ADDRESS = re.compile(r"\bat 0x[0-9A-Fa-f]+\b")
+# The openings that make the rest of a run a local filesystem path. Each branch is
+# anchored so that a URL such as ``https://host/path`` is not mistaken for one.
+_PATH_START = r"""
+      (?<=://) /                             # scheme:///absolute/path
+    | (?<![\w:/]) // [A-Za-z0-9._-]+ /       # //server/share
+    | (?<![\w:/]) / (?=[^\s/])               # /absolute/path, but not a lone "/"
+    | (?<![\w:]) ~ [A-Za-z0-9._-]* /         # ~/path and ~user/path
+    | (?<![\w:]) [A-Za-z] : [\\/]            # C:\path and C:/path
+    | (?<![\w:]) \\\\ [A-Za-z0-9._-]+ \\     # \\server\share
+    | (?<![\w:]) \\ [A-Za-z0-9._-]{2,} \\    # \Users\alice
+"""
+_ABSOLUTE_PATH = re.compile(rf"(?:{_PATH_START})", re.VERBOSE)
+# Quoted forms are matched whole so that a path containing spaces is redacted
+# entirely rather than leaving its tail behind.
 _REDACTABLE_PATH = re.compile(
-    r"(?:\"(?:/(?!/)|~(?:[A-Za-z0-9._-]+)?/|[A-Za-z]:[\\/]).*?\"|'(?:/(?!/)|~(?:[A-Za-z0-9._-]+)?/|[A-Za-z]:[\\/]).*?'|(?<![\w:/])/(?!/)[^\s]*|(?<![\w:])~(?:[A-Za-z0-9._-]+)?/[^\s]*|(?<![\w:])[A-Za-z]:[\\/][^\s]*)"
+    rf"""
+      " (?: [A-Za-z][A-Za-z0-9+.\-]* :// )? (?: {_PATH_START} ) .*? "
+    | ' (?: [A-Za-z][A-Za-z0-9+.\-]* :// )? (?: {_PATH_START} ) .*? '
+    | (?: {_PATH_START} ) \S*
+    """,
+    re.VERBOSE,
 )
 
 
@@ -335,13 +359,15 @@ def extension_component_id(
 
 
 def safe_extension_message(value: object) -> str:
-    """Return one bounded diagnostic line without common local path disclosures."""
+    """Return one bounded diagnostic line without credential or local path disclosures."""
 
     try:
-        message = str(value)[:_MAX_MESSAGE_LENGTH]
+        message = str(value)[:_MAX_RAW_MESSAGE_LENGTH]
     except Exception:
         return "Extension operation failed."
     message = _CONTROL_CHARACTER.sub(" ", message)
+    message = _OBJECT_ADDRESS.sub("at <address>", message)
+    message = redact_credentials(message)
     message = _REDACTABLE_PATH.sub("<path>", message)
     message = " ".join(message.split())
     if not message:

@@ -15,6 +15,7 @@ from nanobot.extensions.adapters.agent_plugins import AgentPluginExtensionAdapte
 from nanobot.extensions.registry import ExtensionRegistry, ExtensionRegistryError
 from nanobot.webui.mcp_presets_api import (
     McpPresetError,
+    _scrub_test_error,
     custom_mcp_action,
     mcp_presets_action,
     mcp_presets_payload,
@@ -722,6 +723,113 @@ def test_test_mcp_preset_scrubs_connection_errors(
     assert payload["last_action"]["ok"] is False
     assert "bb_live_secret" not in str(payload)
     assert "<redacted>" in payload["last_action"]["error"]
+
+
+def test_test_mcp_preset_scrubs_vendor_prefixed_keys(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider echoes the rejected key back with no credential name beside it."""
+    _use_config(tmp_path, monkeypatch)
+    mcp_presets_action("enable", {"name": ["browserbase"], "browserbase_api_key": ["bb_live"]})
+
+    async def fake_connect(_servers, _registry):
+        raise RuntimeError("401 Invalid API key provided: sk-ant-api03-AAAAAAAAAAAAAAAAAAAA")
+
+    monkeypatch.setattr("nanobot.agent.tools.mcp.connect_mcp_servers", fake_connect)
+
+    payload = asyncio.run(mcp_presets_test_action({"name": ["browserbase"]}))
+
+    assert payload["last_action"]["ok"] is False
+    assert "sk-ant-api03" not in str(payload)
+    assert payload["last_action"]["error"] == "401 Invalid API key provided: <redacted>"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # The credential word sits inside a longer identifier.
+        ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI", "AWS_SECRET_ACCESS_KEY=<redacted>"),
+        ("env DOCS_TOKEN=docs-secret-value rejected", "env DOCS_TOKEN=<redacted> rejected"),
+        # Query strings, the form MCP server URLs carry credentials in.
+        (
+            "failed https://mcp.example.com/mcp?browserbaseApiKey=bb_live_secret",
+            "failed https://mcp.example.com/mcp?browserbaseApiKey=<redacted>",
+        ),
+        ("GET /mcp?token=abc123&mode=sse", "GET /mcp?token=<redacted>&mode=sse"),
+        # Separators other than a bare '='.
+        (
+            '{"Authorization": "Bearer sk-live-abcdefghijklmnop"}',
+            '{"Authorization": "Bearer <redacted>"}',
+        ),
+        ("password: p@ssw0rd", "password: <redacted>"),
+        # Vendor prefixes leak with no credential name anywhere near them.
+        (
+            "Invalid API key provided: sk-ant-api03-AAAAAAAAAAAAAAAAAAAA",
+            "Invalid API key provided: <redacted>",
+        ),
+        ("bad credential ghp_AAAAAAAAAAAAAAAAAAAA", "bad credential <redacted>"),
+    ],
+)
+def test_scrub_test_error_masks_credentials(raw: str, expected: str) -> None:
+    assert _scrub_test_error(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "benign",
+    [
+        "token expired",
+        "Secret Santa Bot is not a configured server",
+        "max_tokens=4096 exceeded",
+        "Connection refused",
+    ],
+)
+def test_scrub_test_error_keeps_benign_diagnostics_readable(benign: str) -> None:
+    """A redactor that eats ordinary prose destroys the operator's only view."""
+    assert _scrub_test_error(benign) == benign
+
+
+def test_scrub_test_error_bounds_upstream_text() -> None:
+    assert len(_scrub_test_error("e" * 5_000)) == 400
+
+
+def test_scrub_test_error_redacts_before_truncating() -> None:
+    """Truncating first would cut the secret and still ship its head."""
+    raw = "e" * 380 + " api_key=bb_live_secret_value"
+
+    scrubbed = _scrub_test_error(raw)
+
+    assert len(scrubbed) <= 400
+    assert "bb_live" not in scrubbed
+    assert scrubbed.endswith("api_key=<redacted>")
+
+
+def test_scrub_test_error_falls_back_when_upstream_says_nothing() -> None:
+    assert _scrub_test_error("   ") == "Connection failed."
+
+
+def test_remove_bounds_and_redacts_cleanup_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The OS chooses this error's length and content; the response must not inherit it."""
+    _use_config(tmp_path, monkeypatch)
+    mcp_presets_action("enable", {"name": ["playwright"]})
+
+    def fail_cleanup(_name: str, _cfg) -> bool:
+        raise OSError("busy: token=leaked-value " + "e" * 900)
+
+    monkeypatch.setattr("nanobot.webui.mcp_presets_api._remove_managed_stdio_cwd", fail_cleanup)
+
+    payload = mcp_presets_action("remove", {"name": ["playwright"]})
+
+    message = payload["last_action"]["message"]
+    detail = message.split("Could not remove managed runtime files: ", 1)[1]
+    assert payload["last_action"]["ok"] is False
+    assert "leaked-value" not in str(payload)
+    assert detail.startswith("busy: token=<redacted>")
+    assert len(detail) == 400
+    assert "playwright" not in load_config().tools.mcp_servers
 
 
 def test_unknown_oauth_placeholder_is_not_enabled(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

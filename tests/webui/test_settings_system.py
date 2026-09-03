@@ -49,3 +49,29 @@ def test_channel_domain_coerces_settings_values_and_skips_blank_secrets() -> Non
 
     save, _ = channel_coerce_config_value("token", "", "secret")
     assert save is False
+
+
+def test_action_errors_are_redacted_and_bounded_before_reaching_a_response() -> None:
+    """CLI and MCP action errors carry package-manager output, so they cannot ship raw."""
+    from nanobot.webui.settings_system import _MAX_ACTION_ERROR, _safe_action_error
+
+    class _DomainError(Exception):
+        def __init__(self, message: str) -> None:
+            super().__init__(message)
+            self.message = message
+
+    indexed = _safe_action_error(
+        _DomainError("pip failed: https://svc:t0k3nvalue@pypi.internal/simple returned 403")
+    )
+    assert "t0k3nvalue" not in indexed
+    assert "<redacted>" in indexed
+    assert "pypi.internal" in indexed
+
+    # An exception without ``.message`` used to reach the body as a raw ``str(exc)``.
+    unbounded = _safe_action_error(RuntimeError("x" * 12_000))
+    assert len(unbounded) == _MAX_ACTION_ERROR
+
+    # Host paths stay: both callers are administrator-only and the path is the diagnosis.
+    assert _safe_action_error(_DomainError("npx not found at /usr/local/bin")) == (
+        "npx not found at /usr/local/bin"
+    )

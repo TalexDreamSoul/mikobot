@@ -37,6 +37,7 @@ from nanobot.extensions import (
     safe_extension_message,
 )
 from nanobot.utils.helpers import ensure_dir
+from nanobot.utils.redaction import redact_credentials
 
 QueryParams = dict[str, list[str]]
 
@@ -44,14 +45,6 @@ if TYPE_CHECKING:
     from nanobot.webui.settings_services import WebUISettingsConfig
 
 _MCP_PRESET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$", re.IGNORECASE)
-_SECRET_QUERY_RE = re.compile(
-    r"([?&](?:[^=&]*(?:api[_-]?key|token|secret|password|bearer)[^=&]*)=)[^&#\s]+",
-    re.IGNORECASE,
-)
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"((?:api[_-]?key|token|secret|password|bearer)(?:[=:]|\s+))[^,\s'\"&]+",
-    re.IGNORECASE,
-)
 _MCP_ATTACHMENT_KEYS = (
     "name",
     "display_name",
@@ -64,6 +57,9 @@ _MCP_ATTACHMENT_KEYS = (
 )
 _DEFAULT_TEST_TIMEOUT = 20
 _DEFAULT_CUSTOM_TIMEOUT = 30
+# Upstream MCP servers and the OS decide how long their error text is; this surface
+# does not, so operator-visible detail is cut here.
+_MAX_ERROR_DETAIL = 400
 _CUSTOM_ACTIONS = {"custom", "import", "import-cursor", "tools"}
 _MCP_RUNTIME_STATUSES = {"connecting", "connected", "failed"}
 
@@ -1115,10 +1111,20 @@ def mcp_reconnect_action(
     return payload
 
 
+def _scrub_error_detail(text: str) -> str:
+    """Bound and redact third-party error text before an operator sees it.
+
+    Credential masking lives in ``redact_credentials`` so that every surface hides
+    the same things; a second copy here would drift and start leaking what the
+    canonical rule masks. The length cap stays local because it is this surface's
+    own boundary on error text whose size an upstream server chooses.
+    """
+
+    return redact_credentials(text.strip())[:_MAX_ERROR_DETAIL]
+
+
 def _scrub_test_error(text: str) -> str:
-    scrubbed = _SECRET_QUERY_RE.sub(r"\1<redacted>", text.strip())
-    scrubbed = _SECRET_ASSIGNMENT_RE.sub(r"\1<redacted>", scrubbed)
-    return scrubbed[:400] if scrubbed else "Connection failed."
+    return _scrub_error_detail(text) or "Connection failed."
 
 
 def _checked_at() -> str:
@@ -1612,7 +1618,7 @@ def mcp_presets_action(
             try:
                 removed_runtime_files = _remove_managed_stdio_cwd(name, existing_cfg)
             except OSError as exc:
-                cleanup_error = str(exc)
+                cleanup_error = _scrub_error_detail(str(exc))
             del config.tools.mcp_servers[name]
             save_config(config, config_path)
             delete_mcp_oauth_credentials(name)
