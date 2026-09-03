@@ -101,6 +101,106 @@ async def _handler(tmp_path) -> GatewayHTTPHandler:
     await handler.initialize_collaboration()
     return handler
 
+def _channel_extension_snapshot(
+    channel_type: str, instance_id: str, revision: str
+) -> tuple[Any, str]:
+    """Build one exact channel target with an opaque current revision."""
+    from nanobot.extensions.contracts import (
+        ExtensionAction,
+        ExtensionComponentDescriptor,
+        ExtensionComponentKind,
+        ExtensionExecution,
+        ExtensionLifecycle,
+        ExtensionPackageDescriptor,
+        ExtensionSnapshot,
+        ExtensionSource,
+        ExtensionTrust,
+        extension_component_id,
+        extension_package_id,
+    )
+
+    package_id = extension_package_id(ExtensionSource.CHANNEL_PACKAGE, channel_type)
+    target_id = extension_component_id(
+        package_id, ExtensionComponentKind.CHANNEL, instance_id
+    )
+    return (
+        ExtensionSnapshot(
+            packages=(
+                ExtensionPackageDescriptor(
+                    id=package_id,
+                    name=channel_type,
+                    display_name=channel_type.title(),
+                    source=ExtensionSource.CHANNEL_PACKAGE,
+                    trust=ExtensionTrust.FIRST_PARTY,
+                    execution=ExtensionExecution.IN_PROCESS,
+                    lifecycle=ExtensionLifecycle.DISABLED,
+                    components=(
+                        ExtensionComponentDescriptor(
+                            id=target_id,
+                            package_id=package_id,
+                            kind=ExtensionComponentKind.CHANNEL,
+                            name=instance_id,
+                            display_name=instance_id,
+                            execution=ExtensionExecution.IN_PROCESS,
+                            lifecycle=ExtensionLifecycle.DISABLED,
+                            revision=revision,
+                            actions=frozenset({ExtensionAction.ENABLE}),
+                        ),
+                    ),
+                ),
+            )
+        ),
+        target_id,
+    )
+
+
+async def _create_channel_pairing(
+    handler: GatewayHTTPHandler,
+    connection: Any,
+    *,
+    channel_type: str,
+    instance_id: str,
+) -> tuple[str, str, str]:
+    """Create a pairing challenge through the WebUI mutation boundary."""
+    index = await handler.dispatch(connection, connection.request)
+    assert index is not None and index.status_code == 200
+    actor_id = _json(index)["user"]["id"]
+    bot = (await handler.collaboration.list_bots(actor_id))[0]
+
+    response = await handler.dispatch_webui_mutation(
+        connection,
+        "collaboration.pairing.create",
+        {
+            "purpose": PairingPurpose.CLAIM_CHANNEL.value,
+            "organization_id": bot.organization_id,
+            "bot_id": bot.id,
+            "channel_type": channel_type,
+            "instance_id": instance_id,
+            "channel_revision": "client-controlled-revision",
+        },
+    )
+
+    assert response.status_code == 200
+    pairing = _json(response)["pairing"]
+    return actor_id, pairing["id"], pairing["code"]
+
+
+async def _verify_channel_pairing(
+    handler: GatewayHTTPHandler,
+    code: str,
+    *,
+    channel_type: str,
+    instance_id: str,
+    channel_revision: str,
+) -> None:
+    await handler.collaboration.verify_pairing_challenge(
+        code,
+        channel_type=channel_type,
+        instance_id=instance_id,
+        sender_id=f"{instance_id}-sender",
+        channel_revision=channel_revision,
+    )
+
 
 def _save_webui_session(
     sessions: SessionManager,
@@ -565,14 +665,18 @@ async def _claim_channel_instance(
         bot_id=bot.id,
         channel_type="weixin",
         instance_id=instance_id,
+        channel_revision="claimed-channel-revision",
     )
     await handler.collaboration.verify_pairing_challenge(
         code,
         channel_type="weixin",
         instance_id=instance_id,
         sender_id=f"{instance_id}-sender",
+        channel_revision="claimed-channel-revision",
     )
-    await handler.collaboration.consume_pairing_challenge(actor_id, challenge.id)
+    await handler.collaboration.consume_pairing_challenge(
+        actor_id, challenge.id, channel_revision="claimed-channel-revision"
+    )
 
 
 @pytest.mark.asyncio
@@ -626,3 +730,137 @@ async def test_ordinary_user_cannot_use_channel_control_mutation_for_unclaimed_i
     )
 
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_pairing_create_persists_only_server_derived_channel_revision(tmp_path) -> None:
+    """A client cannot make a pairing challenge bind to a chosen channel revision."""
+    handler = await _handler(tmp_path)
+    snapshot, _ = _channel_extension_snapshot("weixin", "default", "server-revision")
+    handler.settings = SimpleNamespace(
+        extensions=SimpleNamespace(snapshot=MagicMock(return_value=snapshot))
+    )
+
+    actor_id, challenge_id, _ = await _create_channel_pairing(
+        handler,
+        _proxy_connection("pairing-owner"),
+        channel_type="weixin",
+        instance_id="default",
+    )
+
+    stored = await handler.collaboration.get_pairing_challenge(actor_id, challenge_id)
+    assert stored is not None
+    assert stored.channel_revision == "server-revision"
+
+
+@pytest.mark.asyncio
+async def test_pairing_consume_rejects_replaced_binding_without_activation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Credential or marker revision replacement leaves a verified challenge unconsumed."""
+    from nanobot.webui.nanobot_features_api import execute_nanobot_extension_action
+
+    handler = await _handler(tmp_path)
+    initial_snapshot, _ = _channel_extension_snapshot("weixin", "default", "before-replacement")
+    registry = SimpleNamespace(snapshot=MagicMock(return_value=initial_snapshot))
+    handler.settings = SimpleNamespace(extensions=registry)
+    actor_id, challenge_id, code = await _create_channel_pairing(
+        handler,
+        _proxy_connection("pairing-owner"),
+        channel_type="weixin",
+        instance_id="default",
+    )
+    await _verify_channel_pairing(
+        handler,
+        code,
+        channel_type="weixin",
+        instance_id="default",
+        channel_revision="before-replacement",
+    )
+    replaced_snapshot, _ = _channel_extension_snapshot("weixin", "default", "after-replacement")
+    registry.snapshot.return_value = replaced_snapshot
+    activation = AsyncMock(wraps=execute_nanobot_extension_action)
+    monkeypatch.setattr("nanobot.webui.nanobot_features_api.execute_nanobot_extension_action", activation)
+
+    response = await handler.dispatch_webui_mutation(
+        _proxy_connection("pairing-owner"),
+        "collaboration.pairing.consume",
+        {"challenge_id": challenge_id},
+    )
+
+    assert response.status_code == 409
+    stored = await handler.collaboration.get_pairing_challenge(actor_id, challenge_id)
+    assert stored is not None and stored.consumed_at_ms is None
+    activation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pairing_consume_activates_exact_current_target_once(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A matching bound challenge consumes once and enables its exact component."""
+    from nanobot.extensions.contracts import (
+        ExtensionAction,
+        ExtensionActionResult,
+        ExtensionLifecycle,
+    )
+
+    handler = await _handler(tmp_path)
+    snapshot, target_id = _channel_extension_snapshot("weixin", "default", "current-revision")
+    registry = SimpleNamespace(snapshot=MagicMock(return_value=snapshot))
+    handler.settings = SimpleNamespace(extensions=registry)
+    actor_id, challenge_id, code = await _create_channel_pairing(
+        handler,
+        _proxy_connection("pairing-owner"),
+        channel_type="weixin",
+        instance_id="default",
+    )
+    await _verify_channel_pairing(
+        handler,
+        code,
+        channel_type="weixin",
+        instance_id="default",
+        channel_revision="current-revision",
+    )
+    activation = AsyncMock(
+        return_value=ExtensionActionResult(
+            ok=True,
+            action=ExtensionAction.ENABLE,
+            package_id="ext:channel_package:weixin",
+            target_id=target_id,
+            lifecycle=ExtensionLifecycle.ENABLED,
+            message="Channel enabled.",
+        )
+    )
+    monkeypatch.setattr("nanobot.webui.nanobot_features_api.execute_nanobot_extension_action", activation)
+
+    response = await handler.dispatch_webui_mutation(
+        _proxy_connection("pairing-owner"),
+        "collaboration.pairing.consume",
+        {"challenge_id": challenge_id},
+    )
+
+    assert response.status_code == 200
+    assert _json(response)["channel_activation"] == {
+        "ok": True,
+        "action": "enable",
+        "package_id": "ext:channel_package:weixin",
+        "target_id": target_id,
+        "lifecycle": "enabled",
+        "message": "Channel enabled.",
+    }
+    stored = await handler.collaboration.get_pairing_challenge(actor_id, challenge_id)
+    assert stored is not None and stored.consumed_at_ms is not None
+    activation.assert_awaited_once_with(
+        registry,
+        action=ExtensionAction.ENABLE,
+        name="weixin",
+        instance_id="default",
+        extension_id=target_id,
+        expected_revision="current-revision",
+        risk_acknowledged=True,
+        actor_id=actor_id,
+        is_system_admin=True,
+        package_install_allowed=False,
+        channel_pairing_completed=True,
+    )

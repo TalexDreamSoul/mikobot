@@ -30,11 +30,6 @@ from nanobot.webui.mcp_presets_api import (
     ensure_mcp_oauth_server,
     mcp_presets_settings_action,
 )
-from nanobot.webui.nanobot_features_api import (
-    nanobot_feature_instance_target,
-    nanobot_features_action,
-    nanobot_features_payload,
-)
 from nanobot.webui.settings_api import (
     complete_oauth_provider,
     create_model_configuration,
@@ -223,8 +218,7 @@ class WebUISettingsRouter:
         error_response: Callable[[int, str | None], Response],
         runtime_surface: str,
         runtime_capabilities: dict[str, Any],
-        channel_feature_action: Callable[..., Any] | None = None,
-        channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
+        channel_pairing_action: Callable[[str, str], Any] | None = None,
         mcp_runtime_status: Callable[[], Mapping[str, str]] | None = None,
         mcp_reload: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         mcp_oauth_redirect_uri: Callable[[WsRequest], str] | None = None,
@@ -238,8 +232,7 @@ class WebUISettingsRouter:
         self._error_response = error_response
         self._runtime_surface = runtime_surface
         self._runtime_capabilities = runtime_capabilities
-        self._channel_feature_action = channel_feature_action
-        self._channel_runtime_status = channel_runtime_status
+        self._channel_pairing_action = channel_pairing_action
         self._mcp_runtime_status = mcp_runtime_status
         self._mcp_reload = mcp_reload
         self._mcp_oauth_redirect_uri = mcp_oauth_redirect_uri
@@ -460,7 +453,6 @@ class WebUISettingsRouter:
             update_image=update_image_generation_settings,
             update_transcription=update_transcription_settings,
             update_network=update_network_safety_settings,
-            nanobot_features_action=nanobot_features_action,
             api_runtime=self._api_runtime,
             reload_image=lambda: request_image_generation_reload(self.bus),
         )
@@ -469,9 +461,6 @@ class WebUISettingsRouter:
         return system_domain.SystemSettingsOperations(
             cli_apps_payload=cli_apps_payload,
             cli_apps_action=cli_apps_action,
-            nanobot_features_payload=nanobot_features_payload,
-            nanobot_features_action=nanobot_features_action,
-            nanobot_feature_instance_target=nanobot_feature_instance_target,
             validate_channel_config=validate_channel_config,
             load_channel_plugin=load_channel_plugin,
             list_pending=list_pending,
@@ -481,8 +470,7 @@ class WebUISettingsRouter:
             reload_mcp=self._reload_mcp_runtime,
             mcp_runtime_status=self._mcp_runtime_status,
             check_for_update=check_for_update,
-            channel_feature_action=self._channel_feature_action,
-            channel_runtime_status=self._channel_runtime_status,
+            channel_pairing_action=self._channel_pairing_action,
         )
 
     async def _apply_image_generation_runtime_change_result(
@@ -512,13 +500,12 @@ class WebUISettingsRouter:
                 "message": "MCP hot reload timed out. Restart nanobot to pick up changes.",
                 "requires_restart": True,
             }
-        except Exception as exc:
+        except Exception:
             self.logger.exception("MCP hot reload failed")
             return {
                 "ok": False,
                 "message": "MCP hot reload failed. Restart nanobot to pick up changes.",
                 "requires_restart": True,
-                "error": str(exc),
             }
 
     def _parse_mcp_settings_query(self, request: WsRequest) -> QueryParams:
@@ -526,44 +513,6 @@ class WebUISettingsRouter:
 
     def _api_runtime(self) -> ApiRuntime:
         return ApiRuntime(paths=api_runtime_paths(self.settings.config.path))
-
-    def _save_channel_config_values(
-        self,
-        name: str,
-        raw_values: dict[str, Any],
-        instance_id: str = "default",
-    ) -> list[str]:
-        return self.settings.config.update(
-            lambda config: system_domain.save_channel_config_values(
-                config,
-                name,
-                raw_values,
-                instance_id,
-                load_channel_plugin=load_channel_plugin,
-            )
-        )
-
-    _coerce_channel_value = staticmethod(system_domain.coerce_channel_value)
-    _assign_channel_config_value = staticmethod(
-        system_domain.assign_channel_config_value
-    )
-
-    def _nanobot_features_payload(self) -> dict[str, Any]:
-        return nanobot_features_payload(config_path=self.settings.config.path)
-
-    def _nanobot_features_action(
-        self,
-        action: str,
-        query: QueryParams,
-        *,
-        allow_install: bool = True,
-    ) -> dict[str, Any]:
-        return self.settings.mutate(
-            nanobot_features_action,
-            action,
-            query,
-            allow_install=allow_install,
-        )
 
     def _allow_feature_package_install(
         self,
@@ -577,9 +526,19 @@ class WebUISettingsRouter:
         )
         return self._system.allow_feature_package_install(domain_request)
 
+    @staticmethod
+    def _mcp_oauth_admin_actor(request: WsRequest) -> str | None:
+        if not bool(getattr(request, "_nanobot_settings_system_admin", False)):
+            return None
+        actor = getattr(request, "_nanobot_settings_actor_user_id", None)
+        return actor if isinstance(actor, str) and actor else None
+
     async def _handle_mcp_oauth_start(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
+        actor_user_id = self._mcp_oauth_admin_actor(request)
+        if actor_user_id is None:
+            return self._error_response(403, "System administrator access is required")
         if self._mcp_oauth_redirect_uri is None:
             return self._error_response(500, "MCP OAuth callback is not configured")
         query = self._parse_mcp_settings_query(request)
@@ -595,6 +554,7 @@ class WebUISettingsRouter:
                 name,
                 cfg,
                 redirect_uri,
+                actor_user_id=actor_user_id,
                 reload_mcp=self._reload_mcp_runtime,
                 reset_credentials=reset,
             )
@@ -605,11 +565,17 @@ class WebUISettingsRouter:
     async def _handle_mcp_oauth_status(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
+        actor_user_id = self._mcp_oauth_admin_actor(request)
+        if actor_user_id is None:
+            return self._error_response(403, "System administrator access is required")
         flow_id = (_query_first(self._query(request), "flow_id") or "").strip()
         if not flow_id:
             return self._error_response(400, "missing MCP OAuth flow ID")
         try:
-            payload = await self._mcp_oauth.status(flow_id)
+            payload = await self._mcp_oauth.status(
+                flow_id,
+                actor_user_id=actor_user_id,
+            )
         except Exception as exc:
             return self._mcp_oauth_error_response(exc, action="status")
         return self._json_response(payload)
@@ -617,6 +583,9 @@ class WebUISettingsRouter:
     def _handle_mcp_oauth_complete(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
+        actor_user_id = self._mcp_oauth_admin_actor(request)
+        if actor_user_id is None:
+            return self._error_response(403, "System administrator access is required")
         query = self._query(request)
         flow_id = (_query_first(query, "flow_id") or "").strip()
         if not flow_id:
@@ -630,6 +599,7 @@ class WebUISettingsRouter:
             payload = self._mcp_oauth.submit_callback_url(
                 flow_id=flow_id,
                 callback_url=callback_url,
+                actor_user_id=actor_user_id,
             )
         except Exception as exc:
             return self._mcp_oauth_error_response(exc, action="complete")
@@ -638,11 +608,17 @@ class WebUISettingsRouter:
     async def _handle_mcp_oauth_cancel(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
+        actor_user_id = self._mcp_oauth_admin_actor(request)
+        if actor_user_id is None:
+            return self._error_response(403, "System administrator access is required")
         flow_id = (_query_first(self._query(request), "flow_id") or "").strip()
         if not flow_id:
             return self._error_response(400, "missing MCP OAuth flow ID")
         try:
-            payload = await self._mcp_oauth.cancel(flow_id)
+            payload = await self._mcp_oauth.cancel(
+                flow_id,
+                actor_user_id=actor_user_id,
+            )
         except Exception as exc:
             return self._mcp_oauth_error_response(exc, action="cancel")
         return self._json_response(payload)

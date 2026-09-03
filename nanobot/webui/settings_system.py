@@ -12,17 +12,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 from zoneinfo import ZoneInfo
 
-from nanobot.channels._setup import channel_setup_spec
 from nanobot.channels.connect import ChannelConnectError
-from nanobot.channels.contracts import (
-    RouteFieldType,
-    channel_instance_config,
-    channel_update_instance_config,
-)
 from nanobot.config.schema import Config
+from nanobot.extensions.contracts import (
+    ExtensionAction,
+    ExtensionLifecycle,
+    ExtensionSource,
+    safe_extension_message,
+)
+from nanobot.extensions.targets import resolve_extension_package_target
 from nanobot.llm_usage import llm_usage_payload
-from nanobot.optional_features import OptionalFeatureError, with_channel_runtime_status
+from nanobot.optional_features import OptionalFeatureError
 from nanobot.security.workspace_access import workspace_sandbox_status
+from nanobot.webui.nanobot_features_api import (
+    execute_nanobot_extension_action,
+    nanobot_features_payload,
+    resolve_nanobot_feature_target,
+)
 from nanobot.webui.settings_capabilities import network_safety_payload
 from nanobot.webui.settings_contracts import (
     QueryParams,
@@ -39,15 +45,21 @@ if TYPE_CHECKING:
 LoadChannelPlugin = Callable[[str], Any]
 ListPendingPairings = Callable[[], Iterable[dict[str, Any]]]
 SettingsOperation = Callable[..., Any]
+def _sanitize_connector_payload(payload: Mapping[str, object]) -> dict[str, Any]:
+    """Copy connector output while keeping public diagnostic fields bounded."""
+    sanitized = dict(payload)
+    for field in ("message", "error"):
+        if field in sanitized:
+            sanitized[field] = safe_extension_message(sanitized[field])
+    return sanitized
+
+
 
 
 @dataclass(frozen=True)
 class SystemSettingsOperations:
     cli_apps_payload: SettingsOperation
     cli_apps_action: SettingsOperation
-    nanobot_features_payload: SettingsOperation
-    nanobot_features_action: SettingsOperation
-    nanobot_feature_instance_target: SettingsOperation
     validate_channel_config: SettingsOperation
     load_channel_plugin: LoadChannelPlugin
     list_pending: ListPendingPairings
@@ -57,8 +69,8 @@ class SystemSettingsOperations:
     reload_mcp: SettingsOperation
     mcp_runtime_status: Callable[[], Mapping[str, str]] | None
     check_for_update: SettingsOperation
-    channel_feature_action: SettingsOperation | None = None
-    channel_runtime_status: Callable[[], dict[str, Any]] | None = None
+    channel_pairing_action: SettingsOperation | None = None
+_MAX_PAIRING_ACKNOWLEDGEMENTS = 256
 
 
 class SystemSettingsPayload(TypedDict):
@@ -71,7 +83,6 @@ class SystemSettingsPayload(TypedDict):
 
 _DOCS_STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:\.post\d+)?$")
 _DOCS_LATEST_URL = "https://nanobot.wiki/docs/latest"
-_SKIP_FIELD = object()
 
 
 def docs_version(version: str) -> str:
@@ -186,146 +197,6 @@ def update_agent_system_settings(config: Config, query: QueryParams) -> tuple[bo
     return changed, restart_required
 
 
-def save_channel_config_values(
-    config: Config,
-    name: str,
-    raw_values: dict[str, Any],
-    instance_id: str = "default",
-    *,
-    load_channel_plugin: LoadChannelPlugin,
-) -> list[str]:
-    if not name:
-        raise WebUISettingsError("missing channel name")
-    try:
-        plugin = load_channel_plugin(name)
-    except ImportError:
-        raise WebUISettingsError(f"unknown channel '{name}'", status=404) from None
-    setup_spec = channel_setup_spec(name, plugin=plugin)
-    if setup_spec is None:
-        raise WebUISettingsError(
-            f"channel '{name}' cannot be configured from WebUI",
-            status=404,
-        )
-    field_types = setup_spec.route_field_types
-    if not raw_values:
-        return []
-
-    section = getattr(config.channels, name, None)
-    channel_config = channel_instance_config(
-        plugin,
-        section,
-        instance_id=instance_id,
-    )
-    saved: list[str] = []
-    prefix = f"channels.{name}."
-    for raw_key, raw_value in raw_values.items():
-        if not raw_key:
-            raise WebUISettingsError(
-                "channel settings payload contains an invalid key"
-            )
-        field = raw_key[len(prefix) :] if raw_key.startswith(prefix) else raw_key
-        value_type = field_types.get(field)
-        if value_type is None:
-            raise WebUISettingsError(f"'{raw_key}' cannot be configured from WebUI")
-        value = coerce_channel_value(raw_key, raw_value, value_type)
-        if value is _SKIP_FIELD:
-            continue
-        assign_channel_config_value(channel_config, field, value)
-        saved.append(raw_key)
-
-    try:
-        updated_section = channel_update_instance_config(
-            plugin,
-            section,
-            channel_config,
-            instance_id=instance_id,
-        )
-    except ValueError as exc:
-        raise WebUISettingsError(
-            f"Invalid {name} configuration: {exc}",
-            status=400,
-        ) from exc
-    setattr(config.channels, name, updated_section)
-    return saved
-
-
-def coerce_channel_value(
-    raw_key: str,
-    raw_value: Any,
-    value_type: RouteFieldType,
-) -> Any:
-    if isinstance(value_type, tuple):
-        kind = value_type[0]
-        allowed = value_type[1]
-    else:
-        kind = value_type
-        allowed = None
-
-    if kind in {"string", "secret"}:
-        value = raw_value.strip() if isinstance(raw_value, str) else str(raw_value)
-        if kind == "secret" and not value:
-            return _SKIP_FIELD
-        return value
-
-    if kind == "list":
-        if raw_value is None:
-            return []
-        if isinstance(raw_value, str):
-            return [item.strip() for item in raw_value.split(",") if item.strip()]
-        if isinstance(raw_value, list):
-            return [
-                str(item).strip()
-                for item in cast(list[Any], raw_value)
-                if str(item).strip()
-            ]
-        raise WebUISettingsError(f"'{raw_key}' must be a comma-separated list")
-
-    if kind == "int":
-        if raw_value in (None, ""):
-            return _SKIP_FIELD
-        try:
-            return int(raw_value)
-        except (TypeError, ValueError) as exc:
-            raise WebUISettingsError(f"'{raw_key}' must be a number") from exc
-
-    if kind == "bool":
-        if isinstance(raw_value, bool):
-            return raw_value
-        value = str(raw_value).strip().lower()
-        if value in {"true", "1", "yes", "on"}:
-            return True
-        if value in {"false", "0", "no", "off"}:
-            return False
-        raise WebUISettingsError(f"'{raw_key}' must be true or false")
-
-    if kind == "enum":
-        value = raw_value.strip() if isinstance(raw_value, str) else str(raw_value)
-        if not value:
-            return _SKIP_FIELD
-        if allowed is None or value not in allowed:
-            options = ", ".join(sorted(allowed or ()))
-            raise WebUISettingsError(f"'{raw_key}' must be one of: {options}")
-        return value
-
-    raise WebUISettingsError(f"'{raw_key}' has an unsupported field type")
-
-
-def assign_channel_config_value(
-    channel_config: dict[str, Any],
-    field: str,
-    value: Any,
-) -> None:
-    target = channel_config
-    parts = field.split(".")
-    for part in parts[:-1]:
-        current: object = target.get(part)
-        if not isinstance(current, dict):
-            current = {}
-            target[part] = current
-        target = cast(dict[str, Any], current)
-    target[parts[-1]] = value
-
-
 def pairing_payload(
     list_pending: ListPendingPairings,
     last_action: dict[str, Any] | None = None,
@@ -355,6 +226,18 @@ def pairing_payload(
     return payload
 
 
+def _requires_system_admin(action: str) -> bool:
+    """Report whether a system action reads or mutates host-wide privileged state.
+
+    Pairing hands out the codes that grant an external DM sender access to a bot, and
+    the CLI App actions install and remove host packages, so both families are closed
+    to anyone but a server-derived administrator.
+    """
+    if action.startswith("pairing-"):
+        return True
+    return action.startswith("cli-") and action != "cli-list"
+
+
 class SystemSettingsHandler:
     """Handle channel and system commands behind a transport-neutral request DTO."""
 
@@ -362,6 +245,52 @@ class SystemSettingsHandler:
         self.settings = settings
         self.logger = logger
         self._channel_connectors: dict[str, Any] = {}
+        self._channel_pairing_acknowledgements: set[tuple[str, str, str]] = set()
+
+    def _remember_pairing_acknowledgement(
+        self,
+        request: SettingsRequest,
+        channel_name: str,
+        action: str,
+        payload: Mapping[str, object],
+        acknowledged: bool,
+    ) -> None:
+        session_id = payload.get("session_id")
+        actor_id = request.actor_user_id
+        if not isinstance(session_id, str) or not session_id or not actor_id:
+            return
+        key = (channel_name, session_id, actor_id)
+        if action == "start":
+            if acknowledged:
+                while len(self._channel_pairing_acknowledgements) >= _MAX_PAIRING_ACKNOWLEDGEMENTS:
+                    self._channel_pairing_acknowledgements.pop()
+                self._channel_pairing_acknowledgements.add(key)
+            else:
+                self._channel_pairing_acknowledgements.discard(key)
+        elif action == "cancel" or payload.get("status") in {
+            "cancelled",
+            "expired",
+            "failed",
+        }:
+            self._channel_pairing_acknowledgements.discard(key)
+
+    def _consume_pairing_acknowledgement(
+        self,
+        request: SettingsRequest,
+        channel_name: str,
+        action: str,
+        acknowledged: bool,
+    ) -> bool:
+        if action == "start":
+            return acknowledged
+        session_id = (query_first(request.query, "session_id") or "").strip()
+        actor_id = request.actor_user_id
+        if not session_id or not actor_id:
+            return False
+        key = (channel_name, session_id, actor_id)
+        stored = key in self._channel_pairing_acknowledgements
+        self._channel_pairing_acknowledgements.discard(key)
+        return stored
 
     async def handle(
         self,
@@ -372,6 +301,13 @@ class SystemSettingsHandler:
         channel_name: str | None = None,
         connect_action: str | None = None,
     ) -> SettingsRouteResult:
+        if _requires_system_admin(action) and (
+            request.system_admin is not True
+            or not (request.actor_user_id or "").strip()
+        ):
+            return SettingsRouteResult.failure(
+                403, "System administrator access is required"
+            )
         if action == "cli-list":
             return await self._cli_apps(request, operations)
         if action.startswith("cli-"):
@@ -462,42 +398,68 @@ class SystemSettingsHandler:
             return SettingsRouteResult.failure(status, message)
         return SettingsRouteResult.success(payload)
 
+    def _registry(self):
+        registry = self.settings.extensions
+        if registry is None:
+            raise OptionalFeatureError("extension registry is unavailable", status=503)
+        return registry
+
+    def _features_payload(
+        self, last_action: Mapping[str, object] | None = None
+    ) -> dict[str, Any]:
+        registry = self._registry()
+        return nanobot_features_payload(
+            extension_snapshot=registry.snapshot(),
+            config_path=self.settings.config.path,
+            last_action=last_action,
+        )
+
+    @staticmethod
+    def _feature_fields(request: SettingsRequest) -> tuple[str, str | None, str, str, bool]:
+        name = (query_first(request.query, "name") or "").strip()
+        instance_id = (query_first(request.query, "instance_id") or "").strip() or None
+        extension_id = (query_first(request.query, "extension_id") or "").strip()
+        revision = (query_first(request.query, "expected_revision") or "").strip()
+        acknowledged = (query_first(request.query, "risk_acknowledged") or "").strip().lower() in {"1", "true", "yes"}
+        if not name or not extension_id or not revision:
+            raise OptionalFeatureError("extension ID and current revision are required", status=400)
+        return name, instance_id, extension_id, revision, acknowledged
+
+    async def _execute_feature_action(
+        self,
+        request: SettingsRequest,
+        *,
+        action: ExtensionAction,
+        values: Mapping[str, object] | None = None,
+        channel_pairing_completed: bool = False,
+    ):
+        name, instance_id, extension_id, revision, acknowledged = self._feature_fields(request)
+        return await execute_nanobot_extension_action(
+            self._registry(),
+            action=action,
+            name=name,
+            instance_id=instance_id,
+            extension_id=extension_id,
+            expected_revision=revision,
+            risk_acknowledged=acknowledged,
+            actor_id=request.actor_user_id or "webui",
+            is_system_admin=request.system_admin,
+            package_install_allowed=self.allow_feature_package_install(request),
+            values=values,
+            channel_pairing_completed=channel_pairing_completed,
+        )
+
     async def _features(
         self,
         operations: SystemSettingsOperations,
     ) -> SettingsRouteResult:
         try:
-            payload = await asyncio.to_thread(
-                operations.nanobot_features_payload,
-                config_path=self.settings.config.path,
-            )
+            return SettingsRouteResult.success(await asyncio.to_thread(self._features_payload))
+        except OptionalFeatureError as exc:
+            return SettingsRouteResult.failure(exc.status, exc.message)
         except Exception:
             self.logger.exception("failed to load nanobot features")
             return SettingsRouteResult.failure(500, "failed to load nanobot features")
-        return SettingsRouteResult.success(
-            self._with_channel_runtime_status(payload, operations)
-        )
-
-    def _nanobot_features_payload(
-        self,
-        operations: SystemSettingsOperations,
-    ) -> dict[str, Any]:
-        return operations.nanobot_features_payload(config_path=self.settings.config.path)
-
-    def _nanobot_features_action(
-        self,
-        action: str,
-        query: QueryParams,
-        operations: SystemSettingsOperations,
-        *,
-        allow_install: bool = True,
-    ) -> dict[str, Any]:
-        return self.settings.mutate(
-            operations.nanobot_features_action,
-            action,
-            query,
-            allow_install=allow_install,
-        )
 
     async def _features_action(
         self,
@@ -506,215 +468,110 @@ class SystemSettingsHandler:
         operations: SystemSettingsOperations,
     ) -> SettingsRouteResult:
         try:
-            payload = await asyncio.to_thread(
-                self._nanobot_features_action,
-                action,
-                request.query,
-                operations,
-                allow_install=(
-                    action != "enable"
-                    or self.allow_feature_package_install(request)
-                ),
-            )
+            name, instance_id, extension_id, revision, _acknowledged = self._feature_fields(request)
+            target = resolve_nanobot_feature_target(self._registry().snapshot(), name, instance_id)
+            if target is None or target.target_id != extension_id:
+                raise OptionalFeatureError("extension action target is unavailable", status=404)
+            if target.revision != revision:
+                raise OptionalFeatureError("extension action revision is stale", status=409)
+            if action == "disable":
+                if target.source is not ExtensionSource.CHANNEL_PACKAGE:
+                    raise OptionalFeatureError("extension action is not supported", status=400)
+                result = await self._execute_feature_action(request, action=ExtensionAction.DISABLE)
+            elif target.source is ExtensionSource.OPTIONAL_FEATURE and target.lifecycle is ExtensionLifecycle.ENABLED:
+                result = None
+            else:
+                operation = (
+                    ExtensionAction.INSTALL
+                    if target.source is ExtensionSource.OPTIONAL_FEATURE
+                    and target.lifecycle is not ExtensionLifecycle.ENABLED
+                    and ExtensionAction.INSTALL in target.actions
+                    else ExtensionAction.ENABLE
+                )
+                result = await self._execute_feature_action(request, action=operation)
+            last_action: dict[str, object] = {
+                "ok": result.ok if result is not None else True,
+                "action": action,
+            }
+            if result is not None:
+                last_action.update({
+                    "message": result.message,
+                    "lifecycle": result.lifecycle.value if result.lifecycle else None,
+                })
+            payload = await asyncio.to_thread(self._features_payload, last_action)
+            if result is not None and result.lifecycle is ExtensionLifecycle.RESTART_REQUIRED:
+                payload["requires_restart"] = True
         except OptionalFeatureError as exc:
             return SettingsRouteResult.failure(exc.status, exc.message)
-        except Exception as exc:
-            status = getattr(exc, "status", 500)
-            message = getattr(exc, "message", str(exc))
-            if status >= 500:
-                self.logger.exception(
-                    "nanobot feature action '{}' failed",
-                    action,
-                )
-            return SettingsRouteResult.failure(status, message)
-        payload = await self._apply_feature_runtime_change(
-            action,
-            request.query,
-            payload,
-            operations,
-        )
-        payload = self._with_channel_runtime_status(payload, operations)
-        return SettingsRouteResult.success(
-            payload,
-            decorate_restart=True,
-            restart_section="runtime",
-        )
-
-    def _with_channel_runtime_status(
-        self,
-        payload: dict[str, Any],
-        operations: SystemSettingsOperations,
-    ) -> dict[str, Any]:
-        if operations.channel_runtime_status is None:
-            return payload
-        try:
-            return with_channel_runtime_status(
-                payload,
-                operations.channel_runtime_status(),
-            )
         except Exception:
-            self.logger.exception("failed to load channel runtime status")
-            return payload
-
-    async def _apply_feature_runtime_change(
-        self,
-        action: str,
-        query: QueryParams,
-        payload: dict[str, Any],
-        operations: SystemSettingsOperations,
-    ) -> dict[str, Any]:
-        if operations.channel_feature_action is None:
-            return payload
-        name = (query_first(query, "name") or "").strip()
-        if not name:
-            return payload
-        try:
-            instance_id = operations.nanobot_feature_instance_target(query)
-            result = operations.channel_feature_action(action, name, instance_id)
-            if inspect.isawaitable(result):
-                result = await result
-        except Exception as exc:
-            self.logger.exception("failed to apply channel '{}' without restart", name)
-            return self.feature_runtime_fallback(
-                payload,
-                message=(
-                    f"{name} channel config was saved, but hot reload failed: {exc}"
-                ),
-            )
-
-        if not isinstance(result, dict):
-            return payload
-        result = cast(dict[str, Any], result)
-        if not result.get("handled"):
-            return payload
-
-        updated = dict(payload)
-        updated["requires_restart"] = bool(result.get("requires_restart"))
-        message = result.get("message")
-        if isinstance(message, str) and message:
-            last_action = dict(updated.get("last_action") or {})
-            previous = last_action.get("message")
-            last_action["message"] = (
-                f"{previous}. {message}"
-                if isinstance(previous, str) and previous
-                else message
-            )
-            last_action["hot_reload"] = not updated["requires_restart"]
-            if "ok" in result:
-                last_action["ok"] = bool(result["ok"])
-            updated["last_action"] = last_action
-        return updated
-
-    @staticmethod
-    def feature_runtime_fallback(
-        payload: dict[str, Any],
-        *,
-        message: str,
-    ) -> dict[str, Any]:
-        updated = dict(payload)
-        updated["requires_restart"] = True
-        last_action = dict(updated.get("last_action") or {})
-        previous = last_action.get("message")
-        last_action["message"] = (
-            f"{previous}. {message}"
-            if isinstance(previous, str) and previous
-            else message
-        )
-        last_action["hot_reload"] = False
-        updated["last_action"] = last_action
-        return updated
+            self.logger.exception("nanobot feature action '{}' failed", action)
+            return SettingsRouteResult.failure(500, "extension action could not be completed")
+        return SettingsRouteResult.success(payload, decorate_restart=True, restart_section="runtime")
 
     async def _channel_configure(
         self,
         request: SettingsRequest,
         operations: SystemSettingsOperations,
     ) -> SettingsRouteResult:
-        name = (query_first(request.query, "name") or "").strip()
-        instance_id = (
-            query_first(request.query, "instance_id") or "default"
-        ).strip()
-        enable = (query_first(request.query, "enable") or "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-        }
+        values = self.parse_channel_values(request)
+        enable = (query_first(request.query, "enable") or "").strip().lower() in {"1", "true", "yes"}
         try:
-            saved = await asyncio.to_thread(
-                self._save_channel_config_values,
-                name,
-                self.parse_channel_values(request),
-                instance_id,
-                operations,
+            name, instance_id, _extension_id, _revision, acknowledged = self._feature_fields(request)
+            result = await self._execute_feature_action(
+                request, action=ExtensionAction.CONFIGURE, values=values
             )
-        except WebUISettingsError as exc:
+            if not result.ok:
+                raise OptionalFeatureError("channel configuration could not be saved", status=400)
+            saved = [
+                key
+                for key, value in values.items()
+                if not (isinstance(value, str) and not value.strip())
+            ]
+            payload: dict[str, Any] = {"name": name, "saved": result.ok, "saved_keys": saved}
+            enabled = None
+            if enable:
+                target = resolve_nanobot_feature_target(
+                    self._registry().snapshot(), name, instance_id
+                )
+                if target is None or target.revision is None:
+                    raise OptionalFeatureError("extension action target is unavailable", status=404)
+                enabled = await execute_nanobot_extension_action(
+                    self._registry(), action=ExtensionAction.ENABLE, name=name,
+                    instance_id=instance_id, extension_id=target.target_id,
+                    expected_revision=target.revision, risk_acknowledged=acknowledged,
+                    actor_id=request.actor_user_id or "webui", is_system_admin=request.system_admin,
+                    package_install_allowed=self.allow_feature_package_install(request),
+                )
+            last_action = (
+                {
+                    "ok": enabled.ok,
+                    "action": "enable",
+                    "message": enabled.message,
+                    "lifecycle": (
+                        enabled.lifecycle.value
+                        if enabled.lifecycle is not None
+                        else None
+                    ),
+                }
+                if enabled is not None
+                else None
+            )
+            features = await asyncio.to_thread(self._features_payload, last_action)
+            if (
+                result.lifecycle is ExtensionLifecycle.RESTART_REQUIRED
+                or (
+                    enabled is not None
+                    and enabled.lifecycle is ExtensionLifecycle.RESTART_REQUIRED
+                )
+            ):
+                features["requires_restart"] = True
+            payload["nanobot_features"] = features
+        except OptionalFeatureError as exc:
             return SettingsRouteResult.failure(exc.status, exc.message)
         except Exception:
-            self.logger.exception("failed to save channel '{}' settings", name)
-            return SettingsRouteResult.failure(500, "failed to save channel settings")
-
-        payload: dict[str, Any] = {
-            "name": name,
-            "saved": True,
-            "saved_keys": saved,
-        }
-        if not enable:
-            features = await asyncio.to_thread(
-                self._nanobot_features_payload,
-                operations,
-            )
-            payload["nanobot_features"] = self._with_channel_runtime_status(
-                features,
-                operations,
-            )
-            return SettingsRouteResult.success(
-                payload,
-                decorate_restart=True,
-                restart_section="runtime",
-                restart_payload_key="nanobot_features",
-            )
-
-        feature_query = {"name": [name]}
-        if instance_id:
-            feature_query["instance_id"] = [instance_id]
-        try:
-            features = await asyncio.to_thread(
-                self._nanobot_features_action,
-                "enable",
-                feature_query,
-                operations,
-                allow_install=self.allow_feature_package_install(request),
-            )
-        except OptionalFeatureError as exc:
-            return SettingsRouteResult.failure(
-                exc.status,
-                f"Settings saved, but {exc.message}",
-            )
-        except Exception as exc:
-            self.logger.exception(
-                "failed to enable channel '{}' after settings save",
-                name,
-            )
-            return SettingsRouteResult.failure(
-                500,
-                f"Settings saved, but enabling {name} failed: {exc}",
-            )
-
-        features = await self._apply_feature_runtime_change(
-            "enable",
-            feature_query,
-            features,
-            operations,
-        )
-        payload["nanobot_features"] = self._with_channel_runtime_status(
-            features,
-            operations,
-        )
-        return SettingsRouteResult.success(
-            payload,
-            decorate_restart=True,
-            restart_section="runtime",
-            restart_payload_key="nanobot_features",
-        )
+            self.logger.exception("failed to configure channel")
+            return SettingsRouteResult.failure(500, "channel configuration could not be saved")
+        return SettingsRouteResult.success(payload, decorate_restart=True, restart_section="runtime", restart_payload_key="nanobot_features")
 
     async def _channel_validate(
         self,
@@ -753,23 +610,6 @@ class SystemSettingsHandler:
             )
         return cast(dict[str, Any], values)
 
-    def _save_channel_config_values(
-        self,
-        name: str,
-        raw_values: dict[str, Any],
-        instance_id: str,
-        operations: SystemSettingsOperations,
-    ) -> list[str]:
-        return self.settings.config.update(
-            lambda config: save_channel_config_values(
-                config,
-                name,
-                raw_values,
-                instance_id,
-                load_channel_plugin=operations.load_channel_plugin,
-            )
-        )
-
     async def _channel_connect(
         self,
         request: SettingsRequest,
@@ -777,112 +617,174 @@ class SystemSettingsHandler:
         action: str,
         operations: SystemSettingsOperations,
     ) -> SettingsRouteResult:
+        if request.system_admin is not True or not request.actor_user_id:
+            return SettingsRouteResult.failure(403, "System administrator access is required")
+        try:
+            requested_instance_id = (
+                query_first(request.query, "instance_id") or "default"
+            ).strip() or "default"
+            extension_id = (query_first(request.query, "extension_id") or "").strip()
+            revision = (query_first(request.query, "expected_revision") or "").strip()
+            target = resolve_nanobot_feature_target(
+                self._registry().snapshot(), channel_name, requested_instance_id
+            )
+            if target is None or target.target_id != extension_id:
+                raise OptionalFeatureError("extension action target is unavailable", status=404)
+            if action == "start" and (not revision or target.revision != revision):
+                raise OptionalFeatureError("extension action revision is stale", status=409)
+        except OptionalFeatureError as exc:
+            return SettingsRouteResult.failure(exc.status, exc.message)
+
         try:
             connector = self._channel_connectors.get(channel_name)
             if connector is None:
-                plugin = operations.load_channel_plugin(channel_name)
-                connector = plugin.load_connector()
+                connector = operations.load_channel_plugin(channel_name).load_connector()
                 self._channel_connectors[channel_name] = connector
         except ImportError:
-            return SettingsRouteResult.failure(
-                404,
-                f"channel '{channel_name}' does not support connect",
-            )
+            return SettingsRouteResult.failure(404, "channel does not support connect")
+        except Exception:
+            self.logger.exception("failed to load channel connector")
+            return SettingsRouteResult.failure(500, "channel connection could not be completed")
 
         try:
             query = {key: list(values) for key, values in request.query.items()}
-            if request.actor_user_id is not None:
-                query["_actor_user_id"] = [request.actor_user_id]
-            payload = await connector.handle(action, query)
+            query["_actor_user_id"] = [request.actor_user_id]
+            payload_value = cast(object, await connector.handle(action, query))
+            if not isinstance(payload_value, Mapping):
+                self.logger.warning("channel connector returned an invalid payload")
+                return SettingsRouteResult.failure(500, "channel connection could not be completed")
+            payload = _sanitize_connector_payload(cast(Mapping[str, object], payload_value))
         except ChannelConnectError as exc:
-            return SettingsRouteResult.failure(exc.status, exc.message)
+            return SettingsRouteResult.failure(exc.status, safe_extension_message(exc.message))
         except Exception:
-            self.logger.exception(
-                "failed to run {} WebUI connect action for {}",
-                action,
-                channel_name,
-            )
-            return SettingsRouteResult.failure(
-                500,
-                f"failed to {action} {channel_name} connection",
-            )
-
-        if payload.get("status") != "succeeded":
-            return SettingsRouteResult.success(payload)
-        if payload.get("pairing_required") is True:
-            if operations.channel_feature_action is not None:
-                try:
-                    listener = operations.channel_feature_action(
-                        "pairing", channel_name, str(payload.get("instance_id") or "default")
-                    )
-                    if inspect.isawaitable(listener):
-                        listener = await listener
-                    if isinstance(listener, dict):
-                        listener_payload = cast(dict[str, Any], listener)
-                        if not listener_payload.get("ok", True):
-                            payload["pairing_listener_error"] = listener_payload.get(
-                                "message", "pairing listener failed"
-                            )
-                except Exception as exc:
-                    self.logger.exception("failed to start pairing listener for {}", channel_name)
-                    payload["pairing_listener_error"] = str(exc)
-            payload["nanobot_features"] = self._with_channel_runtime_status(
-                self._nanobot_features_payload(operations), operations
-            )
-            payload["nanobot_features"]["requires_restart"] = False
-            return SettingsRouteResult.success(payload)
-        payload = await self._with_channel_connect_success(
+            self.logger.exception("failed to run channel connector")
+            return SettingsRouteResult.failure(500, "channel connection could not be completed")
+        requested_acknowledgement = (
+            query_first(request.query, "risk_acknowledged") or ""
+        ).strip().lower() in {"1", "true", "yes"}
+        self._remember_pairing_acknowledgement(
             request,
             channel_name,
+            action,
             payload,
-            operations,
+            requested_acknowledgement,
         )
-        return SettingsRouteResult.success(
-            payload,
-            decorate_restart=True,
-            restart_section="runtime",
-            restart_payload_key="nanobot_features",
-        )
-
-    async def _with_channel_connect_success(
-        self,
-        request: SettingsRequest,
-        channel_name: str,
-        payload: dict[str, Any],
-        operations: SystemSettingsOperations,
-    ) -> dict[str, Any]:
-        target = {"name": [channel_name]}
-        if payload.get("instance_id"):
-            target["instance_id"] = [str(payload["instance_id"])]
+        if payload.get("status") != "succeeded":
+            return SettingsRouteResult.success(_sanitize_connector_payload(payload))
+        instance_id = str(payload.get("instance_id") or "default")
+        if payload.get("pairing_required") is True:
+            acknowledged = self._consume_pairing_acknowledgement(
+                request,
+                channel_name,
+                action,
+                requested_acknowledgement,
+            )
+            package_target = resolve_extension_package_target(
+                self._registry().snapshot(),
+                channel_name,
+                source=ExtensionSource.CHANNEL_PACKAGE,
+            )
+            install_result = None
+            if (
+                package_target is None
+                or package_target.revision is None
+                or ExtensionAction.INSTALL in package_target.actions
+            ):
+                try:
+                    if package_target is None or package_target.revision is None:
+                        raise OptionalFeatureError(
+                            "extension action target is unavailable", status=404
+                        )
+                    install_result = await execute_nanobot_extension_action(
+                        self._registry(),
+                        action=ExtensionAction.INSTALL,
+                        name=channel_name,
+                        instance_id=None,
+                        extension_id=package_target.target_id,
+                        expected_revision=package_target.revision,
+                        risk_acknowledged=acknowledged,
+                        actor_id=request.actor_user_id or "webui",
+                        is_system_admin=request.system_admin,
+                        package_install_allowed=self.allow_feature_package_install(request),
+                        package_target=True,
+                        package_source=ExtensionSource.CHANNEL_PACKAGE,
+                    )
+                except OptionalFeatureError:
+                    install_result = None
+                if install_result is None or not install_result.ok:
+                    payload["pairing_listener_error"] = "pairing listener could not be started"
+                    last_action: dict[str, object] = {
+                        "ok": False,
+                        "action": ExtensionAction.INSTALL.value,
+                        "message": (
+                            install_result.message
+                            if install_result is not None
+                            else "Channel dependencies could not be prepared."
+                        ),
+                        "lifecycle": (
+                            install_result.lifecycle.value
+                            if install_result is not None and install_result.lifecycle
+                            else ExtensionLifecycle.FAILED.value
+                        ),
+                    }
+                    features = await asyncio.to_thread(
+                        self._features_payload, last_action
+                    )
+                    features["requires_restart"] = bool(
+                        install_result is not None
+                        and install_result.lifecycle
+                        is ExtensionLifecycle.RESTART_REQUIRED
+                    )
+                    payload["nanobot_features"] = features
+                    return SettingsRouteResult.success(payload)
+            if operations.channel_pairing_action is not None:
+                try:
+                    listener = operations.channel_pairing_action(channel_name, instance_id)
+                    if inspect.isawaitable(listener):
+                        listener = await listener
+                    listener_value = cast(object, listener)
+                    listener_payload = (
+                        cast(Mapping[str, object], listener_value)
+                        if isinstance(listener_value, Mapping)
+                        else None
+                    )
+                    if listener_payload is not None and not listener_payload.get("ok", True):
+                        payload["pairing_listener_error"] = "pairing listener could not be started"
+                except Exception:
+                    self.logger.exception("failed to start pairing listener")
+                    payload["pairing_listener_error"] = "pairing listener could not be started"
+            payload["nanobot_features"] = await asyncio.to_thread(self._features_payload)
+            payload["nanobot_features"]["requires_restart"] = False
+            return SettingsRouteResult.success(payload)
         try:
+            target = resolve_nanobot_feature_target(self._registry().snapshot(), channel_name, instance_id)
+            if target is None or target.revision is None:
+                raise OptionalFeatureError("extension action target is unavailable", status=404)
+            acknowledged = (query_first(request.query, "risk_acknowledged") or "").strip().lower() in {"1", "true", "yes"}
+            result = await execute_nanobot_extension_action(
+                self._registry(), action=ExtensionAction.ENABLE, name=channel_name,
+                instance_id=instance_id, extension_id=target.target_id,
+                expected_revision=target.revision, risk_acknowledged=acknowledged,
+                actor_id=request.actor_user_id or "webui", is_system_admin=request.system_admin,
+                package_install_allowed=self.allow_feature_package_install(request),
+            )
             features = await asyncio.to_thread(
-                self._nanobot_features_action,
-                "enable",
-                target,
-                operations,
-                allow_install=self.allow_feature_package_install(request),
+                self._features_payload,
+                {
+                    "ok": result.ok,
+                    "action": "enable",
+                    "message": result.message,
+                    "lifecycle": (
+                        result.lifecycle.value if result.lifecycle is not None else None
+                    ),
+                },
             )
+            if result.lifecycle is ExtensionLifecycle.RESTART_REQUIRED:
+                features["requires_restart"] = True
+            payload["nanobot_features"] = features
         except OptionalFeatureError as exc:
-            features = self.feature_runtime_fallback(
-                self._nanobot_features_payload(operations),
-                message=(
-                    f"{channel_name} connected, but enabling channel support failed: "
-                    f"{exc.message}"
-                ),
-            )
-        else:
-            features = await self._apply_feature_runtime_change(
-                "enable",
-                target,
-                features,
-                operations,
-            )
-        updated = dict(payload)
-        updated["nanobot_features"] = self._with_channel_runtime_status(
-            features,
-            operations,
-        )
-        return updated
+            return SettingsRouteResult.failure(exc.status, exc.message)
+        return SettingsRouteResult.success(payload, decorate_restart=True, restart_section="runtime", restart_payload_key="nanobot_features")
 
     def allow_feature_package_install(self, request: SettingsRequest) -> bool:
         if request.local_browser:
@@ -949,13 +851,30 @@ class SystemSettingsHandler:
         action: str | None,
         operations: SystemSettingsOperations,
     ) -> SettingsRouteResult:
+        if action is not None and (
+            request.system_admin is not True
+            or not request.actor_user_id
+            or not request.actor_user_id.strip()
+        ):
+            return SettingsRouteResult.failure(
+                403,
+                "system administrator access is required",
+            )
+        extension_registry = getattr(self.settings, "extensions", None)
         try:
+            extension_snapshot = (
+                extension_registry.snapshot() if extension_registry is not None else None
+            )
             payload = await operations.mcp_presets_action(
                 action,
                 request.query,
                 reload_mcp=operations.reload_mcp,
                 mcp_runtime_status=operations.mcp_runtime_status,
                 config=self.settings.config,
+                extension_snapshot=extension_snapshot,
+                extension_registry=extension_registry,
+                actor_user_id=request.actor_user_id,
+                system_admin=request.system_admin,
             )
         except Exception as exc:
             status = getattr(exc, "status", 500)

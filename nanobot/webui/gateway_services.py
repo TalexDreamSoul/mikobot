@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.websocket.runtime import WebSocketConfig
     from nanobot.cron.service import CronService
+    from nanobot.extensions.registry import ExtensionRegistry
     from nanobot.session.manager import SessionManager
     from nanobot.triggers.local_store import LocalTriggerStore
 
@@ -80,6 +81,7 @@ def build_gateway_services(
     workspace_path: Path,
     default_restrict_to_workspace: bool,
     config_path: Path | None = None,
+    extension_registry: ExtensionRegistry | None = None,
     runtime_model_name: Callable[[], str | None] | None,
     refresh_runtime_config: Callable[[], None] | None = None,
     runtime_surface: str,
@@ -89,8 +91,7 @@ def build_gateway_services(
     local_trigger_store: LocalTriggerStore | None = None,
     cron_pending_job_ids: Callable[[str], set[str]] | None = None,
     local_trigger_pending_ids: Callable[[str], set[str]] | None = None,
-    channel_feature_action: Callable[..., Any] | None = None,
-    channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
+    channel_pairing_action: Callable[[str, str], Any] | None = None,
     mcp_runtime_status: Callable[[], Mapping[str, str]] | None = None,
     mcp_reload: Callable[[], Awaitable[dict[str, Any]]] | None = None,
     skill_state_action: Callable[[set[str]], None] | None = None,
@@ -107,6 +108,7 @@ def build_gateway_services(
             else None
         ),
         refresh_runtime_config=refresh_runtime_config,
+        extension_registry=extension_registry,
     )
     tokens = GatewayTokenStore()
     oidc = OidcAuthenticator(config.oidc_auth)
@@ -159,8 +161,7 @@ def build_gateway_services(
         local_trigger_store=local_trigger_store,
         cron_pending_job_ids=cron_pending_job_ids,
         local_trigger_pending_ids=local_trigger_pending_ids,
-        channel_feature_action=channel_feature_action,
-        channel_runtime_status=channel_runtime_status,
+        channel_pairing_action=channel_pairing_action,
         mcp_runtime_status=mcp_runtime_status,
         mcp_reload=mcp_reload,
         skill_state_action=skill_state_action,

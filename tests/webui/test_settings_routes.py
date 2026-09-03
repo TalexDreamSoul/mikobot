@@ -51,11 +51,31 @@ def _router(
     )
 
 
-def _mutation_request(path: str, payload: dict[str, object]) -> SimpleNamespace:
+def _mutation_request(
+    path: str,
+    payload: dict[str, object],
+    *,
+    actor_user_id: str | None = None,
+    system_admin: bool = False,
+) -> SimpleNamespace:
     request = SimpleNamespace(path=path, headers=Headers())
     request._nanobot_webui_mutation_request = True
     request._nanobot_webui_mutation_payload = payload
     request._nanobot_trusted_proxy_authenticated = True
+    request._nanobot_settings_actor_user_id = actor_user_id
+    request._nanobot_settings_system_admin = system_admin
+    return request
+
+
+def _read_request(
+    path: str,
+    *,
+    actor_user_id: str | None = None,
+    system_admin: bool = False,
+) -> SimpleNamespace:
+    request = SimpleNamespace(path=path, headers=Headers())
+    request._nanobot_settings_actor_user_id = actor_user_id
+    request._nanobot_settings_system_admin = system_admin
     return request
 
 
@@ -97,6 +117,350 @@ async def test_mcp_list_serializes_local_runtime_failure_snapshot(tmp_path) -> N
     assert row["runtime_status"] == "failed"
     assert b'"runtime_status": "failed"' in response.body
     assert snapshot_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("actor_user_id", "system_admin"),
+    [("member", False), (None, True)],
+)
+async def test_agent_plugin_mutations_require_server_derived_admin_and_actor(
+    tmp_path: Path,
+    actor_user_id: str | None,
+    system_admin: bool,
+) -> None:
+    config_path = tmp_path / "config.json"
+    reload_calls = 0
+
+    async def reload_mcp() -> dict[str, object]:
+        nonlocal reload_calls
+        reload_calls += 1
+        return {"ok": True, "requires_restart": False}
+
+    request = _mutation_request(
+        "/api/settings/mcp-presets/enable",
+        {
+            "extension_id": "ext:agent_plugin:desktop",
+            "expected_revision": "client-revision",
+            "risk_acknowledged": True,
+            "actor_user_id": "client-controlled-actor",
+            "system_admin": True,
+        },
+        actor_user_id=actor_user_id,
+        system_admin=system_admin,
+    )
+
+    response = await _router(config_path=config_path, mcp_reload=reload_mcp).dispatch(
+        None,
+        request,
+        request.path,
+    )
+
+    assert response is not None
+    assert response.status_code == 403
+    assert reload_calls == 0
+    assert not config_path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/settings/mcp-presets/enable",
+        "/api/settings/mcp-presets/disable",
+        "/api/settings/mcp-presets/remove",
+        "/api/settings/mcp-presets/test",
+        "/api/settings/mcp-presets/reconnect",
+        "/api/settings/mcp-presets/custom",
+        "/api/settings/mcp-presets/import",
+        "/api/settings/mcp-presets/import-cursor",
+        "/api/settings/mcp-presets/tools",
+    ],
+)
+async def test_every_mcp_mutation_rejects_non_admin_before_side_effects(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    config_path = tmp_path / "config.json"
+    reload_calls = 0
+
+    async def reload_mcp() -> dict[str, object]:
+        nonlocal reload_calls
+        reload_calls += 1
+        return {"ok": True, "requires_restart": False}
+
+    request = _mutation_request(
+        path,
+        {"name": "blocked", "transport": "stdio", "command": "echo"},
+        actor_user_id="ordinary-user",
+        system_admin=False,
+    )
+
+    response = await _router(config_path=config_path, mcp_reload=reload_mcp).dispatch(
+        None,
+        request,
+        path,
+    )
+
+    assert response is not None
+    assert response.status_code == 403
+    assert reload_calls == 0
+    assert not config_path.exists()
+
+
+def _pending_pairing() -> list[dict[str, object]]:
+    return [
+        {
+            "code": "ABCD-EFGH",
+            "channel": "weixin.tenant-b",
+            "sender_id": "wxid_attacker",
+            "created_at": 1_000.0,
+            "expires_at": 1_600.0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("actor_user_id", "system_admin", "status"),
+    [("ordinary-member", False, 403), (None, True, 403), ("operator", True, 200)],
+)
+async def test_pairing_list_discloses_codes_only_to_server_derived_admins(
+    monkeypatch: pytest.MonkeyPatch,
+    actor_user_id: str | None,
+    system_admin: bool,
+    status: int,
+) -> None:
+    """A member who cannot administer the host never learns another tenant's code."""
+    reads: list[object] = []
+
+    def list_pending() -> list[dict[str, object]]:
+        reads.append(object())
+        return _pending_pairing()
+
+    monkeypatch.setattr("nanobot.webui.settings_routes.list_pending", list_pending)
+    request = _read_request(
+        "/api/settings/pairing",
+        actor_user_id=actor_user_id,
+        system_admin=system_admin,
+    )
+
+    response = await _router().dispatch(None, request, request.path)
+
+    assert response is not None
+    assert response.status_code == status
+    if status == 403:
+        assert reads == []
+        assert b"ABCD-EFGH" not in response.body
+        assert b"wxid_attacker" not in response.body
+    else:
+        listed = json.loads(response.body)["requests"][0]
+        assert listed["code"] == "ABCD-EFGH"
+        assert listed["sender_id"] == "wxid_attacker"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["approve", "deny"])
+@pytest.mark.parametrize(
+    ("actor_user_id", "system_admin"),
+    [("ordinary-member", False), (None, True)],
+)
+async def test_pairing_decisions_reject_non_admins_before_granting_bot_access(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    actor_user_id: str | None,
+    system_admin: bool,
+) -> None:
+    """A stolen code cannot be redeemed without server-derived administrator identity."""
+    approved: list[str] = []
+    denied: list[str] = []
+    monkeypatch.setattr("nanobot.webui.settings_routes.list_pending", _pending_pairing)
+    monkeypatch.setattr(
+        "nanobot.webui.settings_routes.approve_code",
+        lambda code: approved.append(code) or ("weixin.tenant-b", "wxid_attacker"),
+    )
+    monkeypatch.setattr(
+        "nanobot.webui.settings_routes.deny_code",
+        lambda code: denied.append(code) or True,
+    )
+    path = f"/api/settings/pairing/{action}"
+    request = _mutation_request(
+        path,
+        {
+            "code": "ABCD-EFGH",
+            "actor_user_id": "client-controlled-actor",
+            "system_admin": True,
+        },
+        actor_user_id=actor_user_id,
+        system_admin=system_admin,
+    )
+
+    response = await _router().dispatch(None, request, path)
+
+    assert response is not None
+    assert response.status_code == 403
+    assert approved == []
+    assert denied == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["approve", "deny"])
+async def test_pairing_decisions_still_run_for_server_derived_admins(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    redeemed: list[str] = []
+    monkeypatch.setattr("nanobot.webui.settings_routes.list_pending", list)
+    monkeypatch.setattr(
+        "nanobot.webui.settings_routes.approve_code",
+        lambda code: redeemed.append(code) or ("weixin.tenant-b", "wxid_attacker"),
+    )
+    monkeypatch.setattr(
+        "nanobot.webui.settings_routes.deny_code",
+        lambda code: redeemed.append(code) or True,
+    )
+    path = f"/api/settings/pairing/{action}"
+    request = _mutation_request(
+        path,
+        {"code": "ABCD-EFGH"},
+        actor_user_id="operator",
+        system_admin=True,
+    )
+
+    response = await _router().dispatch(None, request, path)
+
+    assert response is not None
+    assert response.status_code == 200
+    assert json.loads(response.body)["last_action"]["action"] == action
+    assert redeemed == ["ABCD-EFGH"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "function_name", "payload"),
+    [
+        (
+            "/api/settings/web-search/update",
+            "update_web_search_settings",
+            {"provider": "tavily", "api_key": "attacker-supplied-key"},
+        ),
+        (
+            "/api/settings/network-safety/update",
+            "update_network_safety_settings",
+            {"webui_default_access_mode": "full"},
+        ),
+        (
+            "/api/settings/image-generation/update",
+            "update_image_generation_settings",
+            {"enabled": True, "provider": "openrouter"},
+        ),
+        (
+            "/api/settings/transcription/update",
+            "update_transcription_settings",
+            {"provider": "openrouter", "model": "openai/whisper-large-v3"},
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("actor_user_id", "system_admin"),
+    [("ordinary-member", False), (None, True)],
+)
+async def test_capability_updates_reject_non_admins_before_writing_host_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    path: str,
+    function_name: str,
+    payload: dict[str, object],
+    actor_user_id: str | None,
+    system_admin: bool,
+) -> None:
+    """Capability settings are host-wide, so a member cannot persist them."""
+    config_path = tmp_path / "config.json"
+    applied: list[object] = []
+
+    def mutate(query, *, config_path=None):
+        applied.append(query)
+        return {}
+
+    monkeypatch.setattr(f"nanobot.webui.settings_routes.{function_name}", mutate)
+    request = _mutation_request(
+        path,
+        payload | {"actor_user_id": "client-controlled-actor", "system_admin": True},
+        actor_user_id=actor_user_id,
+        system_admin=system_admin,
+    )
+
+    response = await _router(config_path=config_path).dispatch(None, request, path)
+
+    assert response is not None
+    assert response.status_code == 403
+    assert applied == []
+    assert not config_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_web_search_update_persists_the_credential_only_for_admins(
+    tmp_path: Path,
+) -> None:
+    """The blocked chain is real: the same payload does persist for an administrator."""
+    config_path = tmp_path / "config.json"
+    path = "/api/settings/web-search/update"
+    payload = {"provider": "tavily", "api_key": "operator-supplied-key"}
+
+    blocked = await _router(config_path=config_path).dispatch(
+        None,
+        _mutation_request(path, payload, actor_user_id="member", system_admin=False),
+        path,
+    )
+    assert blocked is not None
+    assert blocked.status_code == 403
+    assert not config_path.exists()
+
+    allowed = await _router(config_path=config_path).dispatch(
+        None,
+        _mutation_request(path, payload, actor_user_id="operator", system_admin=True),
+        path,
+    )
+
+    assert allowed is not None
+    assert allowed.status_code == 200
+    saved = json.loads(config_path.read_text())
+    assert saved["tools"]["web"]["search"]["provider"] == "tavily"
+    assert saved["tools"]["web"]["search"]["apiKey"] == "operator-supplied-key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/settings/cli-apps/install",
+        "/api/settings/cli-apps/update",
+        "/api/settings/cli-apps/uninstall",
+        "/api/settings/cli-apps/test",
+    ],
+)
+async def test_cli_app_actions_reject_non_admins_before_touching_the_host(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    """CLI App actions install host packages, so members must not reach the manager."""
+    invoked: list[str] = []
+    monkeypatch.setattr(
+        "nanobot.webui.settings_routes.cli_apps_action",
+        lambda action, query, *, config_path=None: invoked.append(action) or {},
+    )
+    request = _mutation_request(
+        path,
+        {"name": "gimp"},
+        actor_user_id="ordinary-member",
+        system_admin=False,
+    )
+
+    response = await _router().dispatch(None, request, path)
+
+    assert response is not None
+    assert response.status_code == 403
+    assert invoked == []
 
 
 @pytest.mark.asyncio
@@ -166,6 +530,19 @@ async def test_mcp_reload_callback_is_bounded(
 
 
 @pytest.mark.asyncio
+async def test_mcp_reload_exception_response_does_not_expose_runtime_details() -> None:
+    async def reload_mcp() -> dict[str, object]:
+        raise RuntimeError("/private/runtime/reload-secret")
+
+    result = await _router(mcp_reload=reload_mcp)._reload_mcp_runtime()
+
+    assert result["ok"] is False
+    assert result["requires_restart"] is True
+    assert "/private/runtime/reload-secret" not in str(result)
+    assert "reload-secret" not in str(result)
+
+
+@pytest.mark.asyncio
 async def test_mcp_oauth_start_uses_gateway_callback_and_requires_api_auth(monkeypatch) -> None:
     config = SimpleNamespace(
         type="streamableHttp",
@@ -187,6 +564,8 @@ async def test_mcp_oauth_start_uses_gateway_callback_and_requires_api_auth(monke
     request = _mutation_request(
         "/api/settings/mcp-oauth/start",
         {"name": "xmind"},
+        actor_user_id="operator",
+        system_admin=True,
     )
 
     response = await router.dispatch(None, request, "/api/settings/mcp-oauth/start")
@@ -200,6 +579,7 @@ async def test_mcp_oauth_start_uses_gateway_callback_and_requires_api_auth(monke
         "https://gateway.example/auth/mcp/callback",
         reload_mcp=ANY,
         reset_credentials=False,
+        actor_user_id="operator",
     )
 
     denied = _router(authorized=False)
@@ -216,6 +596,115 @@ async def test_mcp_oauth_start_uses_gateway_callback_and_requires_api_auth(monke
     assert failed_response.status_code == 500
     assert json.loads(failed_response.body) == {"error": "MCP OAuth start failed"}
     assert b"upstream secret response" not in failed_response.body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("actor_user_id", "system_admin"),
+    [("member", False), (None, True)],
+)
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/settings/mcp-oauth/start", {"name": "xmind"}),
+        ("/api/settings/mcp-oauth/status", {"flow_id": "missing"}),
+        (
+            "/api/settings/mcp-oauth/complete",
+            {
+                "flow_id": "missing",
+                "callback_url": "http://127.0.0.1:8765/auth/mcp/callback?code=secret&state=state",
+            },
+        ),
+        ("/api/settings/mcp-oauth/cancel", {"flow_id": "missing"}),
+    ],
+)
+async def test_mcp_oauth_actions_require_server_derived_admin_and_actor(
+    tmp_path: Path,
+    actor_user_id: str | None,
+    system_admin: bool,
+    path: str,
+    payload: dict[str, object],
+) -> None:
+    config_path = tmp_path / "config.json"
+    request = _mutation_request(
+        path,
+        payload | {"actor_user_id": "client-actor", "system_admin": True},
+        actor_user_id=actor_user_id,
+        system_admin=system_admin,
+    )
+
+    response = await _router(config_path=config_path).dispatch(None, request, path)
+
+    assert response is not None
+    assert response.status_code == 403
+    assert not config_path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/settings/mcp-oauth/start", {"name": "xmind"}),
+        ("/api/settings/mcp-oauth/status", {"flow_id": "missing"}),
+        (
+            "/api/settings/mcp-oauth/complete",
+            {
+                "flow_id": "missing",
+                "callback_url": "http://127.0.0.1:8765/auth/mcp/callback?code=secret&state=state",
+            },
+        ),
+        ("/api/settings/mcp-oauth/cancel", {"flow_id": "missing"}),
+    ],
+)
+async def test_unauthorized_mcp_oauth_actions_have_no_config_or_flow_side_effects(
+    tmp_path: Path,
+    path: str,
+    payload: dict[str, object],
+) -> None:
+    config_path = tmp_path / "config.json"
+    request = _mutation_request(
+        path,
+        payload,
+        actor_user_id="operator",
+        system_admin=True,
+    )
+
+    response = await _router(authorized=False, config_path=config_path).dispatch(
+        None,
+        request,
+        path,
+    )
+
+    assert response is not None
+    assert response.status_code == 401
+    assert not config_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_config_loader_failures_are_safe_for_administrators(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(
+        "nanobot.webui.mcp_presets_api.load_config",
+        lambda _path: (_ for _ in ()).throw(
+            RuntimeError("/private/config/oauth-secret")
+        ),
+    )
+    request = _mutation_request(
+        "/api/settings/mcp-oauth/start",
+        {"name": "xmind"},
+        actor_user_id="operator",
+        system_admin=True,
+    )
+
+    response = await _router(config_path=config_path).dispatch(None, request, request.path)
+
+    assert response is not None
+    assert response.status_code == 500
+    assert b"/private/config/oauth-secret" not in response.body
+    assert b"oauth-secret" not in response.body
 
 
 @pytest.mark.asyncio
@@ -260,6 +749,8 @@ async def test_mcp_oauth_manual_completion_reads_websocket_payload() -> None:
     request = _mutation_request(
         "/api/settings/mcp-oauth/complete",
         {"flow_id": "flow-123", "callback_url": callback_url},
+        actor_user_id="operator",
+        system_admin=True,
     )
 
     response = await router.dispatch(None, request, "/api/settings/mcp-oauth/complete")
@@ -268,7 +759,11 @@ async def test_mcp_oauth_manual_completion_reads_websocket_payload() -> None:
     assert response.status_code == 200
     assert json.loads(response.body)["status"] == "connecting"
     assert b"oauth-code" not in response.body
-    submit.assert_called_once_with(flow_id="flow-123", callback_url=callback_url)
+    submit.assert_called_once_with(
+        flow_id="flow-123",
+        callback_url=callback_url,
+        actor_user_id="operator",
+    )
 
     denied = _router(authorized=False)
     denied_response = await denied.dispatch(

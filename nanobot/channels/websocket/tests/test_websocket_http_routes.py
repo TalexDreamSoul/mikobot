@@ -19,7 +19,6 @@ from nanobot.channels.websocket.runtime import WebSocketChannel, WebSocketConfig
 from nanobot.config.loader import load_config, save_config
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronJob, CronPayload, CronSchedule
-from nanobot.optional_features import InstallResult
 from nanobot.security.workspace_access import WORKSPACE_SCOPE_METADATA_KEY
 from nanobot.session.keys import UNIFIED_SESSION_KEY
 from nanobot.session.manager import Session, SessionManager
@@ -80,8 +79,8 @@ def _make_handler(
     local_trigger_store: LocalTriggerStore | None = None,
     cron_pending_job_ids: Any | None = None,
     local_trigger_pending_ids: Any | None = None,
-    channel_feature_action: Any | None = None,
-    channel_runtime_status: Any | None = None,
+    extension_registry: Any | None = None,
+    channel_pairing_action: Any | None = None,
     mcp_reload: Any | None = None,
     recovery_action: Any | None = None,
 ) -> GatewayServices:
@@ -101,8 +100,8 @@ def _make_handler(
         local_trigger_store=local_trigger_store,
         cron_pending_job_ids=cron_pending_job_ids,
         local_trigger_pending_ids=local_trigger_pending_ids,
-        channel_feature_action=channel_feature_action,
-        channel_runtime_status=channel_runtime_status,
+        extension_registry=extension_registry,
+        channel_pairing_action=channel_pairing_action,
         mcp_reload=mcp_reload,
         recovery_action=recovery_action,
     )
@@ -120,8 +119,8 @@ def _ch(
     local_trigger_store: LocalTriggerStore | None = None,
     cron_pending_job_ids: Any | None = None,
     local_trigger_pending_ids: Any | None = None,
-    channel_feature_action: Any | None = None,
-    channel_runtime_status: Any | None = None,
+    extension_registry: Any | None = None,
+    channel_pairing_action: Any | None = None,
     mcp_reload: Any | None = None,
     recovery_action: Any | None = None,
     **extra: Any,
@@ -145,8 +144,8 @@ def _ch(
         local_trigger_store=local_trigger_store,
         cron_pending_job_ids=cron_pending_job_ids,
         local_trigger_pending_ids=local_trigger_pending_ids,
-        channel_feature_action=channel_feature_action,
-        channel_runtime_status=channel_runtime_status,
+        extension_registry=extension_registry,
+        channel_pairing_action=channel_pairing_action,
         mcp_reload=mcp_reload,
         recovery_action=recovery_action,
     )
@@ -187,6 +186,7 @@ def _stub_matrix_feature(
     install_calls: list[str] | None = None,
     channels: list[str] | None = None,
 ) -> None:
+    from nanobot.channels.contracts import ChannelFieldSpec, ChannelSetupSpec
     from nanobot.channels.plugin import ChannelPlugin, load_channel_package
 
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
@@ -195,6 +195,10 @@ def _stub_matrix_feature(
         name="matrix",
         display_name="Matrix",
         runtime=f"{__name__}:_MatrixChannel",
+        setup=ChannelSetupSpec(fields={
+            "accessToken": ChannelFieldSpec(kind="secret"),
+            "deviceId": ChannelFieldSpec(),
+        }),
         dependencies=("matrix-nio>=0.25.2",),
     )
     plugins = {"matrix": matrix}
@@ -202,26 +206,134 @@ def _stub_matrix_feature(
         websocket = load_channel_package("websocket")
         assert websocket is not None
         plugins["websocket"] = websocket
-    monkeypatch.setattr(
-        "nanobot.channels.registry.discover_plugins",
-        lambda enabled_names=None: {
+
+    def discover_stub(enabled_names: Any = None) -> dict[str, Any]:
+        return {
             name: plugin
             for name, plugin in plugins.items()
             if enabled_names is None or name in enabled_names
-        },
-    )
+        }
+
+    monkeypatch.setattr("nanobot.channels.registry.discover_plugins", discover_stub)
+    monkeypatch.setattr("nanobot.extensions.adapters.channels.discover_plugins", discover_stub)
+    from nanobot.optional_features import ChannelDependencyPreparation
+
+    installed_state = [installed]
+
+    def dependencies_installed(_name: str, _deps: list[str] | None) -> bool:
+        return installed_state[0]
+
+    def prepare_dependencies(
+        name: str,
+        _deps: list[str] | None,
+        *,
+        allow_install: bool,
+        runner: Any = None,
+    ) -> ChannelDependencyPreparation:
+        if installed_state[0]:
+            return ChannelDependencyPreparation(ready=True)
+        if not allow_install:
+            return ChannelDependencyPreparation(
+                ready=False,
+                message="Channel dependency installation is disabled by policy.",
+            )
+        if install_calls is not None:
+            install_calls.append(name)
+        installed_state[0] = True
+        return ChannelDependencyPreparation(ready=True, installed=True)
+
     monkeypatch.setattr(
         "nanobot.optional_features.optional_dependency_groups",
         lambda: {"matrix": deps if deps is not None else []},
     )
-    monkeypatch.setattr("nanobot.optional_features.extra_installed", lambda _name, _deps: installed)
-    if install_calls is not None:
-        monkeypatch.setattr(
-            "nanobot.optional_features.install_extra",
-            lambda name, _deps, *, runner: install_calls.append(name)
-            or InstallResult(True, f"{name} support", ["python", "-m", "pip", "install", name]),
-        )
+    monkeypatch.setattr("nanobot.optional_features.extra_installed", dependencies_installed)
+    monkeypatch.setattr("nanobot.extensions.adapters.channels.extra_installed", dependencies_installed)
+    monkeypatch.setattr(
+        "nanobot.extensions.adapters.channels.prepare_channel_dependencies",
+        prepare_dependencies,
+    )
 
+
+
+def _feature_registry(
+    config_path: Path,
+    *,
+    runtime_action: Any | None = None,
+    runtime_status: Any | None = None,
+    dependency_preparation: Any | None = None,
+) -> Any:
+    from nanobot.config import loader
+    from nanobot.extensions.adapters import (
+        ChannelExtensionAdapter,
+        ChannelExtensionServices,
+        OptionalFeatureExtensionAdapter,
+    )
+    from nanobot.extensions.adapters.channels import prepare_channel_dependencies
+    from nanobot.extensions.registry import ExtensionRegistry
+
+    def mutate_config(mutation: Any) -> Any:
+        config = loader.load_config(config_path)
+        result = mutation(config)
+        loader.save_config(config, config_path)
+        return result
+
+    async def restart_required(_action: str, _channel: str, _instance: str) -> dict[str, Any]:
+        return {"handled": True, "ok": True, "requires_restart": True}
+
+    registry = ExtensionRegistry()
+    registry.register(
+        ChannelExtensionAdapter(
+            lambda: loader.load_config(config_path),
+            runtime_status=runtime_status,
+            services=ChannelExtensionServices(
+                mutate_config=mutate_config,
+                runtime_action=runtime_action or restart_required,
+                prepare_dependencies=dependency_preparation or prepare_channel_dependencies,
+            ),
+        )
+    )
+    registry.register(OptionalFeatureExtensionAdapter(groups_loader=lambda: {}))
+    return registry
+
+
+def _feature_action_payload(
+    registry: Any,
+    name: str,
+    *,
+    instance_id: str | None = None,
+    risk_acknowledged: bool = False,
+) -> dict[str, Any]:
+    from nanobot.webui.nanobot_features_api import resolve_nanobot_feature_target
+
+    target = resolve_nanobot_feature_target(registry.snapshot(), name, instance_id)
+    assert target is not None
+    assert target.revision is not None
+    payload = {
+        "name": name,
+        "extension_id": target.target_id,
+        "expected_revision": target.revision,
+    }
+    if instance_id is not None:
+        payload["instance_id"] = instance_id
+    if risk_acknowledged:
+        payload["risk_acknowledged"] = True
+    return payload
+
+def _connector_target_payload(
+    registry: Any,
+    channel_name: str,
+    instance_id: str,
+) -> dict[str, Any]:
+    from nanobot.webui.nanobot_features_api import resolve_nanobot_feature_target
+
+    target = resolve_nanobot_feature_target(registry.snapshot(), channel_name, instance_id)
+    assert target is not None
+    assert target.revision is not None
+    return {
+        "extension_id": target.target_id,
+        "expected_revision": target.revision,
+        "instance_id": instance_id,
+    }
 
 @pytest.mark.asyncio
 async def test_bootstrap_returns_token_for_localhost(
@@ -1058,7 +1170,23 @@ async def test_nanobot_feature_routes_require_token_and_enable(
 ) -> None:
     config_path = tmp_path / "config.json"
     _stub_matrix_feature(monkeypatch, config_path, channels=["matrix", "websocket"])
-    channel = _ch(bus, session_manager=_seed_session(tmp_path), port=29916)
+    registry = _feature_registry(
+        config_path,
+        runtime_status=lambda: {
+            "websocket": {
+                "owner": "websocket",
+                "instance_id": "default",
+                "state": "running",
+                "running": True,
+            },
+        },
+    )
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=29916,
+    )
     server_task = asyncio.create_task(channel.start())
     try:
         deny = await _http_get("http://127.0.0.1:29916/api/settings/nanobot-features")
@@ -1073,37 +1201,60 @@ async def test_nanobot_feature_routes_require_token_and_enable(
         )
         assert catalog.status_code == 200
         features = {feature["name"]: feature for feature in catalog.json()["features"]}
-        assert features["matrix"]["status"] == "not_enabled"
+        matrix = features["matrix"]
+        assert matrix["status"] == "not_enabled"
+        assert matrix["runtime_status"] == "stopped"
+        assert matrix["action_target_id"] == "ext:channel_package:matrix/channel:default"
+        assert isinstance(matrix["action_target_revision"], str)
         assert features["websocket"]["enabled"] is True
         assert features["websocket"]["ready"] is True
 
         enabled = await _webui_mutate(
             channel,
             "settings.feature.enable",
-            {"name": "matrix"},
+            {
+                "name": "matrix",
+                "extension_id": matrix["action_target_id"],
+                "expected_revision": matrix["action_target_revision"],
+                "risk_acknowledged": True,
+            },
         )
         assert enabled.status_code == 200
         body = enabled.json()
-        assert body["last_action"]["message"] == "Enabled channel 'matrix'"
+        assert body["last_action"]["message"] == "Channel action completed."
+        assert body["enabled_count"] == sum(
+            feature["type"] == "channel" and feature["running"]
+            or feature["type"] == "feature" and feature["enabled"]
+            for feature in body["features"]
+        )
+        updated_features = {feature["name"]: feature for feature in body["features"]}
         assert body["restart_required_sections"] == ["runtime"]
 
         disabled_websocket = await _webui_mutate(
             channel,
             "settings.feature.disable",
-            {"name": "websocket"},
+            {
+                "name": "websocket",
+                "extension_id": features["websocket"]["action_target_id"],
+                "expected_revision": features["websocket"]["action_target_revision"],
+            },
         )
         assert disabled_websocket.status_code == 400
-        assert "cannot be disabled from WebUI" in disabled_websocket.text
+        assert "extension action is not supported" in disabled_websocket.text
         assert "websocket" not in json.loads(config_path.read_text(encoding="utf-8"))["channels"]
 
         disabled = await _webui_mutate(
             channel,
             "settings.feature.disable",
-            {"name": "matrix"},
+            {
+                "name": "matrix",
+                "extension_id": updated_features["matrix"]["action_target_id"],
+                "expected_revision": updated_features["matrix"]["action_target_revision"],
+            },
         )
         assert disabled.status_code == 200
         body = disabled.json()
-        assert body["last_action"]["message"] == "Disabled channel 'matrix'"
+        assert body["last_action"]["message"] == "Channel action completed."
         assert body["restart_required_sections"] == ["runtime"]
         assert json.loads(config_path.read_text(encoding="utf-8"))["channels"]["matrix"][
             "enabled"
@@ -1125,11 +1276,9 @@ async def test_nanobot_feature_route_reports_live_channel_failure(
         encoding="utf-8",
     )
     _stub_matrix_feature(monkeypatch, config_path, channels=["matrix", "websocket"])
-    channel = _ch(
-        bus,
-        session_manager=_seed_session(tmp_path),
-        port=29946,
-        channel_runtime_status=lambda: {
+    registry = _feature_registry(
+        config_path,
+        runtime_status=lambda: {
             "websocket": {
                 "owner": "websocket",
                 "instance_id": "default",
@@ -1144,6 +1293,12 @@ async def test_nanobot_feature_route_reports_live_channel_failure(
                 "error": "Channel failed to start. Check gateway logs.",
             },
         },
+    )
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=29946,
     )
     server_task = asyncio.create_task(channel.start())
     try:
@@ -1160,8 +1315,13 @@ async def test_nanobot_feature_route_reports_live_channel_failure(
         assert matrix["running"] is False
         assert matrix["ready"] is False
         assert matrix["runtime_status"] == "failed"
-        assert matrix["runtime_error"] == "Channel failed to start. Check gateway logs."
-        assert body["enabled_count"] == 1
+        assert matrix["status"] == "failed"
+        assert matrix["runtime_error"] == "Channel runtime failed. Check gateway logs."
+        assert body["enabled_count"] == sum(
+            feature["type"] == "channel" and feature["running"]
+            or feature["type"] == "feature" and feature["enabled"]
+            for feature in body["features"]
+        )
     finally:
         await channel.stop()
         await server_task
@@ -1198,7 +1358,9 @@ async def test_pairing_routes_require_token_and_approve_or_deny(
     channel = _ch(bus, session_manager=_seed_session(tmp_path), port=_free_port())
     token = channel.gateway.tokens.issue_api_token(300)
 
-    denied_response = await channel.gateway.http.settings_routes.dispatch(
+    # Go through the resolved dispatcher, not settings_routes directly: production
+    # always derives the actor and system-admin facts before the settings domain runs.
+    denied_response = await channel.gateway.http._dispatch_resolved(
         _LOCAL,
         _FakeReq(path="/api/settings/pairing"),
         "/api/settings/pairing",
@@ -1207,7 +1369,7 @@ async def test_pairing_routes_require_token_and_approve_or_deny(
     assert denied_response.status_code == 401
 
     auth = {"Authorization": f"Bearer {token}"}
-    listed = await channel.gateway.http.settings_routes.dispatch(
+    listed = await channel.gateway.http._dispatch_resolved(
         _LOCAL,
         _FakeReq(auth, path="/api/settings/pairing"),
         "/api/settings/pairing",
@@ -1264,11 +1426,17 @@ async def test_nanobot_feature_remote_install_requires_opt_in(
         installed=False,
         install_calls=install_calls,
     )
-    channel = _ch(bus, session_manager=_seed_session(tmp_path), port=_free_port())
+    registry = _feature_registry(config_path)
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=_free_port(),
+    )
     blocked = await _webui_mutate(
         channel,
         "settings.feature.enable",
-        {"name": "matrix"},
+        _feature_action_payload(registry, "matrix", risk_acknowledged=True),
         connection=_REMOTE,
     )
 
@@ -1284,7 +1452,7 @@ async def test_nanobot_feature_remote_install_requires_opt_in(
     allowed = await _webui_mutate(
         channel,
         "settings.feature.enable",
-        {"name": "matrix"},
+        _feature_action_payload(registry, "matrix", risk_acknowledged=True),
         connection=_REMOTE,
     )
 
@@ -1307,11 +1475,17 @@ async def test_nanobot_feature_local_install_allowed_by_default(
         installed=False,
         install_calls=install_calls,
     )
-    channel = _ch(bus, session_manager=_seed_session(tmp_path), port=_free_port())
+    registry = _feature_registry(config_path)
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=_free_port(),
+    )
     response = await _webui_mutate(
         channel,
         "settings.feature.enable",
-        {"name": "matrix"},
+        _feature_action_payload(registry, "matrix", risk_acknowledged=True),
     )
 
     assert response.status_code == 200
@@ -1330,13 +1504,20 @@ async def test_nanobot_feature_channel_action_can_apply_without_restart(
     config_path = tmp_path / "config.json"
     _stub_matrix_feature(monkeypatch, config_path, deps=["matrix-nio>=0.25.2"])
     calls: list[tuple[str, str, str | None]] = []
+    runtime_status: dict[str, dict[str, object]] = {}
 
-    async def channel_feature_action(
+    async def runtime_action(
         action: str,
         name: str,
-        instance_id: str | None,
+        instance_id: str,
     ) -> dict[str, Any]:
         calls.append((action, name, instance_id))
+        runtime_status["matrix"] = {
+            "owner": "matrix",
+            "instance_id": "default",
+            "state": "running",
+            "running": True,
+        }
         return {
             "handled": True,
             "ok": True,
@@ -1344,25 +1525,32 @@ async def test_nanobot_feature_channel_action_can_apply_without_restart(
             "message": "Matrix channel applied without restart.",
         }
 
+    registry = _feature_registry(
+        config_path,
+        runtime_action=runtime_action,
+        runtime_status=lambda: runtime_status,
+    )
     channel = _ch(
         bus,
         session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
         port=_free_port(),
-        channel_feature_action=channel_feature_action,
     )
     response = await _webui_mutate(
         channel,
         "settings.feature.enable",
-        {"name": "matrix"},
+        _feature_action_payload(registry, "matrix"),
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert calls == [("enable", "matrix", None)]
+    assert calls == [("enable", "matrix", "default")]
     assert body["requires_restart"] is False
     assert body["restart_required_sections"] == []
-    assert body["last_action"]["hot_reload"] is True
-    assert body["last_action"]["message"].endswith("Matrix channel applied without restart.")
+    matrix = next(feature for feature in body["features"] if feature["name"] == "matrix")
+    assert matrix["extension_lifecycle"] == "enabled"
+    assert "hot_reload" not in body["last_action"]
+    assert body["last_action"]["message"] == "Channel action completed."
 
 
 @pytest.mark.asyncio
@@ -1380,19 +1568,110 @@ async def test_channel_connect_runtime_import_error_is_not_reported_as_unsupport
         def load_connector() -> BrokenConnector:
             return BrokenConnector()
 
+    config_path = tmp_path / "config.json"
+    _stub_matrix_feature(monkeypatch, config_path)
+    registry = _feature_registry(config_path)
     monkeypatch.setattr(
         "nanobot.webui.settings_routes.load_channel_plugin",
         lambda _name: FakePlugin(),
     )
-    channel = _ch(bus, session_manager=_seed_session(tmp_path), port=_free_port())
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=_free_port(),
+    )
     response = await _webui_mutate(
         channel,
         "settings.channel.connect.start",
-        {"channel": "fake"},
+        {
+            "channel": "matrix",
+            **_connector_target_payload(registry, "matrix", "default"),
+        },
     )
 
     assert response.status_code == 500
-    assert "failed to start fake connection" in response.text
+    assert "channel connection could not be completed" in response.text
+    assert "missing optional sdk" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_uppercase_create_cannot_bypass_victim_channel_authorization(
+    bus: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nanobot.channels.registry import discover_plugins
+    from nanobot.config import loader
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({
+            "channels": {
+                "feishu": {
+                    "instances": [{
+                        "id": "victim",
+                        "name": "victim",
+                        "enabled": False,
+                        "appId": "victim-app",
+                        "appSecret": "victim-secret",
+                    }],
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(loader, "_current_config_path", config_path)
+    monkeypatch.setattr("nanobot.extensions.adapters.channels.discover_plugins", discover_plugins)
+
+    connector_calls = AsyncMock()
+
+    class Connector:
+        async def handle(self, action: str, query: dict[str, list[str]]) -> dict[str, Any]:
+            await connector_calls(action, query)
+            return {"status": "pending"}
+
+    class Plugin:
+        @staticmethod
+        def load_connector() -> Connector:
+            return Connector()
+
+    registry = _feature_registry(config_path)
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=_free_port(),
+    )
+
+    async def non_admin_identity(_request: Any) -> tuple[Any, bool]:
+        user = type("User", (), {"id": "attacker", "default_organization_id": None})()
+        return user, False
+
+    monkeypatch.setattr(channel.gateway.http, "_collaboration_identity", non_admin_identity)
+    monkeypatch.setattr(channel.gateway.http, "_is_system_admin", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        channel.gateway.http,
+        "_can_manage_channel_instance",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "nanobot.webui.settings_routes.load_channel_plugin",
+        lambda _name: Plugin(),
+    )
+
+    response = await _webui_mutate(
+        channel,
+        "settings.channel.connect.start",
+        {
+            "channel": "feishu",
+            "mode": "CREATE",
+            **_connector_target_payload(registry, "feishu", "victim"),
+        },
+    )
+
+    assert response.status_code == 403
+    connector_calls.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1402,12 +1681,14 @@ async def test_feishu_connect_routes_write_config_and_hot_reload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from nanobot.channels.feishu import runtime as feishu_module
+    from nanobot.channels.registry import discover_plugins
     from nanobot.config import loader
     from nanobot.config.schema import Config
-
+    from nanobot.extensions.contracts import ExtensionAction
     config_path = tmp_path / "config.json"
     loader.save_config(Config(), config_path)
     monkeypatch.setattr(loader, "_current_config_path", config_path)
+    monkeypatch.setattr("nanobot.extensions.adapters.channels.discover_plugins", discover_plugins)
     monkeypatch.setattr(feishu_module, "_init_registration", lambda _domain: None)
     monkeypatch.setattr(
         feishu_module,
@@ -1438,68 +1719,106 @@ async def test_feishu_connect_routes_write_config_and_hot_reload(
             "identityFetchedAt": "2026-07-06T00:00:00Z",
         },
     )
+    calls: list[tuple[str, str]] = []
+    install_calls: list[tuple[str, bool]] = []
+    effects: list[str] = []
+    dependencies_installed = [False]
     monkeypatch.setattr(
-        "nanobot.webui.settings_routes.nanobot_features_action",
-        lambda _action, _query, *, allow_install=True, config_path=None: {
-            "features": [{
-                "name": "feishu",
-                "display_name": "Feishu",
-                "type": "channel",
-                "enabled": True,
-                "installed": True,
-                "ready": True,
-                "status": "enabled",
-                "install_supported": True,
-                "requires_restart": True,
-            }],
-            "enabled_count": 1,
-            "requires_restart": True,
-            "last_action": {"ok": True, "message": "Enabled channel 'feishu'", "enabled": True},
-        },
+        "nanobot.extensions.adapters.channels.extra_installed",
+        lambda _name, _dependencies: dependencies_installed[0],
     )
-    calls: list[tuple[str, str, str]] = []
 
-    async def channel_feature_action(action: str, name: str, instance_id: str) -> dict[str, Any]:
-        calls.append((action, name, instance_id))
-        return {
-            "handled": True,
-            "ok": True,
-            "requires_restart": False,
-            "message": "Feishu channel applied without restart.",
-        }
+    def prepare_dependencies(
+        channel_name: str,
+        _dependencies: object,
+        *,
+        allow_install: bool,
+        runner: object = None,
+    ) -> object:
+        from nanobot.optional_features import ChannelDependencyPreparation
 
+        install_calls.append((channel_name, allow_install))
+        effects.append("install")
+        dependencies_installed[0] = True
+        return ChannelDependencyPreparation(ready=True, installed=True)
+
+    async def channel_pairing_action(channel_type: str, instance_id: str) -> None:
+        calls.append((channel_type, instance_id))
+        effects.append("listener")
+
+    registry = _feature_registry(
+        config_path,
+        dependency_preparation=prepare_dependencies,
+    )
+    package = next(package for package in registry.snapshot().packages if package.name == "feishu")
+    assert ExtensionAction.INSTALL in package.actions
     channel = _ch(
         bus,
         session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        channel_pairing_action=channel_pairing_action,
         port=_free_port(),
-        channel_feature_action=channel_feature_action,
     )
+    connector_target = _connector_target_payload(registry, "feishu", "default")
     started = await _webui_mutate(
         channel,
         "settings.channel.connect.start",
-        {"channel": "feishu", "domain": "feishu", "instance_id": "default"},
+        {
+            "channel": "feishu",
+            "name": "wrong-channel-name",
+            "domain": "feishu",
+            **connector_target,
+            "risk_acknowledged": True,
+        },
     )
-
     assert started.status_code == 200
     start_body = started.json()
     assert start_body["status"] == "pending"
     assert start_body["instance_id"] == "default"
     assert start_body["qr_url"].startswith("https://accounts.feishu.cn/")
+    config = loader.load_config(config_path)
+    setattr(config.channels, "feishu", {"enabled": True, "domain": "feishu"})
+    loader.save_config(config, config_path)
+    assert _connector_target_payload(registry, "feishu", "default")[
+        "expected_revision"
+    ] != connector_target["expected_revision"]
+    revision_before_credential_commit = _connector_target_payload(registry, "feishu", "default")[
+        "expected_revision"
+    ]
+
+    wrong_target = await _webui_mutate(
+        channel,
+        "settings.channel.connect.poll",
+        {
+            "channel": "feishu",
+            "session_id": start_body["session_id"],
+            **connector_target,
+            "extension_id": "ext:channel_package:feishu/channel:other",
+        },
+    )
+    assert wrong_target.status_code == 404
 
     polled = await _webui_mutate(
         channel,
         "settings.channel.connect.poll",
-        {"channel": "feishu", "session_id": start_body["session_id"]},
+        {
+            "channel": "feishu",
+            "name": "wrong-channel-name",
+            "session_id": start_body["session_id"],
+            **connector_target,
+        },
     )
-
+    # The session's start-time revision remains authoritative through polling.
     assert polled.status_code == 200
     body = polled.json()
     assert body["status"] == "succeeded"
     assert body["instance_id"] == "default"
     assert "app_secret" not in body
     assert body["pairing_required"] is True
-    assert calls == [("pairing", "feishu", "default")]
+    assert calls == [("feishu", "default")]
+    assert effects == ["install", "listener"]
     assert body["nanobot_features"]["requires_restart"] is False
+    assert install_calls == [("feishu", True)]
     data = json.loads(config_path.read_text(encoding="utf-8"))
     assert data["channels"]["feishu"]["instances"][0]["id"] == "default"
     assert data["channels"]["feishu"]["instances"][0]["appId"] == "cli_app"
@@ -1508,6 +1827,10 @@ async def test_feishu_connect_routes_write_config_and_hot_reload(
     assert data["channels"]["feishu"]["instances"][0]["pairingRequired"] is True
     assert data["channels"]["feishu"]["instances"][0]["displayName"] == "Voraflare Bot"
     assert data["channels"]["feishu"]["instances"][0]["avatarUrl"] == "https://example.com/feishu.png"
+    assert data["channels"]["feishu"]["instances"][0]["_extensionRevision"]
+    assert _connector_target_payload(registry, "feishu", "default")[
+        "expected_revision"
+    ] != revision_before_credential_commit
 
 
 def test_feishu_connect_create_appends_instance(
@@ -1547,15 +1870,24 @@ def test_feishu_connect_create_appends_instance(
             "expire_in": 600,
         },
     )
-    monkeypatch.setattr(
-        feishu_module,
-        "poll_registration_once",
-        lambda *, device_code, domain: {
+    registrations = iter((
+        {
             "status": "succeeded",
             "app_id": "cli_new",
             "app_secret": "new-secret",
             "domain": "feishu",
         },
+        {
+            "status": "succeeded",
+            "app_id": "cli_second",
+            "app_secret": "second-secret",
+            "domain": "feishu",
+        },
+    ))
+    monkeypatch.setattr(
+        feishu_module,
+        "poll_registration_once",
+        lambda *, device_code, domain: next(registrations),
     )
     monkeypatch.setattr(
         feishu_module,
@@ -1582,14 +1914,16 @@ def test_feishu_connect_create_appends_instance(
     assert instances[1]["displayName"] == "Assistant cli_new"
     assert instances[1]["avatarUrl"] == "https://example.com/cli_new.png"
 
-    duplicate_started = store.start(mode="create")
-    duplicate_polled = store.poll(duplicate_started["session_id"])
-    duplicate_instances = json.loads(config_path.read_text(encoding="utf-8"))[
-        "channels"
-    ]["feishu"]["instances"]
+    second_started = store.start(mode="create")
+    second_polled = store.poll(second_started["session_id"])
+    instances_after_second_identity = json.loads(config_path.read_text(encoding="utf-8"))["channels"][
+        "feishu"
+    ]["instances"]
 
-    assert duplicate_polled["instance_id"] == polled["instance_id"]
-    assert len(duplicate_instances) == 2
+    assert second_polled["instance_id"] != polled["instance_id"]
+    assert len(instances_after_second_identity) == 3
+    assert instances_after_second_identity[2]["appId"] == "cli_second"
+    assert instances_after_second_identity[2]["displayName"] == "Assistant cli_second"
 
 
 @pytest.mark.asyncio
@@ -1600,48 +1934,21 @@ async def test_channel_configure_route_saves_discord_config_and_hot_reloads(
 ) -> None:
     from nanobot.config import loader
     from nanobot.config.schema import Config
+    from nanobot.optional_features import ChannelDependencyPreparation
 
     config_path = tmp_path / "config.json"
     loader.save_config(Config(), config_path)
     monkeypatch.setattr(loader, "_current_config_path", config_path)
 
-    def fake_feature_action(
-        action: str,
-        query: dict[str, list[str]],
-        *,
-        allow_install: bool = True,
-        config_path: Path | None = None,
-    ) -> dict[str, Any]:
-        assert action == "enable"
-        assert query == {"name": ["discord"], "instance_id": ["default"]}
-        cfg = loader.load_config()
-        section = dict(getattr(cfg.channels, "discord", {}) or {})
-        section["enabled"] = True
-        setattr(cfg.channels, "discord", section)
-        loader.save_config(cfg)
-        return {
-            "features": [{
-                "name": "discord",
-                "display_name": "Discord",
-                "type": "channel",
-                "enabled": True,
-                "installed": True,
-                "ready": True,
-                "status": "enabled",
-                "install_supported": True,
-                "requires_restart": True,
-            }],
-            "enabled_count": 1,
-            "requires_restart": True,
-            "last_action": {"ok": True, "message": "Enabled channel 'discord'", "enabled": True},
-        }
-
-    monkeypatch.setattr("nanobot.webui.settings_routes.nanobot_features_action", fake_feature_action)
+    monkeypatch.setattr(
+        "nanobot.extensions.adapters.channels.extra_installed",
+        lambda _name, _deps: True,
+    )
     calls: list[tuple[str, str, str]] = []
 
-    async def channel_feature_action(action: str, name: str, instance_id: str) -> dict[str, Any]:
+    async def runtime_action(action: str, name: str, instance_id: str) -> dict[str, Any]:
         calls.append((action, name, instance_id))
-        cfg = loader.load_config()
+        cfg = loader.load_config(config_path)
         assert getattr(cfg.channels, "discord")["token"] == "discord-token"
         return {
             "handled": True,
@@ -1650,17 +1957,22 @@ async def test_channel_configure_route_saves_discord_config_and_hot_reloads(
             "message": "Discord channel applied without restart.",
         }
 
+    registry = _feature_registry(
+        config_path,
+        runtime_action=runtime_action,
+        dependency_preparation=lambda *_args, **_kwargs: ChannelDependencyPreparation(ready=True),
+    )
     channel = _ch(
         bus,
         session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
         port=_free_port(),
-        channel_feature_action=channel_feature_action,
     )
     response = await _webui_mutate(
         channel,
         "settings.channel.configure",
         {
-            "name": "discord",
+            **_feature_action_payload(registry, "discord"),
             "enable": True,
             "values": {
                 "channels.discord.token": "discord-token",
@@ -1678,7 +1990,12 @@ async def test_channel_configure_route_saves_discord_config_and_hot_reloads(
     assert calls == [("enable", "discord", "default")]
     assert body["nanobot_features"]["requires_restart"] is False
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    assert data["channels"]["discord"] == {
+    discord = data["channels"]["discord"]
+    revision_marker = discord.pop("_extensionRevision")
+
+    assert isinstance(revision_marker, str)
+    assert revision_marker
+    assert discord == {
         "token": "discord-token",
         "allowChannels": ["123", "456"],
         "groupPolicy": "open",
@@ -1712,12 +2029,22 @@ async def test_channel_configure_route_preserves_existing_channel_values(
     loader.save_config(config, config_path)
     monkeypatch.setattr(loader, "_current_config_path", config_path)
 
-    channel = _ch(bus, session_manager=_seed_session(tmp_path), port=_free_port())
+    monkeypatch.setattr(
+        "nanobot.extensions.adapters.channels.extra_installed",
+        lambda _name, _deps: True,
+    )
+    registry = _feature_registry(config_path)
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=_free_port(),
+    )
     response = await _webui_mutate(
         channel,
         "settings.channel.configure",
         {
-            "name": "discord",
+            **_feature_action_payload(registry, "discord"),
             "values": {
                 "channels.discord.token": "",
                 "channels.discord.allowChannels": "new-channel",
@@ -1736,7 +2063,12 @@ async def test_channel_configure_route_preserves_existing_channel_values(
     assert discord["configured"] is True
     assert discord["config_values"]["channels.discord.allowChannels"] == "new-channel"
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    assert data["channels"]["discord"] == {
+    saved_discord = data["channels"]["discord"]
+    revision_marker = saved_discord.pop("_extensionRevision")
+
+    assert isinstance(revision_marker, str)
+    assert revision_marker
+    assert saved_discord == {
         "enabled": True,
         "token": "old-discord-token",
         "allowChannels": ["new-channel"],
@@ -1770,12 +2102,19 @@ async def test_channel_configure_route_saves_matrix_device_id_without_replacing_
     loader.save_config(config, config_path)
     monkeypatch.setattr(loader, "_current_config_path", config_path)
 
-    channel = _ch(bus, session_manager=_seed_session(tmp_path), port=_free_port())
+    _stub_matrix_feature(monkeypatch, config_path)
+    registry = _feature_registry(config_path)
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=_free_port(),
+    )
     response = await _webui_mutate(
         channel,
         "settings.channel.configure",
         {
-            "name": "matrix",
+            **_feature_action_payload(registry, "matrix"),
             "values": {
                 "channels.matrix.accessToken": "",
                 "channels.matrix.deviceId": "DEVICE-ID",
@@ -1802,12 +2141,22 @@ async def test_channel_configure_route_saves_mattermost_setup(
     loader.save_config(Config(), config_path)
     monkeypatch.setattr(loader, "_current_config_path", config_path)
 
-    channel = _ch(bus, session_manager=_seed_session(tmp_path), port=_free_port())
+    monkeypatch.setattr(
+        "nanobot.extensions.adapters.channels.extra_installed",
+        lambda _name, _deps: True,
+    )
+    registry = _feature_registry(config_path)
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=_free_port(),
+    )
     response = await _webui_mutate(
         channel,
         "settings.channel.configure",
         {
-            "name": "mattermost",
+            **_feature_action_payload(registry, "mattermost"),
             "values": {
                 "channels.mattermost.serverUrl": "https://chat.example.com",
                 "channels.mattermost.token": "mattermost-token",
@@ -1818,7 +2167,12 @@ async def test_channel_configure_route_saves_mattermost_setup(
 
     assert response.status_code == 200
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    assert data["channels"]["mattermost"] == {
+    mattermost = data["channels"]["mattermost"]
+    revision_marker = mattermost.pop("_extensionRevision")
+
+    assert isinstance(revision_marker, str)
+    assert revision_marker
+    assert mattermost == {
         "serverUrl": "https://chat.example.com",
         "token": "mattermost-token",
         "teamId": "platform",
@@ -1840,7 +2194,13 @@ async def test_nanobot_feature_loopback_reverse_proxy_install_requires_opt_in(
         installed=False,
         install_calls=install_calls,
     )
-    channel = _ch(bus, session_manager=_seed_session(tmp_path), port=_free_port())
+    registry = _feature_registry(config_path)
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=_free_port(),
+    )
     forwarded_headers = {
         "Host": "nanobot.example",
         "X-Forwarded-For": "203.0.113.42",
@@ -1848,7 +2208,7 @@ async def test_nanobot_feature_loopback_reverse_proxy_install_requires_opt_in(
     blocked = await _webui_mutate(
         channel,
         "settings.feature.enable",
-        {"name": "matrix"},
+        _feature_action_payload(registry, "matrix", risk_acknowledged=True),
         headers=forwarded_headers,
     )
 
@@ -1863,7 +2223,7 @@ async def test_nanobot_feature_loopback_reverse_proxy_install_requires_opt_in(
     allowed = await _webui_mutate(
         channel,
         "settings.feature.enable",
-        {"name": "matrix"},
+        _feature_action_payload(registry, "matrix", risk_acknowledged=True),
         headers=forwarded_headers,
     )
 
@@ -1886,11 +2246,17 @@ async def test_nanobot_feature_remote_enable_without_install_is_allowed(
         installed=True,
         install_calls=install_calls,
     )
-    channel = _ch(bus, session_manager=_seed_session(tmp_path), port=_free_port())
+    registry = _feature_registry(config_path)
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=_free_port(),
+    )
     response = await _webui_mutate(
         channel,
         "settings.feature.enable",
-        {"name": "matrix"},
+        _feature_action_payload(registry, "matrix"),
         connection=_REMOTE,
     )
 
@@ -1914,11 +2280,17 @@ async def test_nanobot_feature_remote_disable_does_not_need_install_policy(
     )
     _stub_matrix_feature(monkeypatch, config_path, deps=["matrix-nio>=0.25.2"], installed=False)
 
-    channel = _ch(bus, session_manager=_seed_session(tmp_path), port=_free_port())
+    registry = _feature_registry(config_path)
+    channel = _ch(
+        bus,
+        session_manager=_seed_session(tmp_path),
+        extension_registry=registry,
+        port=_free_port(),
+    )
     response = await _webui_mutate(
         channel,
         "settings.feature.disable",
-        {"name": "matrix"},
+        _feature_action_payload(registry, "matrix"),
         connection=_REMOTE,
     )
 

@@ -16,6 +16,8 @@ from nanobot.audio.transcription_registry import (
     transcription_provider_names,
 )
 from nanobot.config.schema import Config
+from nanobot.extensions.contracts import ExtensionAction, ExtensionSource
+from nanobot.extensions.targets import resolve_extension_package_target
 from nanobot.optional_features import (
     OptionalFeatureError,
     extra_installed,
@@ -27,6 +29,9 @@ from nanobot.providers.image_generation import (
 )
 from nanobot.providers.registry import find_by_name
 from nanobot.security.network import is_loopback_host
+from nanobot.webui.nanobot_features_api import (
+    execute_nanobot_extension_action,
+)
 from nanobot.webui.settings_contracts import (
     QueryParams,
     SettingsRequest,
@@ -58,7 +63,6 @@ class CapabilitySettingsOperations:
     update_image: SettingsOperation
     update_transcription: SettingsOperation
     update_network: SettingsOperation
-    nanobot_features_action: SettingsOperation
     api_runtime: Callable[[], ApiRuntime]
     reload_image: Callable[[], Awaitable[dict[str, Any]]]
 
@@ -618,11 +622,13 @@ def api_service_payload(
         "api_key_hint": masked_api_secret(config.api.api_key),
         "endpoint": f"http://{connect_host}:{config.api.port}/v1",
         "command": "nanobot serve",
-        "log_path": str(status.log_path),
     }
     if last_action:
         payload["last_action"] = last_action
     return payload
+
+
+_PUBLIC_CAPABILITY_ACTIONS = frozenset({"api-status"})
 
 
 class CapabilitySettingsHandler:
@@ -638,6 +644,15 @@ class CapabilitySettingsHandler:
         request: SettingsRequest,
         operations: CapabilitySettingsOperations,
     ) -> SettingsRouteResult:
+        # Every capability command writes host-wide configuration, so the domain is
+        # closed by default: only the actions listed above stay readable to members.
+        if action not in _PUBLIC_CAPABILITY_ACTIONS and (
+            request.system_admin is not True
+            or not (request.actor_user_id or "").strip()
+        ):
+            return SettingsRouteResult.failure(
+                403, "System administrator access is required"
+            )
         if action == "api-status":
             return SettingsRouteResult.success(
                 api_service_payload(self.settings, operations.api_runtime())
@@ -645,9 +660,14 @@ class CapabilitySettingsHandler:
         if action == "api-start":
             return await self._start_api(request, operations)
         if action == "api-stop":
-            return await self._stop_api(operations)
+            return await self._stop_api(request, operations)
 
         mutation = {
+            "api-update": (
+                operations.update_api,
+                "runtime",
+                False,
+            ),
             "web-search-update": (
                 operations.update_web_search,
                 "browser",
@@ -720,6 +740,10 @@ class CapabilitySettingsHandler:
         request: SettingsRequest,
         operations: CapabilitySettingsOperations,
     ) -> SettingsRouteResult:
+        if request.system_admin is not True or not request.actor_user_id:
+            return SettingsRouteResult.failure(
+                403, "System administrator access is required"
+            )
         api_key = (request.payload or {}).get("api_key")
         if api_key is not None and not isinstance(api_key, str):
             return SettingsRouteResult.failure(
@@ -727,13 +751,42 @@ class CapabilitySettingsHandler:
                 "API service API key must be a string",
             )
         try:
-            await asyncio.to_thread(
-                self.settings.mutate,
-                operations.nanobot_features_action,
-                "enable",
-                {"name": ["api"]},
-                allow_install=self._allow_feature_package_install(request),
+            registry = self.settings.extensions
+            if registry is None:
+                raise OptionalFeatureError("extension registry is unavailable", status=503)
+            target = resolve_extension_package_target(
+                registry.snapshot(), "api", source=ExtensionSource.OPTIONAL_FEATURE
             )
+            if target is None or target.revision is None:
+                raise OptionalFeatureError("API extension is unavailable", status=503)
+            extension_id = (query_first(request.query, "extension_id") or "").strip()
+            revision = (query_first(request.query, "expected_revision") or "").strip()
+            if target.target_id != extension_id:
+                raise OptionalFeatureError(
+                    "extension action target is unavailable", status=404
+                )
+            if not revision or target.revision != revision:
+                raise OptionalFeatureError("extension action revision is stale", status=409)
+            acknowledged = (
+                query_first(request.query, "risk_acknowledged") or ""
+            ).strip().lower() in {"1", "true", "yes"}
+            if target.lifecycle.value == "unavailable":
+                install = await execute_nanobot_extension_action(
+                    registry,
+                    action=ExtensionAction.INSTALL,
+                    name="api",
+                    instance_id=None,
+                    extension_id=target.target_id,
+                    expected_revision=target.revision,
+                    risk_acknowledged=acknowledged,
+                    actor_id=request.actor_user_id,
+                    is_system_admin=True,
+                    package_install_allowed=self._allow_feature_package_install(request),
+                    package_target=True,
+                    package_source=ExtensionSource.OPTIONAL_FEATURE,
+                )
+                if not install.ok:
+                    raise OptionalFeatureError("API extension could not be installed", status=400)
             self.settings.mutate(operations.update_api, request.query)
             config = self.settings.config.load()
             runtime = operations.api_runtime()
@@ -758,9 +811,9 @@ class CapabilitySettingsHandler:
                 getattr(exc, "status", 400),
                 getattr(exc, "message", str(exc)),
             )
-        except Exception as exc:
+        except Exception:
             self.logger.exception("failed to start managed API service")
-            return SettingsRouteResult.failure(500, str(exc))
+            return SettingsRouteResult.failure(500, "API service could not be started")
         return SettingsRouteResult.success(
             api_service_payload(
                 self.settings,
@@ -771,14 +824,19 @@ class CapabilitySettingsHandler:
 
     async def _stop_api(
         self,
+        request: SettingsRequest,
         operations: CapabilitySettingsOperations,
     ) -> SettingsRouteResult:
+        if request.system_admin is not True or not request.actor_user_id:
+            return SettingsRouteResult.failure(
+                403, "System administrator access is required"
+            )
         runtime = operations.api_runtime()
         try:
             result = await asyncio.to_thread(runtime.stop)
-        except Exception as exc:
+        except Exception:
             self.logger.exception("failed to stop managed API service")
-            return SettingsRouteResult.failure(500, str(exc))
+            return SettingsRouteResult.failure(500, "API service could not be stopped")
         if not result.ok and result.message != "api_not_running":
             return SettingsRouteResult.failure(
                 500,

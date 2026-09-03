@@ -10,7 +10,6 @@ Also houses shared HTTP utility functions used by both this module and
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import mimetypes
 import re
@@ -443,8 +442,7 @@ class GatewayHTTPHandler:
         local_trigger_store: LocalTriggerStore | None = None,
         cron_pending_job_ids: Callable[[str], set[str]] | None = None,
         local_trigger_pending_ids: Callable[[str], set[str]] | None = None,
-        channel_feature_action: Callable[..., Any] | None = None,
-        channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
+        channel_pairing_action: Callable[[str, str], Any] | None = None,
         mcp_runtime_status: Callable[[], Mapping[str, str]] | None = None,
         mcp_reload: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         skill_state_action: Callable[[set[str]], None] | None = None,
@@ -490,7 +488,7 @@ class GatewayHTTPHandler:
         from nanobot.webui.settings_routes import WebUISettingsRouter
 
         self._capabilities = _rc(runtime_surface, runtime_capabilities_overrides or {})
-        self._channel_feature_action = channel_feature_action
+        self._channel_pairing_action = channel_pairing_action
         self.settings_routes = WebUISettingsRouter(
             settings=settings,
             bus=bus,
@@ -501,8 +499,7 @@ class GatewayHTTPHandler:
             error_response=_http_error,
             runtime_surface=runtime_surface,
             runtime_capabilities=self._capabilities,
-            channel_feature_action=channel_feature_action,
-            channel_runtime_status=channel_runtime_status,
+            channel_pairing_action=channel_pairing_action,
             mcp_runtime_status=mcp_runtime_status,
             mcp_reload=mcp_reload,
             mcp_oauth_redirect_uri=self._mcp_oauth_redirect_uri,
@@ -987,21 +984,20 @@ class GatewayHTTPHandler:
                 connect_match.group(1) in {"poll", "cancel"}
                 or (
                     connect_match.group(1) == "start"
-                    and str(mutation_payload.get("mode", "")).strip().lower() == "create"
+                    and str(mutation_payload.get("mode", "")).strip() == "create"
                 )
             )
         )
-        if (
-            channel_control_path
-            and self.check_api_token(request)
-            and not bool(getattr(request, _SETTINGS_ADMIN_ATTR, False))
-            and not is_user_connect_session_action
+        if channel_control_path and self.check_api_token(request) and not bool(
+            getattr(request, _SETTINGS_ADMIN_ATTR, False)
         ):
-            target = self._channel_control_target(got, mutation_payload)
-            if target is None or not await self._can_manage_channel_instance(
-                request, *target
-            ):
-                return _http_error(403, "System administrator access is required")
+            if is_user_connect_session_action:
+                setattr(request, _SETTINGS_ADMIN_ATTR, True)
+            else:
+                target = self._channel_control_target(got, mutation_payload)
+                if target is None or not await self._can_manage_channel_instance(request, *target):
+                    return _http_error(403, "System administrator access is required")
+                setattr(request, _SETTINGS_ADMIN_ATTR, True)
         if got == "/api/settings/login-security/update":
             return await self._handle_login_security(request, update=True)
 
@@ -1571,33 +1567,105 @@ class GatewayHTTPHandler:
                     {"capability_profile": bot_capability_payload(profile)}
                 )
             if operation == "pairing/create":
+                channel_type = required_string(payload, "channel_type")
+                instance_id = required_string(payload, "instance_id")
+                registry = self.settings.extensions
+                if registry is None:
+                    return _http_error(503, "extension registry is unavailable")
+                from nanobot.extensions.contracts import ExtensionSource
+                from nanobot.extensions.targets import resolve_extension_feature_target
+
+                try:
+                    target = resolve_extension_feature_target(
+                        registry.snapshot(), channel_type, instance_id
+                    )
+                except Exception:
+                    self._log.exception("unable to resolve pairing challenge target")
+                    return _http_error(500, "pairing challenge target is unavailable")
+                if (
+                    target is None
+                    or target.source is not ExtensionSource.CHANNEL_PACKAGE
+                    or not target.revision
+                ):
+                    return _http_error(409, "pairing challenge target is unavailable")
                 challenge, code = await self.collaboration.create_pairing_challenge(
                     user.id,
                     purpose=PairingPurpose(required_string(payload, "purpose")),
                     organization_id=required_string(payload, "organization_id"),
                     bot_id=required_string(payload, "bot_id"),
-                    channel_type=required_string(payload, "channel_type"),
-                    instance_id=required_string(payload, "instance_id"),
+                    channel_type=channel_type,
+                    instance_id=instance_id,
+                    channel_revision=target.revision,
                     project_id=optional_string(payload, "project_id"),
                 )
                 return _http_json_response(
                     {"pairing": pairing_challenge_payload(challenge, code=code)}
                 )
             if operation == "pairing/consume":
-                challenge = await self.collaboration.consume_pairing_challenge(
-                    user.id, required_string(payload, "challenge_id")
+                challenge_id = required_string(payload, "challenge_id")
+                challenge = await self.collaboration.get_pairing_challenge(
+                    user.id, challenge_id
                 )
-                activation: object | None = None
-                if self._channel_feature_action is not None:
-                    activation = self._channel_feature_action(
-                        "activate", challenge.channel_type, challenge.instance_id
+                if challenge is None:
+                    return _http_error(404, "pairing challenge not found")
+                registry = self.settings.extensions
+                if registry is None:
+                    return _http_error(503, "extension registry is unavailable")
+                from nanobot.extensions.contracts import ExtensionAction, ExtensionSource
+                from nanobot.extensions.targets import resolve_extension_feature_target
+                from nanobot.webui.nanobot_features_api import (
+                    execute_nanobot_extension_action,
+                )
+
+                try:
+                    target = resolve_extension_feature_target(
+                        registry.snapshot(), challenge.channel_type, challenge.instance_id
                     )
-                    if inspect.isawaitable(activation):
-                        activation = await activation
+                except Exception:
+                    self._log.exception("unable to resolve pairing challenge target")
+                    return _http_error(500, "pairing challenge target is unavailable")
+                if (
+                    target is None
+                    or target.source is not ExtensionSource.CHANNEL_PACKAGE
+                    or not target.revision
+                ):
+                    return _http_error(409, "pairing challenge target is unavailable")
+                challenge = await self.collaboration.consume_pairing_challenge(
+                    user.id, challenge_id, channel_revision=target.revision
+                )
+                activation: dict[str, object] = {
+                    "ok": False,
+                    "message": "Channel activation could not be completed.",
+                }
+                try:
+                    result = await execute_nanobot_extension_action(
+                        registry,
+                        action=ExtensionAction.ENABLE,
+                        name=challenge.channel_type,
+                        instance_id=challenge.instance_id,
+                        extension_id=target.target_id,
+                        expected_revision=target.revision,
+                        risk_acknowledged=True,
+                        actor_id=user.id,
+                        is_system_admin=True,
+                        package_install_allowed=False,
+                        channel_pairing_completed=True,
+                    )
+                except Exception:
+                    result = None
+                if result is not None and result.ok:
+                    activation = {
+                        "ok": True,
+                        "action": result.action.value,
+                        "package_id": result.package_id,
+                        "target_id": result.target_id,
+                        "lifecycle": result.lifecycle.value if result.lifecycle else None,
+                        "message": result.message,
+                    }
                 return _http_json_response(
                     {
                         "pairing": pairing_challenge_payload(challenge),
-                        **({"channel_activation": activation} if activation is not None else {}),
+                        "channel_activation": activation,
                     }
                 )
             if operation == "project/create":
