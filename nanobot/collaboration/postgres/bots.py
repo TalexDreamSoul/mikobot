@@ -62,8 +62,8 @@ _BOT_SELECT_COLUMNS: LiteralString = (
 )
 _PAIRING_COLUMNS: LiteralString = (
     "id, code_digest, requested_by_user_id, purpose, organization_id, bot_id, project_id, "
-    "channel_type, instance_id, expires_at_ms, verified_at_ms, verified_sender_id, "
-    "consumed_at_ms, created_at_ms"
+    "channel_type, instance_id, channel_revision, expires_at_ms, verified_at_ms, "
+    "verified_sender_id, consumed_at_ms, created_at_ms"
 )
 
 
@@ -590,6 +590,7 @@ class PostgresBotsMixin(PostgresIdentityMixin):
         bot_id: str,
         channel_type: str,
         instance_id: str,
+        channel_revision: str,
         project_id: str | None = None,
         ttl_seconds: int = 600,
     ) -> tuple[PairingChallenge, str]:
@@ -598,6 +599,7 @@ class PostgresBotsMixin(PostgresIdentityMixin):
         bot_id = _identifier(bot_id, "bot_id")
         channel_type = _string(channel_type, "channel_type", limit=128)
         instance_id = _string(instance_id, "instance_id", limit=128)
+        channel_revision = _string(channel_revision, "channel_revision", limit=256)
         project_id = _optional_identifier(project_id, "project_id")
         if isinstance(ttl_seconds, bool) or not 60 <= ttl_seconds <= 900:
             raise ValueError("pairing challenge TTL must be between 60 and 900 seconds")
@@ -637,15 +639,15 @@ class PostgresBotsMixin(PostgresIdentityMixin):
                 f"""
                 INSERT INTO nanobot_collaboration.collaboration_pairing_challenges
                     (id, code_digest, requested_by_user_id, purpose, organization_id,
-                     bot_id, project_id, channel_type, instance_id, expires_at_ms,
-                     verified_at_ms, verified_sender_id, consumed_at_ms, created_at_ms)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, %s)
+                     bot_id, project_id, channel_type, instance_id, channel_revision,
+                     expires_at_ms, verified_at_ms, verified_sender_id, consumed_at_ms, created_at_ms)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, %s)
                 RETURNING {_PAIRING_COLUMNS}
                 """,
                 (
                     self._new_id(), assignment_code_digest(code), actor_user_id,
                     purpose.value, organization_id, bot_id, project_id, channel_type,
-                    instance_id, now + ttl_seconds * 1000, now,
+                    instance_id, channel_revision, now + ttl_seconds * 1000, now,
                 ),
             )
         if row is None:
@@ -671,11 +673,13 @@ class PostgresBotsMixin(PostgresIdentityMixin):
         *,
         channel_type: str,
         instance_id: str,
+        channel_revision: str,
         sender_id: str,
     ) -> PairingChallenge:
         digest = assignment_code_digest(normalize_assignment_code(code))
         channel_type = _string(channel_type, "channel_type", limit=128)
         instance_id = _string(instance_id, "instance_id", limit=128)
+        channel_revision = _string(channel_revision, "channel_revision", limit=256)
         sender_id = _string(sender_id, "sender_id", limit=512)
         channel = runtime_channel_key(channel_type, instance_id)
         async with self._identity_transaction(channel, sender_id) as connection:
@@ -696,10 +700,6 @@ class PostgresBotsMixin(PostgresIdentityMixin):
         challenge = decode_pairing_challenge_row(row)
         if not hmac.compare_digest(challenge.code_digest, digest):
             raise CollaborationNotFoundError("pairing challenge not found or expired")
-        if challenge.verified_at_ms is not None:
-            if challenge.verified_sender_id != sender_id:
-                raise CollaborationConflictError("pairing challenge was verified by another sender")
-            return challenge
         now = self._now_ms()
         async with self._session.transaction(
             challenge.requested_by_user_id,
@@ -714,6 +714,10 @@ class PostgresBotsMixin(PostgresIdentityMixin):
             if locked is None:
                 raise CollaborationNotFoundError("pairing challenge not found")
             current = decode_pairing_challenge_row(locked)
+            if current.channel_revision != channel_revision:
+                raise CollaborationConflictError(
+                    "channel instance changed; create a new pairing challenge"
+                )
             if current.consumed_at_ms is not None or current.expires_at_ms < now:
                 raise CollaborationConflictError("pairing challenge expired")
             if current.verified_at_ms is not None:
@@ -764,10 +768,11 @@ class PostgresBotsMixin(PostgresIdentityMixin):
         return decode_pairing_challenge_row(updated)
 
     async def consume_pairing_challenge(
-        self, actor_user_id: str, challenge_id: str
+        self, actor_user_id: str, challenge_id: str, *, channel_revision: str
     ) -> PairingChallenge:
         actor_user_id = _identifier(actor_user_id, "actor_user_id")
         challenge_id = _identifier(challenge_id, "challenge_id")
+        channel_revision = _string(channel_revision, "channel_revision", limit=256)
         now = self._now_ms()
         async with self._actor_transaction(actor_user_id) as connection:
             row = await self._fetch_one(
@@ -778,6 +783,10 @@ class PostgresBotsMixin(PostgresIdentityMixin):
             if row is None:
                 raise CollaborationNotFoundError("pairing challenge not found")
             challenge = decode_pairing_challenge_row(row)
+            if challenge.channel_revision != channel_revision:
+                raise CollaborationConflictError(
+                    "channel instance changed; create a new pairing challenge"
+                )
             if challenge.requested_by_user_id != actor_user_id:
                 raise CollaborationPermissionError("pairing challenge belongs to another user")
             if challenge.expires_at_ms < now:

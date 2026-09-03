@@ -161,6 +161,7 @@ def decode_pairing_challenge_row(row: Row) -> PairingChallenge:
         project_id=_optional_string(row, "project_id"),
         channel_type=_string(row, "channel_type"),
         instance_id=_string(row, "instance_id"),
+        channel_revision=_string(row, "channel_revision"),
         expires_at_ms=_integer(row, "expires_at_ms"),
         verified_at_ms=_optional_integer(row, "verified_at_ms"),
         verified_sender_id=_optional_string(row, "verified_sender_id"),

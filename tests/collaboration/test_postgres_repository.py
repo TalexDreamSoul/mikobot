@@ -552,46 +552,81 @@ async def test_postgres_pairing_claim_assigns_bot_only_after_exact_verification_
     instance_id = _name("release")
 
     assert await repository.list_bots(member.id, organization_id=organization.id) == []
+    channel_revision = _name("channel-revision")
     claim, claim_code = await repository.create_pairing_challenge(
         owner.id, purpose=PairingPurpose.CLAIM_CHANNEL, organization_id=organization.id,
         bot_id=bot.id, channel_type="weixin", instance_id=instance_id,
+        channel_revision=channel_revision,
     )
     first_sender = _name("owner-sender")
     second_sender = _name("second-sender")
+    with pytest.raises(
+        CollaborationConflictError,
+        match="channel instance changed; create a new pairing challenge",
+    ):
+        await repository.verify_pairing_challenge(
+            claim_code, channel_type="weixin", instance_id=instance_id,
+            channel_revision=_name("stale-channel-revision"), sender_id=first_sender,
+        )
+    assert await repository.resolve_identity(f"weixin.{instance_id}", first_sender) is None
     verified_claim = await repository.verify_pairing_challenge(
-        claim_code, channel_type="weixin", instance_id=instance_id, sender_id=first_sender
+        claim_code, channel_type="weixin", instance_id=instance_id,
+        channel_revision=channel_revision, sender_id=first_sender,
     )
-    assert verified_claim.id == claim.id
+    assert (verified_claim.id, verified_claim.channel_revision) == (claim.id, channel_revision)
     with pytest.raises(CollaborationConflictError, match="another sender"):
         await repository.verify_pairing_challenge(
-            claim_code, channel_type="weixin", instance_id=instance_id, sender_id=second_sender
+            claim_code, channel_type="weixin", instance_id=instance_id,
+            channel_revision=channel_revision, sender_id=second_sender,
         )
     assert (await repository.resolve_identity(f"weixin.{instance_id}", first_sender)).id == owner.id
     assert await repository.resolve_identity(f"weixin.{instance_id}", second_sender) is None
     with pytest.raises(CollaborationNotFoundError, match="not found"):
-        await repository.consume_pairing_challenge(member.id, claim.id)
-    consumed_claim = await repository.consume_pairing_challenge(owner.id, claim.id)
-    assert consumed_claim.consumed_at_ms is not None
+        await repository.consume_pairing_challenge(member.id, claim.id, channel_revision=channel_revision)
+    with pytest.raises(
+        CollaborationConflictError,
+        match="channel instance changed; create a new pairing challenge",
+    ):
+        await repository.consume_pairing_challenge(
+            owner.id, claim.id, channel_revision=_name("stale-channel-revision"),
+        )
+    unconsumed_claim = await repository.get_pairing_challenge(owner.id, claim.id)
+    assert unconsumed_claim is not None and unconsumed_claim.consumed_at_ms is None
+    assert await repository.list_bots(member.id, organization_id=organization.id) == []
+    consumed_claim = await repository.consume_pairing_challenge(
+        owner.id, claim.id, channel_revision=channel_revision,
+    )
+    assert (consumed_claim.consumed_at_ms is not None, consumed_claim.channel_revision) == (True, channel_revision)
 
     competing_bot = await repository.create_bot(owner.id, organization.id, _name("competing-bot"))
     competing_claim, competing_code = await repository.create_pairing_challenge(
         owner.id, purpose=PairingPurpose.CLAIM_CHANNEL, organization_id=organization.id,
         bot_id=competing_bot.id, channel_type="weixin", instance_id=instance_id,
+        channel_revision=channel_revision,
     )
     await repository.verify_pairing_challenge(
-        competing_code, channel_type="weixin", instance_id=instance_id, sender_id=first_sender
+        competing_code, channel_type="weixin", instance_id=instance_id,
+        channel_revision=channel_revision, sender_id=first_sender,
     )
     with pytest.raises(CollaborationConflictError, match="already claimed"):
-        await repository.consume_pairing_challenge(owner.id, competing_claim.id)
+        await repository.consume_pairing_challenge(
+            owner.id, competing_claim.id, channel_revision=channel_revision,
+        )
 
     assignment, assignment_code = await repository.create_pairing_challenge(
         owner.id, purpose=PairingPurpose.ASSIGN_BOT_PROJECT, organization_id=organization.id,
         bot_id=bot.id, project_id=project.id, channel_type="weixin", instance_id=instance_id,
+        channel_revision=channel_revision,
     )
     await repository.verify_pairing_challenge(
-        assignment_code, channel_type="weixin", instance_id=instance_id, sender_id=_name("project-sender")
+        assignment_code, channel_type="weixin", instance_id=instance_id,
+        channel_revision=channel_revision, sender_id=_name("project-sender"),
     )
-    assert (await repository.consume_pairing_challenge(owner.id, assignment.id)).consumed_at_ms is not None
+    assert (
+        await repository.consume_pairing_challenge(
+            owner.id, assignment.id, channel_revision=channel_revision,
+        )
+    ).consumed_at_ms is not None
     updated_owner = await repository.get_user(owner.id)
     assert updated_owner is not None
     assert (updated_owner.default_organization_id, updated_owner.default_project_id, updated_owner.default_bot_id) == (
@@ -657,6 +692,31 @@ async def test_postgres_catalog_separates_runtime_owner_and_nologin_policy_owner
 
     assert table_owners and {row[0] for row in table_owners}.isdisjoint({runtime_role})
     assert policy_owners and all(not row[1] for row in policy_owners)
+
+
+async def test_postgres_pairing_revision_column_and_migration_are_applied(
+    postgres_repository: PostgresRepositoryTestContext,
+) -> None:
+    """The live schema preserves the required bounded pairing revision through migration six."""
+    async with await AsyncConnection.connect(postgres_repository.migration_dsn) as connection:
+        versions = await (
+            await connection.execute(
+                "SELECT version FROM nanobot_collaboration.collaboration_schema_migrations "
+                "WHERE version = 6"
+            )
+        ).fetchall()
+        column = await (
+            await connection.execute(
+                "SELECT is_nullable, character_maximum_length, column_default "
+                "FROM information_schema.columns "
+                "WHERE table_schema = 'nanobot_collaboration' "
+                "AND table_name = 'collaboration_pairing_challenges' "
+                "AND column_name = 'channel_revision'"
+            )
+        ).fetchone()
+
+    assert versions == [(6,)]
+    assert column == ("NO", 256, "'legacy-unbound'::character varying")
 
 
 async def test_postgres_migrations_are_idempotent(postgres_repository: PostgresRepositoryTestContext) -> None:

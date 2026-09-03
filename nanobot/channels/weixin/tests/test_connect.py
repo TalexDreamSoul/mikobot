@@ -9,6 +9,7 @@ import pytest
 from nanobot.channels.connect import ChannelConnectError
 from nanobot.channels.weixin.connect import WeixinConnectStore
 from nanobot.channels.weixin.runtime import WeixinChannel
+from nanobot.config import loader
 from nanobot.config.loader import save_config
 from nanobot.config.schema import Config, _resolve_tool_config_refs
 
@@ -28,6 +29,15 @@ async def test_weixin_connect_store_saves_confirmed_qr_login(
         config_path,
     )
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+    save_calls: list[object] = []
+    poll_base_urls: list[str] = []
+    real_save_config = loader.save_config
+
+    def record_save_config(*args, **kwargs):
+        save_calls.append((args, kwargs))
+        return real_save_config(*args, **kwargs)
+
+    monkeypatch.setattr(loader, "save_config", record_save_config)
 
     async def fake_fetch_qr_code(
         self: WeixinChannel, **_kwargs: Any
@@ -42,7 +52,7 @@ async def test_weixin_connect_store_saves_confirmed_qr_login(
         params: dict[str, Any],
         auth: bool,
     ) -> dict[str, str]:
-        assert base_url == "https://ilinkai.weixin.qq.com"
+        poll_base_urls.append(base_url)
         assert endpoint == "ilink/bot/get_qrcode_status"
         assert params == {"qrcode": "qr-1"}
         assert auth is False
@@ -79,6 +89,26 @@ async def test_weixin_connect_store_saves_confirmed_qr_login(
     assert weixin_cfg.get("stateDir") == str(state_dir)
     assert weixin_cfg.get("enabled") is False
     assert weixin_cfg.get("pairingRequired") is True
+    first_revision = weixin_cfg["_extensionRevision"]
+    assert first_revision
+    assert len(save_calls) == 1
+    assert "wx-token" not in repr(completed)
+    assert "https://weixin.example" not in repr(completed)
+
+    repeated = await store.start(force=True)
+    repeated_completed = await store.poll(repeated["session_id"])
+    assert repeated_completed["status"] == "succeeded"
+    assert "wx-token" not in repr(repeated_completed)
+    assert "https://weixin.example" not in repr(repeated_completed)
+    assert store._sessions == {}
+    assert poll_base_urls == [
+        "https://ilinkai.weixin.qq.com",
+        "https://weixin.example",
+    ]
+
+    refreshed_cfg = json.loads(config_path.read_text(encoding="utf-8"))["channels"]["weixin"]
+    assert refreshed_cfg["_extensionRevision"] != first_revision
+    assert len(save_calls) == 2
 
 
 @pytest.mark.asyncio
@@ -474,3 +504,185 @@ async def test_weixin_connect_store_rejects_existing_binding_without_local_crede
 
     assert completed["status"] == "failed"
     assert "no local credentials" in completed["message"]
+
+
+@pytest.mark.asyncio
+async def test_weixin_connect_start_redacts_upstream_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QR-start diagnostics stay server-side and the opened client is closed."""
+    raw_error = (
+        "upstream errmsg: secret=weixin-token "
+        "https://weixin.example/login /private/config/weixin.json"
+    )
+
+    class FailingStartChannel:
+        connect_base_url = "https://weixin.example"
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def connect_load_state(self) -> bool:
+            return False
+
+        def connect_open_client(self) -> None:
+            return None
+
+        async def connect_fetch_qr_code(self, *, force: bool) -> tuple[str, str]:
+            raise RuntimeError(raw_error)
+
+        async def connect_close_client(self) -> None:
+            self.closed = True
+
+    channel = FailingStartChannel()
+    monkeypatch.setattr(
+        WeixinConnectStore,
+        "_build_channel",
+        staticmethod(lambda _instance_id: channel),
+    )
+    store = WeixinConnectStore()
+
+    with pytest.raises(ChannelConnectError) as error:
+        await store.start()
+
+    assert error.value.status == 502
+    assert str(error.value) == "Unable to start WeChat QR login."
+    assert channel.closed is True
+    assert store._sessions == {}
+    for leaked in (
+        "secret=weixin-token",
+        "upstream errmsg",
+        "https://weixin.example/login",
+        "/private/config",
+    ):
+        assert leaked not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("retryable", "expected_status", "expected_message", "session_retained"),
+    [
+        (True, "pending", "Waiting for WeChat scan.", True),
+        (False, "failed", "WeChat QR login failed.", False),
+    ],
+)
+async def test_weixin_connect_poll_error_is_safe_and_preserves_retry_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    retryable: bool,
+    expected_status: str,
+    expected_message: str,
+    session_retained: bool,
+) -> None:
+    """Polling keeps retryable flows but closes failed ones without exposing SDK errors."""
+    raw_error = (
+        "upstream errmsg: secret=weixin-token "
+        "https://weixin.example/poll /private/config/weixin.json"
+    )
+
+    class FailingPollChannel:
+        connect_base_url = "https://weixin.example"
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def connect_load_state(self) -> bool:
+            return False
+
+        def connect_open_client(self) -> None:
+            return None
+
+        async def connect_fetch_qr_code(self, *, force: bool) -> tuple[str, str]:
+            return "poll-qr", "https://qr.example/poll"
+
+        async def connect_poll_qr_code(self, **_kwargs: Any) -> dict[str, str]:
+            raise RuntimeError(raw_error)
+
+        def connect_poll_error_is_retryable(self, _error: Exception) -> bool:
+            return retryable
+
+        async def connect_close_client(self) -> None:
+            self.closed = True
+
+    channel = FailingPollChannel()
+    monkeypatch.setattr(
+        WeixinConnectStore,
+        "_build_channel",
+        staticmethod(lambda _instance_id: channel),
+    )
+    store = WeixinConnectStore()
+    started = await store.start(actor_user_id="owner-user")
+
+    result = await store.poll(started["session_id"], actor_user_id="owner-user")
+
+    assert result["status"] == expected_status
+    assert result["message"] == expected_message
+    assert (started["session_id"] in store._sessions) is session_retained
+    assert channel.closed is not session_retained
+    for leaked in (
+        "secret=weixin-token",
+        "upstream errmsg",
+        "https://weixin.example/poll",
+        "/private/config",
+    ):
+        assert leaked not in repr(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("poll_status", ["verify_code_blocked", "expired"])
+async def test_weixin_connect_qr_refresh_redacts_upstream_error(
+    monkeypatch: pytest.MonkeyPatch,
+    poll_status: str,
+) -> None:
+    """Both QR-refresh transitions close their flow with the same safe public error."""
+    raw_error = (
+        "upstream errmsg: secret=weixin-token "
+        "https://weixin.example/refresh /private/config/weixin.json"
+    )
+
+    class FailingRefreshChannel:
+        connect_base_url = "https://weixin.example"
+
+        def __init__(self) -> None:
+            self.closed = False
+            self.fetches = 0
+
+        def connect_load_state(self) -> bool:
+            return False
+
+        def connect_open_client(self) -> None:
+            return None
+
+        async def connect_fetch_qr_code(self, *, force: bool) -> tuple[str, str]:
+            self.fetches += 1
+            if self.fetches == 1:
+                return "refresh-qr", "https://qr.example/refresh"
+            raise RuntimeError(raw_error)
+
+        async def connect_poll_qr_code(self, **_kwargs: Any) -> dict[str, str]:
+            return {"status": poll_status}
+
+        async def connect_close_client(self) -> None:
+            self.closed = True
+
+    channel = FailingRefreshChannel()
+    monkeypatch.setattr(
+        WeixinConnectStore,
+        "_build_channel",
+        staticmethod(lambda _instance_id: channel),
+    )
+    store = WeixinConnectStore()
+    started = await store.start()
+
+    result = await store.poll(started["session_id"])
+
+    assert result["status"] == "failed"
+    assert result["message"] == "Could not refresh WeChat QR code."
+    assert started["session_id"] not in store._sessions
+    assert channel.closed is True
+    for leaked in (
+        "secret=weixin-token",
+        "upstream errmsg",
+        "https://weixin.example/refresh",
+        "/private/config",
+    ):
+        assert leaked not in repr(result)

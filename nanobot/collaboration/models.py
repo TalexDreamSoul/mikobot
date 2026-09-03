@@ -210,6 +210,7 @@ class PairingChallenge:
     project_id: str | None
     channel_type: str
     instance_id: str
+    channel_revision: str
     expires_at_ms: int
     verified_at_ms: int | None
     verified_sender_id: str | None

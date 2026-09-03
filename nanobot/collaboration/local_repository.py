@@ -291,13 +291,14 @@ class AsyncLocalCollaborationRepository:
 
     async def create_pairing_challenge(
         self, actor_user_id: str, *, purpose: PairingPurpose, organization_id: str,
-        bot_id: str, channel_type: str, instance_id: str,
+        bot_id: str, channel_type: str, instance_id: str, channel_revision: str,
         project_id: str | None = None, ttl_seconds: int = 600,
     ) -> tuple[PairingChallenge, str]:
         return await asyncio.to_thread(
             self._store.create_pairing_challenge, actor_user_id, purpose=purpose,
             organization_id=organization_id, bot_id=bot_id, channel_type=channel_type,
-            instance_id=instance_id, project_id=project_id, ttl_seconds=ttl_seconds,
+            instance_id=instance_id, channel_revision=channel_revision,
+            project_id=project_id, ttl_seconds=ttl_seconds,
         )
 
     async def get_pairing_challenge(
@@ -308,18 +309,20 @@ class AsyncLocalCollaborationRepository:
         )
 
     async def verify_pairing_challenge(
-        self, code: str, *, channel_type: str, instance_id: str, sender_id: str
+        self, code: str, *, channel_type: str, instance_id: str,
+        channel_revision: str, sender_id: str,
     ) -> PairingChallenge:
         return await asyncio.to_thread(
             self._store.verify_pairing_challenge, code, channel_type=channel_type,
-            instance_id=instance_id, sender_id=sender_id,
+            instance_id=instance_id, channel_revision=channel_revision, sender_id=sender_id,
         )
 
     async def consume_pairing_challenge(
-        self, actor_user_id: str, challenge_id: str
+        self, actor_user_id: str, challenge_id: str, *, channel_revision: str
     ) -> PairingChallenge:
         return await asyncio.to_thread(
-            self._store.consume_pairing_challenge, actor_user_id, challenge_id
+            self._store.consume_pairing_challenge, actor_user_id, challenge_id,
+            channel_revision=channel_revision,
         )
 
     async def create_project(

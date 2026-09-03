@@ -13,7 +13,7 @@ SETUP_SPEC = ChannelSetupSpec(
         "baseUrl": field(default="https://ilinkai.weixin.qq.com"),
         "cdnBaseUrl": field(default="https://novac2c.cdn.weixin.qq.com/c2c"),
         "routeTag": field(),
-        "stateDir": field(),
+        "stateDir": field(snapshot=False),
         "pollTimeout": field("int", default=35),
         "sendProgress": field("bool", default=False),
         "sendToolHints": field("bool", default=False),

@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 
+from nanobot.channels.connect import ChannelConnectError
 from nanobot.channels.feishu import runtime as feishu_module
 from nanobot.channels.feishu.runtime import FeishuChannel
 from nanobot.config import loader
@@ -116,7 +117,10 @@ def test_save_registration_result_keeps_credentials_when_identity_fetch_fails(mo
     assert "avatarUrl" not in instance
 
 
-def test_save_registration_result_reuses_existing_app_instance(monkeypatch, tmp_path):
+def test_save_registration_result_rejects_cross_instance_identity_without_writing(
+    monkeypatch, tmp_path
+):
+    """A credential returned for another saved instance must not silently retarget it."""
     config_path = tmp_path / "config.json"
     config = Config()
     config.channels.feishu = {
@@ -135,27 +139,34 @@ def test_save_registration_result_reuses_existing_app_instance(monkeypatch, tmp_
         ]
     }
     loader.save_config(config, config_path)
+    original_config = config_path.read_text(encoding="utf-8")
     monkeypatch.setattr(loader, "_current_config_path", config_path)
     monkeypatch.setattr(feishu_module, "fetch_feishu_app_identity", lambda *_args: {})
+    save_calls: list[object] = []
+    real_save_config = loader.save_config
 
-    effective_id = feishu_module.save_registration_result(
-        {
-            "app_id": "cli_same",
-            "app_secret": "rotated-secret",
-            "domain": "feishu",
-        },
-        instance_id="assistant-new",
-        name="nanobot assistant-new",
-    )
+    def record_save_config(*args, **kwargs):
+        save_calls.append((args, kwargs))
+        return real_save_config(*args, **kwargs)
 
-    data = json.loads(config_path.read_text(encoding="utf-8"))
-    instances = data["channels"]["feishu"]["instances"]
-    assert effective_id == "default"
-    assert len(instances) == 1
-    assert instances[0]["id"] == "default"
-    assert instances[0]["name"] == "nanobot"
-    assert instances[0]["appSecret"] == "rotated-secret"
-    assert instances[0]["allowFrom"] == ["approved-user"]
+    monkeypatch.setattr(loader, "save_config", record_save_config)
+
+    with pytest.raises(ChannelConnectError) as error:
+        feishu_module.save_registration_result(
+            {
+                "app_id": "cli_same",
+                "app_secret": "rotated-secret",
+                "domain": "feishu",
+            },
+            instance_id="assistant-new",
+            name="nanobot assistant-new",
+        )
+
+    assert error.value.status == 409
+    assert str(error.value) == "Feishu application is already connected to another instance."
+    assert "cli_same" not in str(error.value)
+    assert config_path.read_text(encoding="utf-8") == original_config
+    assert save_calls == []
 
 
 def test_save_registration_result_resets_access_when_instance_app_changes(
@@ -228,6 +239,7 @@ def test_save_registration_result_keeps_access_when_only_secret_rotates(
                 "appSecret": "old-secret",
                 "domain": "feishu",
                 "identityKey": "feishu:cli_same",
+                "_extensionRevision": "before-secret-rotation",
                 "allowFrom": ["old-open-id"],
             }
         ]
@@ -236,12 +248,20 @@ def test_save_registration_result_keeps_access_when_only_secret_rotates(
     monkeypatch.setattr(loader, "_current_config_path", config_path)
     monkeypatch.setattr(pairing_store, "_store_path", lambda: pairing_path)
     monkeypatch.setattr(feishu_module, "fetch_feishu_app_identity", lambda *_args: {})
+    save_calls: list[object] = []
+    real_save_config = loader.save_config
+
+    def record_save_config(*args, **kwargs):
+        save_calls.append((args, kwargs))
+        return real_save_config(*args, **kwargs)
+
+    monkeypatch.setattr(loader, "save_config", record_save_config)
 
     approved_code = pairing_store.generate_code("feishu.assistant-test", "paired-user")
     pairing_store.approve_code(approved_code)
     pending_code = pairing_store.generate_code("feishu.assistant-test", "pending-user")
 
-    feishu_module.save_registration_result(
+    effective_id = feishu_module.save_registration_result(
         {
             "app_id": "cli_same",
             "app_secret": "new-secret",
@@ -256,6 +276,9 @@ def test_save_registration_result_keeps_access_when_only_secret_rotates(
     assert instance["appSecret"] == "new-secret"
     assert instance["identityKey"] == "feishu:cli_same"
     assert instance["allowFrom"] == ["old-open-id"]
+    assert effective_id == "assistant-test"
+    assert instance["_extensionRevision"] != "before-secret-rotation"
+    assert len(save_calls) == 1
     assert pairing_store.is_approved("feishu.assistant-test", "paired-user") is True
     assert pairing_store.approve_code(pending_code) == (
         "feishu.assistant-test",

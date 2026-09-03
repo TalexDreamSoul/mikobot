@@ -635,6 +635,7 @@ CREATE TABLE IF NOT EXISTS nanobot_collaboration.collaboration_pairing_challenge
     project_id varchar(128),
     channel_type varchar(128) NOT NULL,
     instance_id varchar(128) NOT NULL,
+    channel_revision varchar(256) NOT NULL DEFAULT 'legacy-unbound',
     expires_at_ms bigint NOT NULL CHECK (expires_at_ms >= 0),
     verified_at_ms bigint,
     verified_sender_id varchar(512),
@@ -911,6 +912,11 @@ REVOKE CREATE ON SCHEMA nanobot_collaboration
     FROM nanobot_collaboration_policy_owner;
 """
 
+MIGRATION_6_DDL = r"""
+ALTER TABLE nanobot_collaboration.collaboration_pairing_challenges
+    ADD COLUMN IF NOT EXISTS channel_revision varchar(256) NOT NULL DEFAULT 'legacy-unbound';
+"""
+
 
 MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, INITIAL_SCHEMA_DDL),
@@ -918,4 +924,5 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (3, MIGRATION_3_DDL),
     (4, MIGRATION_4_DDL),
     (5, MIGRATION_5_DDL),
+    (6, MIGRATION_6_DDL)
 )

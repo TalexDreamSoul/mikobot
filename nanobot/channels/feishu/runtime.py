@@ -29,7 +29,12 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from nanobot.channels.contracts import ChannelInstanceSpec
+from nanobot.channels.connect import ChannelConnectError
+from nanobot.channels.contracts import (
+    CHANNEL_INSTANCE_REVISION_FIELD,
+    ChannelInstanceSpec,
+    new_channel_instance_revision,
+)
 from nanobot.channels.feishu.config import FeishuConfig, feishu_default_config
 from nanobot.channels.feishu.instances import (
     DEFAULT_INSTANCE_ID,
@@ -731,8 +736,11 @@ def save_registration_result(
     *,
     instance_id: str = DEFAULT_INSTANCE_ID,
     name: str | None = None,
+    mode: str = "replace",
 ) -> str:
     """Persist a successful Feishu/Lark registration result to config.json."""
+    if mode not in {"create", "replace"}:
+        raise ChannelConnectError("invalid Feishu connect mode", status=400)
     from nanobot.config.loader import get_config_path, load_config, save_config
 
     config_path = get_config_path()
@@ -753,11 +761,15 @@ def save_registration_result(
         feishu_cfg = _as_json_object(getattr(full_config.channels, "feishu", None)) or {}
         defaults = feishu_default_config()
         existing = _saved_feishu_instance_for_identity(feishu_cfg, defaults, app_id, domain)
-        effective_instance_id = existing.instance_id if existing is not None else instance_id
+        if existing is not None and existing.instance_id != instance_id:
+            raise ChannelConnectError(
+                "Feishu application is already connected to another instance.",
+                status=409,
+            )
         previous_identity_key = _saved_feishu_instance_identity_key(
             feishu_cfg,
             defaults,
-            effective_instance_id,
+            instance_id,
         )
         next_identity_key = feishu_app_identity_key(app_id, domain)
         identity_changed = bool(
@@ -765,15 +777,11 @@ def save_registration_result(
         )
         default_name = (
             "nanobot"
-            if effective_instance_id == DEFAULT_INSTANCE_ID
-            else f"nanobot {effective_instance_id}"
+            if instance_id == DEFAULT_INSTANCE_ID
+            else f"nanobot {instance_id}"
         )
         existing_name = existing.config.get("name") if existing is not None else None
-        saved_name = (
-            existing_name
-            if existing is not None and existing.instance_id != instance_id
-            else name
-        )
+        saved_name = name if existing is None or name else existing_name
         # Durable credentials stay disabled; the manager may run a transient
         # pairing-only listener until the Pair Code is consumed.
         values: dict[str, Any] = {
@@ -785,20 +793,21 @@ def save_registration_result(
             "enabled": False,
             "pairingRequired": True,
             **identity,
+            CHANNEL_INSTANCE_REVISION_FIELD: new_channel_instance_revision(),
         }
         if identity_changed:
             values["allowFrom"] = []
             values["allow_from"] = []
-            clear_channel(runtime_channel_name("feishu", effective_instance_id))
+            clear_channel(runtime_channel_name("feishu", instance_id))
         feishu_cfg = upsert_feishu_instance(
             feishu_cfg,
             defaults,
-            effective_instance_id,
+            instance_id,
             values,
         )
         setattr(full_config.channels, "feishu", feishu_cfg)
         save_config(full_config, config_path)
-        return effective_instance_id
+        return instance_id
 
 
 def refresh_saved_feishu_identities(

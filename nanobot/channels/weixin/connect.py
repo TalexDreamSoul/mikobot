@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from loguru import logger
+
 from nanobot.channels.connect import ChannelConnectError, QueryParams, query_first
 from nanobot.config.loader import load_config
 
@@ -31,7 +33,6 @@ class WeixinConnectSession:
     created_wall: float
     deadline: float
     actor_user_id: str | None = None
-    last_error: str | None = None
 
 
 class WeixinConnectStore:
@@ -53,7 +54,9 @@ class WeixinConnectStore:
             force = (query_first(query, "force") or "").strip().lower() in {
                 "1", "true", "yes",
             }
-            mode = (query_first(query, "mode") or "replace").strip().lower()
+            mode = query_first(query, "mode")
+            if mode is None:
+                mode = "replace"
             if mode not in {"create", "replace"}:
                 raise ChannelConnectError("invalid WeChat connect mode", status=400)
             raw_instance_id = (
@@ -63,8 +66,8 @@ class WeixinConnectStore:
                 raw_instance_id = f"wechat-{secrets.token_hex(3)}"
             try:
                 instance_id = validate_instance_id(raw_instance_id)
-            except ValueError as exc:
-                raise ChannelConnectError(str(exc), status=400) from exc
+            except ValueError:
+                raise ChannelConnectError("invalid WeChat connect instance", status=400) from None
             return await self.start(
                 instance_id=instance_id,
                 force=force,
@@ -82,7 +85,7 @@ class WeixinConnectStore:
             )
         if action == "cancel":
             return await self.cancel(session_id, actor_user_id=actor_user_id)
-        raise ChannelConnectError(f"unsupported WeChat connect action: {action}", status=404)
+        raise ChannelConnectError("unsupported WeChat connect action", status=404)
 
     async def start(
         self,
@@ -111,28 +114,30 @@ class WeixinConnectStore:
                     status=429,
                 )
 
-            channel = self._build_channel(instance_id)
-            if force:
-                channel.connect_reset_pending_credentials()
-            elif channel.connect_load_state():
-                return {
-                    "session_id": "",
-                    "instance_id": instance_id,
-                    "status": "succeeded",
-                    "pairing_required": True,
-                    "message": "WeChat is already connected.",
-                    "interval_ms": 2000,
-                }
-
-            channel.connect_open_client()
+            channel: WeixinChannel | None = None
             try:
+                channel = self._build_channel(instance_id)
+                if force:
+                    channel.connect_reset_pending_credentials()
+                elif channel.connect_load_state():
+                    return {
+                        "session_id": "",
+                        "instance_id": instance_id,
+                        "status": "succeeded",
+                        "pairing_required": True,
+                        "message": "WeChat is already connected.",
+                        "interval_ms": 2000,
+                    }
+
+                channel.connect_open_client()
                 qrcode_id, qr_url = await channel.connect_fetch_qr_code(force=force)
-            except Exception as exc:
-                await self._close_channel(channel)
+            except Exception:
+                logger.exception("Failed to start WeChat QR login")
+                if channel is not None:
+                    await self._close_channel(channel)
                 raise ChannelConnectError(
-                    f"Unable to start WeChat QR login: {exc}",
-                    status=502,
-                ) from exc
+                    "Unable to start WeChat QR login.", status=502
+                ) from None
 
             session_id = secrets.token_urlsafe(18)
             now_wall = time.time()
@@ -173,15 +178,20 @@ class WeixinConnectStore:
                 verify_code=verify_code,
             )
         except Exception as exc:
-            if session.channel.connect_poll_error_is_retryable(exc):
-                session.last_error = str(exc)
+            logger.exception("WeChat QR login poll failed")
+            try:
+                retryable = session.channel.connect_poll_error_is_retryable(exc)
+            except Exception:
+                logger.exception("Failed to classify WeChat QR login poll error")
+                retryable = False
+            if retryable:
                 return self._pending_payload(session)
             self._sessions.pop(session_id, None)
             await self._close_channel(session.channel)
             return {
                 "session_id": session_id,
                 "status": "failed",
-                "message": f"WeChat QR login failed: {exc}",
+                "message": "WeChat QR login failed.",
             }
 
         status_payload = status_data
@@ -205,7 +215,17 @@ class WeixinConnectStore:
                     "message": "WeChat confirmed the scan but returned no token.",
                 }
             base_url = str(status_payload.get("baseurl", "") or "")
-            session.channel.connect_commit_account(token=token, base_url=base_url)
+            try:
+                session.channel.connect_commit_account(token=token, base_url=base_url)
+            except Exception:
+                logger.exception("Failed to save WeChat QR login")
+                self._sessions.pop(session_id, None)
+                await self._close_channel(session.channel)
+                return {
+                    "session_id": session_id,
+                    "status": "failed",
+                    "message": "WeChat QR login failed.",
+                }
             self._sessions.pop(session_id, None)
             await self._close_channel(session.channel)
             return {
@@ -253,13 +273,14 @@ class WeixinConnectStore:
                 session.qrcode_id, session.qr_url = (
                     await session.channel.connect_fetch_qr_code(force=session.force)
                 )
-            except Exception as exc:
+            except Exception:
+                logger.exception("Failed to refresh WeChat QR code")
                 self._sessions.pop(session_id, None)
                 await self._close_channel(session.channel)
                 return {
                     "session_id": session_id,
                     "status": "failed",
-                    "message": f"Could not refresh WeChat QR code: {exc}",
+                    "message": "Could not refresh WeChat QR code.",
                 }
             session.current_poll_base_url = session.channel.connect_base_url
             return self._pending_payload(
@@ -279,7 +300,12 @@ class WeixinConnectStore:
                         "Start again and scan with the account you want to connect."
                     ),
                 }
-            if not session.channel.connect_load_state():
+            try:
+                local_state_present = session.channel.connect_load_state()
+            except Exception:
+                logger.exception("Failed to load WeChat QR login state")
+                local_state_present = False
+            if not local_state_present:
                 self._sessions.pop(session_id, None)
                 await self._close_channel(session.channel)
                 return {
@@ -313,13 +339,14 @@ class WeixinConnectStore:
                 session.qrcode_id, session.qr_url = (
                     await session.channel.connect_fetch_qr_code(force=session.force)
                 )
-            except Exception as exc:
+            except Exception:
+                logger.exception("Failed to refresh WeChat QR code")
                 self._sessions.pop(session_id, None)
                 await self._close_channel(session.channel)
                 return {
                     "session_id": session_id,
                     "status": "failed",
-                    "message": f"Could not refresh WeChat QR code: {exc}",
+                    "message": "Could not refresh WeChat QR code.",
                 }
             session.current_poll_base_url = session.channel.connect_base_url
             return self._pending_payload(session)
@@ -379,7 +406,10 @@ class WeixinConnectStore:
 
     @staticmethod
     async def _close_channel(channel: WeixinChannel) -> None:
-        await channel.connect_close_client()
+        try:
+            await channel.connect_close_client()
+        except Exception:
+            logger.exception("Failed to close WeChat QR login client")
 
     @staticmethod
     def _start_payload(session: WeixinConnectSession) -> dict[str, Any]:

@@ -36,6 +36,10 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.channels.contracts import (
+    CHANNEL_INSTANCE_REVISION_FIELD,
+    new_channel_instance_revision,
+)
 from nanobot.config.paths import get_media_dir, get_runtime_subdir
 from nanobot.config.schema import Base
 
@@ -522,6 +526,7 @@ class WeixinChannel(BaseChannel):
                     "enabled": False,
                     "pairingRequired": True,
                     "allowFrom": [],
+                    CHANNEL_INSTANCE_REVISION_FIELD: new_channel_instance_revision(),
                 }
                 if base_url:
                     values["baseUrl"] = base_url

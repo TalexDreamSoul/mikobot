@@ -62,11 +62,12 @@ from nanobot.collaboration.pairing import (
 )
 from nanobot.config.paths import get_runtime_subdir
 
-_SCHEMA = 6
+_SCHEMA = 7
 _MAX_FILE_BYTES = 2 * 1024 * 1024
 _MAX_ITEMS = 10_000
 _MAX_STRING = 512
 _MAX_TEXT = 16_000
+_LEGACY_UNBOUND_CHANNEL_REVISION = "legacy-unbound"
 _MAX_JSON_ITEMS = 256
 _MAX_JSON_DEPTH = 8
 
@@ -1157,6 +1158,7 @@ class CollaborationStore:
         bot_id: str,
         channel_type: str,
         instance_id: str,
+        channel_revision: str,
         project_id: str | None = None,
         ttl_seconds: int = 600,
     ) -> tuple[PairingChallenge, str]:
@@ -1165,6 +1167,7 @@ class CollaborationStore:
         bot_id = _id(bot_id, "bot_id")
         channel_type = _key(channel_type, "channel_type")
         instance_id = _key(instance_id, "instance_id")
+        channel_revision = _string(channel_revision, "channel_revision", limit=256)
         project_id = _id(project_id, "project_id") if project_id is not None else None
         purpose = _pairing_purpose(purpose)
         if isinstance(ttl_seconds, bool) or not 60 <= ttl_seconds <= 900:
@@ -1213,6 +1216,7 @@ class CollaborationStore:
                 project_id=project_id,
                 channel_type=channel_type,
                 instance_id=instance_id,
+                channel_revision=channel_revision,
                 expires_at_ms=now + ttl_seconds * 1000,
                 verified_at_ms=None,
                 verified_sender_id=None,
@@ -1241,11 +1245,13 @@ class CollaborationStore:
         *,
         channel_type: str,
         instance_id: str,
+        channel_revision: str,
         sender_id: str,
     ) -> PairingChallenge:
         digest = assignment_code_digest(normalize_assignment_code(code))
         channel_type = _key(channel_type, "channel_type")
         instance_id = _key(instance_id, "instance_id")
+        channel_revision = _string(channel_revision, "channel_revision", limit=256)
         sender_id = _key(sender_id, "sender_id")
         with self._state() as state:
             now = _now()
@@ -1263,6 +1269,10 @@ class CollaborationStore:
                     break
             if challenge is None:
                 raise CollaborationNotFoundError("pairing challenge not found or expired")
+            if challenge.channel_revision != channel_revision:
+                raise CollaborationConflictError(
+                    "channel instance changed; create a new pairing challenge"
+                )
             if challenge.verified_at_ms is not None:
                 if challenge.verified_sender_id != sender_id:
                     raise CollaborationConflictError("pairing challenge was verified by another sender")
@@ -1288,22 +1298,28 @@ class CollaborationStore:
                 challenge.id, challenge.code_digest, challenge.requested_by_user_id,
                 challenge.purpose, challenge.organization_id, challenge.bot_id,
                 challenge.project_id, challenge.channel_type, challenge.instance_id,
-                challenge.expires_at_ms, now, sender_id, None, challenge.created_at_ms,
+                challenge.channel_revision, challenge.expires_at_ms, now, sender_id, None,
+                challenge.created_at_ms,
             )
             state["pairingChallenges"][verified.id] = _encode_pairing_challenge(verified)
             self._save(state)
             return verified
 
     def consume_pairing_challenge(
-        self, actor_user_id: str, challenge_id: str
+        self, actor_user_id: str, challenge_id: str, *, channel_revision: str
     ) -> PairingChallenge:
         actor_user_id = _id(actor_user_id, "actor_user_id")
         challenge_id = _id(challenge_id, "challenge_id")
+        channel_revision = _string(channel_revision, "channel_revision", limit=256)
         with self._state() as state:
             raw_challenge = state["pairingChallenges"].get(challenge_id)
             if raw_challenge is None:
                 raise CollaborationNotFoundError("pairing challenge not found")
             challenge = _pairing_challenge(raw_challenge)
+            if challenge.channel_revision != channel_revision:
+                raise CollaborationConflictError(
+                    "channel instance changed; create a new pairing challenge"
+                )
             now = _now()
             if challenge.requested_by_user_id != actor_user_id:
                 raise CollaborationPermissionError("pairing challenge belongs to another user")
@@ -1372,7 +1388,7 @@ class CollaborationStore:
                 challenge.id, challenge.code_digest, challenge.requested_by_user_id,
                 challenge.purpose, challenge.organization_id, challenge.bot_id,
                 challenge.project_id, challenge.channel_type, challenge.instance_id,
-                challenge.expires_at_ms, challenge.verified_at_ms,
+                challenge.channel_revision, challenge.expires_at_ms, challenge.verified_at_ms,
                 challenge.verified_sender_id, now, challenge.created_at_ms,
             )
             state["pairingChallenges"][consumed.id] = _encode_pairing_challenge(consumed)
@@ -2781,7 +2797,7 @@ def _migrate_v5(data: Mapping[str, object]) -> dict[str, object]:
 
     migrated.update(
         {
-            "schemaVersion": _SCHEMA,
+            "schemaVersion": 6,
             "users": users,
             "bots": bots,
             "botProjectAssignments": bot_projects,
@@ -2791,6 +2807,22 @@ def _migrate_v5(data: Mapping[str, object]) -> dict[str, object]:
             "pairingChallenges": {},
         }
     )
+    return migrated
+
+def _migrate_v6(data: Mapping[str, object]) -> dict[str, object]:
+    """Mark existing challenges unbound rather than rebinding credentials."""
+    migrated = dict(data)
+    challenges = _mapping(
+        migrated.get("pairingChallenges"), "invalid legacy pairing challenges"
+    )
+    migrated["pairingChallenges"] = {
+        challenge_id: {
+            **dict(_mapping(raw_challenge, "invalid legacy pairing challenge")),
+            "channelRevision": _LEGACY_UNBOUND_CHANNEL_REVISION,
+        }
+        for challenge_id, raw_challenge in challenges.items()
+    }
+    migrated["schemaVersion"] = _SCHEMA
     return migrated
 
 
@@ -2807,6 +2839,8 @@ def _normalize(data: object) -> _StoreState:
         root = _migrate_v4(root)
     if root.get("schemaVersion") == 5:
         root = _migrate_v5(root)
+    if root.get("schemaVersion") == 6:
+        root = _migrate_v6(root)
     if set(root) != set(_empty()) or root.get("schemaVersion") != _SCHEMA:
         raise CollaborationStoreFormatError(
             "unsupported collaboration store schema")
@@ -3373,7 +3407,7 @@ def _pairing_challenge(data: Mapping[str, object]) -> PairingChallenge:
         {
             "id", "codeDigest", "requestedByUserId", "purpose",
             "organizationId", "botId", "projectId", "channelType",
-            "instanceId", "expiresAtMs", "verifiedAtMs",
+            "instanceId", "channelRevision", "expiresAtMs", "verifiedAtMs",
             "verifiedSenderId", "consumedAtMs", "createdAtMs",
         },
     )
@@ -3390,6 +3424,7 @@ def _pairing_challenge(data: Mapping[str, object]) -> PairingChallenge:
         project_id=_id(project_id, "projectId") if project_id is not None else None,
         channel_type=_key(data["channelType"], "channelType"),
         instance_id=_key(data["instanceId"], "instanceId"),
+        channel_revision=_string(data["channelRevision"], "channelRevision", limit=256),
         expires_at_ms=_time(data["expiresAtMs"]),
         verified_at_ms=_time(verified_at_ms) if verified_at_ms is not None else None,
         verified_sender_id=_optional_key(data["verifiedSenderId"], "verifiedSenderId"),
@@ -3409,6 +3444,7 @@ def _encode_pairing_challenge(challenge: PairingChallenge) -> _Record:
         "projectId": challenge.project_id,
         "channelType": challenge.channel_type,
         "instanceId": challenge.instance_id,
+        "channelRevision": challenge.channel_revision,
         "expiresAtMs": challenge.expires_at_ms,
         "verifiedAtMs": challenge.verified_at_ms,
         "verifiedSenderId": challenge.verified_sender_id,

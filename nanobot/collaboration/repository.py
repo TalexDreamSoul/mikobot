@@ -242,7 +242,7 @@ class CollaborationRepository(Protocol):
 
     async def create_pairing_challenge(
         self, actor_user_id: str, *, purpose: PairingPurpose, organization_id: str,
-        bot_id: str, channel_type: str, instance_id: str,
+        bot_id: str, channel_type: str, instance_id: str, channel_revision: str,
         project_id: str | None = None, ttl_seconds: int = 600,
     ) -> tuple[PairingChallenge, str]: ...
 
@@ -251,11 +251,12 @@ class CollaborationRepository(Protocol):
     ) -> PairingChallenge | None: ...
 
     async def verify_pairing_challenge(
-        self, code: str, *, channel_type: str, instance_id: str, sender_id: str
+        self, code: str, *, channel_type: str, instance_id: str,
+        channel_revision: str, sender_id: str,
     ) -> PairingChallenge: ...
 
     async def consume_pairing_challenge(
-        self, actor_user_id: str, challenge_id: str
+        self, actor_user_id: str, challenge_id: str, *, channel_revision: str
     ) -> PairingChallenge: ...
 
     async def create_project(

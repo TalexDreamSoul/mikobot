@@ -60,6 +60,74 @@ async def test_feishu_connect_session_rejects_other_actor_poll_and_cancel(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "requested_instance", "expected_instance"),
+    [
+        ("replace", "named-target", "named-target"),
+        ("create", "client-controlled", "assistant-server-assigned"),
+    ],
+)
+async def test_feishu_connect_completion_keeps_server_authorized_target_and_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    requested_instance: str,
+    expected_instance: str,
+) -> None:
+    """A successful scan may only save and report the target authorized at session start."""
+    monkeypatch.setattr(feishu, "_init_registration", lambda _domain: None)
+    monkeypatch.setattr(
+        feishu,
+        "_begin_registration",
+        lambda _domain: {
+            "device_code": "bound-device",
+            "qr_url": "https://qr.example/bound",
+            "expire_in": 600,
+            "interval": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "nanobot.channels.feishu.connect.secrets.token_hex",
+        lambda _size: "server-assigned",
+    )
+    monkeypatch.setattr(
+        feishu,
+        "poll_registration_once",
+        lambda **_kwargs: {
+            "status": "succeeded",
+            "domain": "feishu",
+            "app_id": "private-app-id",
+            "app_secret": "private-app-secret",
+        },
+    )
+    save_calls: list[dict[str, Any]] = []
+
+    def save_result(_result: dict[str, Any], **kwargs: Any) -> str:
+        save_calls.append(kwargs)
+        return "wrong-instance-must-not-remap-session"
+
+    monkeypatch.setattr(feishu, "save_registration_result", save_result)
+    store = FeishuConnectStore()
+
+    started = await store.handle(
+        "start",
+        {"mode": [mode], "instance_id": [requested_instance]},
+    )
+    completed = await store.handle("poll", {"session_id": [started["session_id"]]})
+
+    assert started["instance_id"] == expected_instance
+    assert completed["instance_id"] == expected_instance
+    assert save_calls == [
+        {
+            "instance_id": expected_instance,
+            "name": f"nanobot {expected_instance}",
+            "mode": mode,
+        }
+    ]
+    assert {"app_id", "app_secret"}.isdisjoint(completed)
+    assert "private-app-id" not in repr(completed)
+    assert "private-app-secret" not in repr(completed)
+
+@pytest.mark.asyncio
 async def test_feishu_cancel_wins_over_inflight_confirmation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -193,3 +261,88 @@ def test_feishu_connect_sessions_are_bounded_and_replaced_per_instance(
     replaced = store.start(instance_id="instance-0")
     assert replaced["instance_id"] == "instance-0"
     assert len(store._sessions) == 32
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode",
+    ["CREATE", "Replace", " create", "replace ", "delete"],
+)
+async def test_feishu_connect_rejects_nonexact_modes(mode: str) -> None:
+    """Only the documented lowercase create and replace modes may start a flow."""
+    store = FeishuConnectStore()
+
+    with pytest.raises(ChannelConnectError) as error:
+        await store.handle("start", {"mode": [mode]})
+
+    assert error.value.status == 400
+    assert str(error.value) == "invalid Feishu connect mode"
+
+
+def test_feishu_connect_start_redacts_upstream_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QR start failures expose a fixed gateway error instead of SDK diagnostics."""
+    raw_error = (
+        "upstream errmsg: secret=feishu-token "
+        "https://feishu.example/connect /private/config/feishu.json"
+    )
+
+    def fail_registration(_domain: str) -> None:
+        raise OSError(raw_error)
+
+    monkeypatch.setattr(feishu, "_init_registration", fail_registration)
+
+    with pytest.raises(ChannelConnectError) as error:
+        FeishuConnectStore().start()
+
+    assert error.value.status == 502
+    assert str(error.value) == "Unable to start Feishu/Lark connection."
+    for leaked in (
+        "secret=feishu-token",
+        "upstream errmsg",
+        "https://feishu.example",
+        "/private/config",
+    ):
+        assert leaked not in str(error.value)
+
+
+def test_feishu_connect_poll_keeps_session_pending_without_leaking_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retryable QR polling failures retain the actor-bound session with a safe message."""
+    raw_error = (
+        "upstream errmsg: secret=feishu-token "
+        "https://feishu.example/poll /private/config/feishu.json"
+    )
+    monkeypatch.setattr(feishu, "_init_registration", lambda _domain: None)
+    monkeypatch.setattr(
+        feishu,
+        "_begin_registration",
+        lambda _domain: {
+            "device_code": "redaction-device",
+            "qr_url": "https://qr.example/redaction",
+            "expire_in": 600,
+            "interval": 2,
+        },
+    )
+
+    def fail_poll(**_kwargs: Any) -> dict[str, str]:
+        raise OSError(raw_error)
+
+    monkeypatch.setattr(feishu, "poll_registration_once", fail_poll)
+    store = FeishuConnectStore()
+    started = store.start(actor_user_id="owner-user")
+
+    pending = store.poll(started["session_id"], actor_user_id="owner-user")
+
+    assert pending["status"] == "pending"
+    assert pending["message"] == "Waiting for authorization."
+    assert started["session_id"] in store._sessions
+    for leaked in (
+        "secret=feishu-token",
+        "upstream errmsg",
+        "https://feishu.example",
+        "/private/config",
+    ):
+        assert leaked not in repr(pending)

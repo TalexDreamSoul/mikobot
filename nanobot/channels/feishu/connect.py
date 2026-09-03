@@ -5,14 +5,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import secrets
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
+from loguru import logger
 
 from nanobot.channels.connect import ChannelConnectError, QueryParams, query_first
 from nanobot.channels.feishu import runtime as feishu
@@ -26,6 +25,7 @@ _MAX_CONNECT_SESSIONS_PER_ACTOR = 4
 class FeishuConnectSession:
     id: str
     instance_id: str
+    mode: str
     instance_name: str
     device_code: str
     qr_url: str
@@ -35,7 +35,6 @@ class FeishuConnectSession:
     created_wall: float
     deadline: float
     actor_user_id: str | None = None
-    last_error: str | None = None
 
 
 class FeishuConnectStore:
@@ -54,11 +53,12 @@ class FeishuConnectStore:
         """Handle one generic settings connection action."""
         actor_user_id = (query_first(query, "_actor_user_id") or "").strip() or None
         if action == "start":
+            mode = query_first(query, "mode")
             return await asyncio.to_thread(
                 self.start,
                 domain=(query_first(query, "domain") or "feishu").strip(),
                 instance_id=(query_first(query, "instance_id") or "default").strip(),
-                mode=(query_first(query, "mode") or "replace").strip(),
+                mode=mode if mode is not None else "replace",
                 actor_user_id=actor_user_id,
             )
 
@@ -73,7 +73,7 @@ class FeishuConnectStore:
             return await asyncio.to_thread(
                 self.cancel, session_id, actor_user_id=actor_user_id
             )
-        raise ChannelConnectError(f"unsupported Feishu connect action: {action}", status=404)
+        raise ChannelConnectError("unsupported Feishu connect action", status=404)
 
     def start(
         self,
@@ -106,23 +106,26 @@ class FeishuConnectStore:
             try:
                 feishu._init_registration(domain)
                 begin = feishu._begin_registration(domain)
-            except (RuntimeError, OSError, json.JSONDecodeError, httpx.HTTPError) as exc:
+                expire_in = int(begin["expire_in"])
+                interval = max(2, int(begin["interval"]))
+                device_code = str(begin["device_code"])
+                qr_url = str(begin["qr_url"])
+            except Exception:
+                logger.exception("Failed to start Feishu/Lark connection")
                 raise ChannelConnectError(
-                    f"Unable to start Feishu/Lark connection: {exc}",
-                    status=502,
-                ) from exc
+                    "Unable to start Feishu/Lark connection.", status=502
+                ) from None
 
             session_id = secrets.token_urlsafe(18)
             now_wall = time.time()
             now = time.monotonic()
-            expire_in = int(begin["expire_in"])
-            interval = max(2, int(begin["interval"]))
             session = FeishuConnectSession(
                 id=session_id,
                 instance_id=instance_id,
+                mode=mode,
                 instance_name=_default_instance_name(instance_id),
-                device_code=str(begin["device_code"]),
-                qr_url=str(begin["qr_url"]),
+                device_code=device_code,
+                qr_url=qr_url,
                 domain=domain,
                 interval=interval,
                 expire_in=expire_in,
@@ -159,8 +162,8 @@ class FeishuConnectStore:
                 device_code=session.device_code,
                 domain=session.domain,
             )
-        except (RuntimeError, OSError, json.JSONDecodeError, httpx.HTTPError) as exc:
-            session.last_error = str(exc)
+        except Exception:
+            logger.exception("Failed to poll Feishu/Lark connection")
             return _pending_payload(session)
 
         status = result.get("status")
@@ -174,12 +177,26 @@ class FeishuConnectStore:
                         "message": "Feishu connection cancelled.",
                     }
                 _require_session_actor(session, actor_user_id)
-                session.domain = str(result.get("domain") or session.domain)
-                session.instance_id = feishu.save_registration_result(
-                    result,
-                    instance_id=session.instance_id,
-                    name=session.instance_name,
-                )
+                session.domain = _normalize_domain(str(result.get("domain") or session.domain))
+                try:
+                    feishu.save_registration_result(
+                        result,
+                        instance_id=session.instance_id,
+                        name=session.instance_name,
+                        mode=session.mode,
+                    )
+                except ChannelConnectError:
+                    self._sessions.pop(session_id, None)
+                    raise
+                except Exception:
+                    logger.exception("Failed to save Feishu/Lark connection")
+                    self._sessions.pop(session_id, None)
+                    return {
+                        "session_id": session_id,
+                        "instance_id": session.instance_id,
+                        "status": "failed",
+                        "message": "Feishu connection could not be completed.",
+                    }
                 self._sessions.pop(session_id, None)
                 return {
                     "session_id": session_id,
@@ -187,11 +204,9 @@ class FeishuConnectStore:
                     "status": "succeeded",
                     "pairing_required": True,
                     "message": "Feishu is connected.",
-                    "domain": session.domain,
-                    "app_id": result.get("app_id"),
                 }
 
-        session.domain = str(result.get("domain") or session.domain)
+        session.domain = _normalize_domain(str(result.get("domain") or session.domain))
         if status == "failed":
             self._sessions.pop(session_id, None)
             return {
@@ -243,12 +258,14 @@ def _normalize_domain(domain: str) -> str:
 
 
 def _resolve_instance_id(instance_id: str, mode: str) -> str:
+    if mode not in {"create", "replace"}:
+        raise ChannelConnectError("invalid Feishu connect mode", status=400)
     if mode == "create":
         return f"assistant-{secrets.token_hex(3)}"
     try:
         return validate_instance_id(instance_id or DEFAULT_INSTANCE_ID)
-    except ValueError as exc:
-        raise ChannelConnectError(str(exc), status=400) from exc
+    except ValueError:
+        raise ChannelConnectError("invalid Feishu connect instance", status=400) from None
 
 
 def _default_instance_name(instance_id: str) -> str:
