@@ -130,6 +130,7 @@ def agent(
     from nanobot.cli import terminal as cli_terminal
     from nanobot.cli.stream import ThinkingSpinner
     from nanobot.cron.service import CronService
+    from nanobot.extensions.runtime import build_core_extension_registry, runtime_skills_loader
     from nanobot.providers.factory import make_provider
     from nanobot.providers.image_generation import image_gen_provider_configs
     from nanobot.utils.helpers import sanitize_surrogates as _sanitize_surrogates
@@ -181,6 +182,12 @@ def agent(
     except ValueError as exc:
         _print_agent_start_error(exc)
         raise typer.Exit(1) from exc
+    _extensions = build_core_extension_registry(
+        runtime_config,
+        tools,
+        skills_loader=runtime_skills_loader(agent_loop),
+        mcp_runtime_status=mcp_provider.runtime_status,
+    )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):
         cli_terminal._print_agent_response(
@@ -188,7 +195,7 @@ def agent(
             render_markdown=False,
         )
 
-    async def _close_runtime() -> None:
+    async def _close_runtime(_extensions: object = _extensions) -> None:
         try:
             await agent_loop.aclose()
         finally:

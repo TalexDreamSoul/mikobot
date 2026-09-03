@@ -1486,7 +1486,6 @@ class MCPProvider:
                     "ok": False,
                     "message": "Could not reload MCP config. Restart nanobot to pick up changes.",
                     "requires_restart": True,
-                    "error": str(exc),
                 }
 
             current_servers = dict(self._servers)

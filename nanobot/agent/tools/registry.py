@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from nanobot.agent.tools.base import Tool, ToolResult
 from nanobot.agent.tools.context import ContextAware, current_request_context
+from nanobot.extensions.contracts import ExtensionSource
 
 if TYPE_CHECKING:
     from nanobot.runtime_context import RuntimeContextProvider
@@ -14,6 +16,30 @@ if TYPE_CHECKING:
 
 def is_tool_error_result(result: Any) -> bool:
     return isinstance(result, ToolResult) and result.is_error
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRegistrationMetadata:
+    """Immutable provenance recorded for one successfully registered core tool."""
+
+    source: ExtensionSource
+    owner_name: str
+    class_name: str
+    scope: str
+
+    def __post_init__(self) -> None:
+        if self.source not in {ExtensionSource.BUILTIN, ExtensionSource.PYTHON_ENTRY_POINT}:
+            raise ValueError("tool registration source must be builtin or python entry point")
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredTool:
+    """A live tool and the provenance captured when it was registered."""
+
+    name: str
+    tool: Tool
+    metadata: ToolRegistrationMetadata
+
 
 
 class ToolRegistry:
@@ -25,17 +51,31 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: dict[str, Tool] = {}
+        self._registration_metadata: dict[str, ToolRegistrationMetadata] = {}
         self._cached_definitions: list[dict[str, Any]] | None = None
 
-    def register(self, tool: Tool) -> None:
-        """Register a tool."""
+    def register(self, tool: Tool, *, metadata: ToolRegistrationMetadata | None = None) -> None:
+        """Register a tool and optional core-discovery provenance."""
         self._tools[tool.name] = tool
+        if metadata is None:
+            self._registration_metadata.pop(tool.name, None)
+        else:
+            self._registration_metadata[tool.name] = metadata
         self._cached_definitions = None
 
     def unregister(self, name: str) -> None:
         """Unregister a tool by name."""
         self._tools.pop(name, None)
+        self._registration_metadata.pop(name, None)
         self._cached_definitions = None
+
+    def registration_snapshot(self) -> tuple[RegisteredTool, ...]:
+        """Return live core-tool provenance rows in registry insertion order."""
+        return tuple(
+            RegisteredTool(name=name, tool=tool, metadata=metadata)
+            for name, tool in self._tools.items()
+            if (metadata := self._registration_metadata.get(name)) is not None
+        )
 
     def get(self, name: str) -> Tool | None:
         """Get a tool by name."""

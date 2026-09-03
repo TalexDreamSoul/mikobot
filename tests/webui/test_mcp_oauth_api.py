@@ -76,6 +76,7 @@ async def test_browser_flow_retries_current_server_and_ignores_unrelated_reload_
         _config(),
         "https://agent.example.com/auth/mcp/callback",
         reload_mcp=reload_mcp,
+        actor_user_id="operator",
     )
 
     assert started["status"] == "authorization_required"
@@ -92,8 +93,8 @@ async def test_browser_flow_retries_current_server_and_ignores_unrelated_reload_
 
     for _ in range(10):
         first, second = await asyncio.gather(
-            manager.status(started["flow_id"]),
-            manager.status(started["flow_id"]),
+            manager.status(started["flow_id"], actor_user_id="operator"),
+            manager.status(started["flow_id"], actor_user_id="operator"),
         )
         if first["status"] == "connected":
             break
@@ -139,6 +140,7 @@ async def test_remote_http_flow_accepts_a_pasted_loopback_callback(
             0,
             result={"ok": True, "requires_restart": False},
         ),
+        actor_user_id="operator",
     )
 
     assert started["status"] == "authorization_required"
@@ -151,6 +153,7 @@ async def test_remote_http_flow_accepts_a_pasted_loopback_callback(
             callback_url=(
                 "http://127.0.0.1:8765/wrong?code=oauth-code&state=manual-state"
             ),
+            actor_user_id="operator",
         )
     with pytest.raises(McpOAuthError, match="different or expired"):
         manager.submit_callback_url(
@@ -159,6 +162,7 @@ async def test_remote_http_flow_accepts_a_pasted_loopback_callback(
                 "http://127.0.0.1:8765/auth/mcp/callback"
                 "?code=oauth-code&state=other-state"
             ),
+            actor_user_id="operator",
         )
 
     submitted = manager.submit_callback_url(
@@ -167,12 +171,13 @@ async def test_remote_http_flow_accepts_a_pasted_loopback_callback(
             "http://127.0.0.1:8765/auth/mcp/callback"
             "?code=oauth-code&state=manual-state"
         ),
+        actor_user_id="operator",
     )
     assert submitted["status"] == "connecting"
 
     for _ in range(20):
         await asyncio.sleep(0)
-        result = await manager.status(started["flow_id"])
+        result = await manager.status(started["flow_id"], actor_user_id="operator")
         if result["status"] == "connected":
             break
 
@@ -204,13 +209,14 @@ async def test_browser_flow_surfaces_provider_denial_without_callback_descriptio
         _config(),
         "https://agent.example.com/auth/mcp/callback",
         reload_mcp=lambda: asyncio.sleep(0, result={"ok": True}),
+        actor_user_id="operator",
     )
 
     with pytest.raises(McpOAuthError, match="access_denied"):
         manager.submit_callback(state="deny-state", code=None, error="access_denied")
     for _ in range(10):
         await asyncio.sleep(0)
-        result = await manager.status(started["flow_id"])
+        result = await manager.status(started["flow_id"], actor_user_id="operator")
         if result["status"] == "failed":
             break
 
@@ -249,6 +255,7 @@ async def test_browser_flow_blocks_unsafe_authorization_url(
         _config(),
         "https://agent.example.com/auth/mcp/callback",
         reload_mcp=lambda: asyncio.sleep(0, result={"ok": True}),
+        actor_user_id="operator",
     )
 
     assert result["status"] == "failed"
@@ -256,6 +263,70 @@ async def test_browser_flow_blocks_unsafe_authorization_url(
     with pytest.raises(McpOAuthError, match="expired"):
         manager.submit_callback(state=state, code="code", error=None)
 
+
+
+
+
+
+@pytest.mark.asyncio
+async def test_oauth_manager_rejects_flow_creation_without_an_actor() -> None:
+    manager = McpOAuthManager()
+
+    with pytest.raises(McpOAuthError) as missing_actor:
+        await manager.start(
+            "linear",
+            _config(),
+            "https://agent.example.com/auth/mcp/callback",
+            actor_user_id="",
+            reload_mcp=lambda: asyncio.sleep(0, result={"ok": True}),
+        )
+
+    assert missing_actor.value.status == 403
+@pytest.mark.asyncio
+async def test_manual_oauth_flow_is_visible_and_mutable_only_by_its_creator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = McpOAuthManager()
+
+    monkeypatch.setattr(
+        "nanobot.webui.mcp_oauth_api.validate_url_target",
+        lambda _url: (True, ""),
+    )
+
+    async def connect(_servers, _registry, *, oauth_handlers):
+        await oauth_handlers["linear"].redirect_handler(
+            "https://accounts.example.com/authorize?state=owner-state"
+        )
+        await oauth_handlers["linear"].callback_handler()
+        return {}
+
+    monkeypatch.setattr("nanobot.webui.mcp_oauth_api.connect_mcp_servers", connect)
+    started = await manager.start(
+        "linear",
+        _config(),
+        "http://192.0.2.10:8765/auth/mcp/callback",
+        reload_mcp=lambda: asyncio.sleep(0, result={"ok": True}),
+        actor_user_id="owner",
+    )
+    callback_url = (
+        "http://127.0.0.1:8765/auth/mcp/callback?code=oauth-code&state=owner-state"
+    )
+
+    for operation in (
+        lambda: manager.status(started["flow_id"], actor_user_id="other"),
+        lambda: manager.submit_callback_url(
+            flow_id=started["flow_id"],
+            callback_url=callback_url,
+            actor_user_id="other",
+        ),
+        lambda: manager.cancel(started["flow_id"], actor_user_id="other"),
+    ):
+        with pytest.raises(McpOAuthError) as denied:
+            await operation()
+        assert denied.value.status == 404
+
+    cancelled = await manager.cancel(started["flow_id"], actor_user_id="owner")
+    assert cancelled["status"] == "cancelled"
 
 def test_redirect_uri_requires_https_except_for_loopback() -> None:
     assert validate_mcp_oauth_redirect_uri(

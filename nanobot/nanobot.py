@@ -13,6 +13,8 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.agent.tools.mcp import MCPProvider
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.config.schema import Config
+from nanobot.extensions.registry import ExtensionRegistry
+from nanobot.extensions.runtime import build_core_extension_registry, runtime_skills_loader
 from nanobot.providers.base import LLMUsage
 from nanobot.providers.image_generation import image_gen_provider_configs
 from nanobot.sdk.clients import MemoryClient, RuntimeClient, SessionClient
@@ -81,10 +83,12 @@ class Nanobot:
         *,
         config: Config | None = None,
         mcp_provider: MCPProvider | None = None,
+        extensions: ExtensionRegistry | None = None,
     ) -> None:
         self._loop = loop
         self._config = config
         self._mcp_provider = mcp_provider
+        self.extensions = extensions
         self.sessions = SessionClient(loop)
         self.memory = MemoryClient(loop)
         self.runtime = RuntimeClient(loop)
@@ -139,7 +143,18 @@ class Nanobot:
             hook_factories=[create_file_edit_activity_hook],
             tool_registry=tools,
         )
-        return cls(loop, config=config, mcp_provider=mcp_provider)
+        extensions = build_core_extension_registry(
+            config,
+            tools,
+            skills_loader=runtime_skills_loader(loop),
+            mcp_runtime_status=mcp_provider.runtime_status,
+        )
+        return cls(
+            loop,
+            config=config,
+            mcp_provider=mcp_provider,
+            extensions=extensions,
+        )
 
     async def run(
         self,

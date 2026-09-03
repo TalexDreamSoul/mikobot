@@ -40,6 +40,8 @@ class _SkillCacheEntry:
 
 _SKILL_CACHE: dict[tuple[Path, Path], _SkillCacheEntry] = {}
 
+_FINGERPRINT_UNSET = object()
+
 
 @dataclass(frozen=True)
 class AgentPlugin:
@@ -55,8 +57,9 @@ class AgentPlugin:
     logo: str | None
     permissions: tuple[str, ...]
     mcp_servers: tuple[str, ...] = ()
+    skills: tuple[str, ...] = ()
+    revision: str | None = None
     enabled: bool = False
-
 
 def _installed_plugins(workspace: Path) -> list[AgentPlugin]:
     """Return installed packages found under ``<workspace>/plugins/*``."""
@@ -84,9 +87,12 @@ def enabled_agent_plugin_skills(workspace: Path) -> list[tuple[str, Path]]:
     skills: list[tuple[str, Path]] = []
     packages: list[_PackageSnapshot] = []
     for plugin in _installed_plugins(workspace):
-        plugin_skills = _discover_plugin_skills(plugin.name, plugin.root)
         fingerprint = _enabled_package_fingerprint(workspace, plugin)
         if fingerprint is None:
+            continue
+        plugin_skills = _discover_plugin_skills(plugin.name, plugin.root)
+        if _package_fingerprint(plugin.root) != fingerprint:
+            _revoke_enabled_plugin(workspace, plugin)
             continue
         skills.extend(plugin_skills)
         if plugin_skills:
@@ -220,9 +226,13 @@ def agent_plugin_mcp_servers(
     """
     servers: dict[str, MCPServerConfig] = {}
     for plugin in _installed_plugins(workspace):
-        if not _enabled(workspace, plugin):
+        fingerprint = _enabled_package_fingerprint(workspace, plugin)
+        if fingerprint is None:
             continue
         plugin_servers = _plugin_mcp_servers(workspace, plugin)
+        if _package_fingerprint(plugin.root) != fingerprint:
+            _revoke_enabled_plugin(workspace, plugin)
+            continue
         for name, server in plugin_servers.items():
             # ``--`` cannot occur in a valid plugin identity, so multi-server
             # namespaces cannot collide with a single-server plugin name.
@@ -236,31 +246,60 @@ def agent_plugin_mcp_servers(
 
 def discover_agent_plugins(workspace: Path) -> list[AgentPlugin]:
     """Return component and lifecycle state for discovered plugins."""
-    return [
-        replace(
-            plugin,
-            mcp_servers=tuple(sorted(_plugin_mcp_servers(workspace, plugin))),
-            enabled=_enabled(workspace, plugin),
+    discovered: list[AgentPlugin] = []
+    for plugin in _installed_plugins(workspace):
+        fingerprint = _package_fingerprint(plugin.root)
+        skills = tuple(name for name, _path in _discover_plugin_skills(plugin.name, plugin.root))
+        mcp_servers = tuple(sorted(_plugin_mcp_servers(workspace, plugin)))
+        if fingerprint is not None and _package_fingerprint(plugin.root) != fingerprint:
+            fingerprint = None
+            skills = ()
+            mcp_servers = ()
+            _revoke_enabled_plugin(workspace, plugin)
+        discovered.append(
+            replace(
+                plugin,
+                mcp_servers=mcp_servers,
+                skills=skills,
+                revision=fingerprint,
+                enabled=fingerprint is not None
+                and _enabled_package_fingerprint(
+                    workspace, plugin, fingerprint=fingerprint
+                )
+                is not None,
+            )
         )
-        for plugin in _installed_plugins(workspace)
-    ]
+    return discovered
 
 
-def set_agent_plugin_enabled(workspace: Path, name: str, enabled: bool) -> None:
+def set_agent_plugin_enabled(
+    workspace: Path,
+    name: str,
+    enabled: bool,
+    expected_revision: str | None = None,
+) -> None:
     """Enable or disable one installed plugin."""
     plugin = next((item for item in _installed_plugins(workspace) if item.name == name), None)
     if plugin is None:
         raise ValueError(f"unknown Agent Plugin '{name}'")
-    data = _plugin_data_dir(workspace, plugin.name, create=True)
-    marker = data / "enabled"
     if enabled:
-        activation = _activation_marker(plugin)
-        if activation is None:
+        fingerprint = _package_fingerprint(plugin.root)
+        if fingerprint is None:
             raise RuntimeError(f"Agent Plugin '{name}' changed while it was being enabled")
-        marker.write_text(activation, encoding="utf-8")
+        if expected_revision is not None and expected_revision != fingerprint:
+            raise ValueError(f"Agent Plugin '{name}' revision is stale")
+        marker = _plugin_data_dir(workspace, plugin.name, create=True) / "enabled"
+        marker.write_text(
+            _activation_marker_for_fingerprint(plugin, fingerprint), encoding="utf-8"
+        )
         marker.chmod(0o600)
+        if _package_fingerprint(plugin.root) != fingerprint:
+            marker.unlink(missing_ok=True)
+            _invalidate_skill_cache(workspace)
+            raise RuntimeError(f"Agent Plugin '{name}' changed while it was being enabled")
     else:
-        marker.unlink(missing_ok=True)
+        data = _plugin_data_dir(workspace, plugin.name, create=True)
+        (data / "enabled").unlink(missing_ok=True)
     _invalidate_skill_cache(workspace)
 
 
@@ -412,29 +451,59 @@ def _plugin_data_dir(workspace: Path, name: str, *, create: bool) -> Path:
         current = resolved
     return current
 
+def _revoke_enabled_plugin(workspace: Path, plugin: AgentPlugin) -> None:
+    try:
+        marker = _plugin_data_dir(workspace, plugin.name, create=False) / "enabled"
+        marker.unlink(missing_ok=True)
+    except (OSError, RuntimeError):
+        pass
+    _invalidate_skill_cache(workspace)
 
-def _enabled_package_fingerprint(workspace: Path, plugin: AgentPlugin) -> str | None:
+
+def _enabled_package_fingerprint(
+    workspace: Path,
+    plugin: AgentPlugin,
+    *,
+    fingerprint: str | None | object = _FINGERPRINT_UNSET,
+) -> str | None:
     """Return the content fingerprint when this exact package is enabled."""
     marker = _plugin_data_dir(workspace, plugin.name, create=False) / "enabled"
     try:
         if not marker.is_file():
             return None
         current = marker.read_text(encoding="utf-8")
-        activation = _activation_marker(plugin)
-        if activation is None:
-            marker.unlink(missing_ok=True)
-            _invalidate_skill_cache(workspace)
-            return None
-        payload = cast(dict[str, object], json.loads(activation))
-        fingerprint = payload.get("fingerprint")
-        if not isinstance(fingerprint, str):
-            return None
+        if fingerprint is _FINGERPRINT_UNSET:
+            activation = _activation_marker(plugin)
+            if activation is None:
+                marker.unlink(missing_ok=True)
+                _invalidate_skill_cache(workspace)
+                return None
+            payload = cast(dict[str, object], json.loads(activation))
+            current_fingerprint = payload.get("fingerprint")
+            if not isinstance(current_fingerprint, str):
+                marker.unlink(missing_ok=True)
+                _invalidate_skill_cache(workspace)
+                return None
+        else:
+            if not isinstance(fingerprint, str):
+                marker.unlink(missing_ok=True)
+                _invalidate_skill_cache(workspace)
+                return None
+            current_fingerprint = fingerprint
+            activation = _activation_marker_for_fingerprint(plugin, current_fingerprint)
         if current == activation:
-            return fingerprint
+            if _package_fingerprint(plugin.root) != current_fingerprint:
+                _revoke_enabled_plugin(workspace, plugin)
+                return None
+            return current_fingerprint
         if current == str(plugin.root):
             marker.write_text(activation, encoding="utf-8")
             marker.chmod(0o600)
-            return fingerprint
+            if _package_fingerprint(plugin.root) != current_fingerprint:
+                marker.unlink(missing_ok=True)
+                _invalidate_skill_cache(workspace)
+                return None
+            return current_fingerprint
         marker.unlink(missing_ok=True)
         _invalidate_skill_cache(workspace)
         return None
@@ -443,8 +512,14 @@ def _enabled_package_fingerprint(workspace: Path, plugin: AgentPlugin) -> str | 
         return None
 
 
-def _enabled(workspace: Path, plugin: AgentPlugin) -> bool:
-    return _enabled_package_fingerprint(workspace, plugin) is not None
+
+
+def _activation_marker_for_fingerprint(plugin: AgentPlugin, fingerprint: str) -> str:
+    return json.dumps(
+        {"fingerprint": fingerprint, "root": str(plugin.root)},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _activation_marker(plugin: AgentPlugin) -> str | None:
@@ -452,11 +527,7 @@ def _activation_marker(plugin: AgentPlugin) -> str | None:
     fingerprint = _package_fingerprint(plugin.root)
     if fingerprint is None:
         return None
-    return json.dumps(
-        {"fingerprint": fingerprint, "root": str(plugin.root)},
-        separators=(",", ":"),
-        sort_keys=True,
-    )
+    return _activation_marker_for_fingerprint(plugin, fingerprint)
 
 
 def _discover_plugin_skills(plugin_name: str, plugin_root: Path) -> list[tuple[str, Path]]:

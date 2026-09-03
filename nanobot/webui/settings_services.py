@@ -12,6 +12,7 @@ from filelock import FileLock
 
 from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import Config
+from nanobot.extensions.registry import ExtensionRegistry
 
 _T = TypeVar("_T")
 _WEBUI_OAUTH_MAX_FLOWS = 8
@@ -120,6 +121,7 @@ class WebUISettingsServices:
     oauth_flows: WebUIOAuthFlowRegistry
     rename_model_preset: Callable[[str, str], int] | None = None
     refresh_runtime_config: Callable[[], None] | None = None
+    extensions: ExtensionRegistry | None = None
 
     @classmethod
     def create(
@@ -128,12 +130,14 @@ class WebUISettingsServices:
         *,
         rename_model_preset: Callable[[str, str], int] | None = None,
         refresh_runtime_config: Callable[[], None] | None = None,
+        extension_registry: ExtensionRegistry | None = None,
     ) -> WebUISettingsServices:
         return cls(
             config=WebUISettingsConfig(config_path),
             oauth_flows=WebUIOAuthFlowRegistry(),
             rename_model_preset=rename_model_preset,
             refresh_runtime_config=refresh_runtime_config,
+            extensions=extension_registry,
         )
 
     def read(

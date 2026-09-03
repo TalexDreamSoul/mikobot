@@ -16,11 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Mapping, cast
 
-from nanobot.agent.plugins import (
-    AgentPlugin,
-    discover_agent_plugins,
-    set_agent_plugin_enabled,
-)
 from nanobot.agent.tools.mcp_oauth import (
     delete_mcp_oauth_credentials,
     mcp_oauth_has_credentials,
@@ -30,6 +25,17 @@ from nanobot.apps.protocol import app_manifest, compact_dict
 from nanobot.config.loader import load_config, resolve_config_env_vars, save_config
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.config.schema import MCPServerConfig
+from nanobot.extensions import (
+    ExtensionAction,
+    ExtensionActionContext,
+    ExtensionActionRequest,
+    ExtensionPackageDescriptor,
+    ExtensionRegistry,
+    ExtensionSnapshot,
+    ExtensionSource,
+    requires_risk_acknowledgement,
+    safe_extension_message,
+)
 from nanobot.utils.helpers import ensure_dir
 
 QueryParams = dict[str, list[str]]
@@ -739,10 +745,9 @@ def _connection_summary(cfg: MCPServerConfig | None) -> str:
     if cfg is None:
         return ""
     if cfg.command:
-        return " ".join([cfg.command, *cfg.args[:2]]).strip()
+        return "Local command"
     if cfg.url:
-        parsed = urllib.parse.urlsplit(cfg.url)
-        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        return "Remote service"
     return ""
 
 
@@ -776,9 +781,6 @@ def _preset_manifest(preset: McpPreset, *, logo_url: str) -> dict[str, Any]:
             "type": "mcp",
             "transport": preset.transport,
             "auth": server.auth if server and server.auth else None,
-            "command": server.command if server and server.command else None,
-            "args": list(server.args) if server and server.command else None,
-            "url": _connection_summary(server) if server and server.url else None,
             "fields": field_specs,
         })
     ]
@@ -827,8 +829,6 @@ def _custom_manifest(name: str, cfg: MCPServerConfig) -> dict[str, Any]:
                 "type": "mcp",
                 "transport": transport,
                 "auth": cfg.auth,
-                "command": cfg.command or None,
-                "url": _connection_summary(cfg) if cfg.url else None,
             })
         ],
         install=compact_dict({
@@ -921,28 +921,69 @@ def _custom_payload(
     }
 
 
-def _agent_plugin_payload(plugin: AgentPlugin) -> dict[str, Any]:
+def _agent_plugin_payload(package: ExtensionPackageDescriptor) -> dict[str, Any]:
+    """Project one canonical Agent Plugin package into the legacy MCP row shape."""
+    lifecycle = package.lifecycle.value
+    enabled = lifecycle == "enabled"
     return {
-        "name": f"plugin-{plugin.name}",
-        "display_name": plugin.display_name,
-        "category": plugin.category,
-        "description": plugin.description or "Agent Plugin",
-        "docs_url": plugin.repository,
+        "name": package.id,
+        "display_name": package.display_name,
+        "category": "agent-plugin",
+        "description": package.description or "Agent Plugin",
+        "docs_url": "",
         "transport": "stdio",
-        "requires": ", ".join(plugin.permissions),
+        "requires": ", ".join(package.permissions),
         "note": "",
         "install_supported": False,
         "installed": True,
         "configured": True,
-        "enabled": plugin.enabled,
-        "available": plugin.enabled,
-        "status": "enabled" if plugin.enabled else "disabled",
-        "logo_url": plugin.logo,
-        "brand_color": plugin.accent_color,
+        "enabled": enabled,
+        "available": enabled,
+        "status": "enabled" if enabled else "disabled",
+        "logo_url": None,
+        "brand_color": "#64748B",
         "required_fields": [],
-        "connection_summary": ", ".join(plugin.mcp_servers),
+        "connection_summary": ", ".join(
+            component.display_name
+            for component in package.components
+            if component.kind.value == "mcp_server"
+        ),
         "source": "agent-plugin",
+        "extension_id": package.id,
+        "extension_revision": package.revision,
+        "extension_lifecycle": lifecycle,
+        "extension_trust": package.trust.value,
+        "extension_execution": package.execution.value,
+        "risk_acknowledgement_required": requires_risk_acknowledgement(package),
+        "permissions_enforced": package.permissions_enforced,
     }
+
+def _with_agent_plugin_rows(
+    payload: dict[str, Any],
+    snapshot: ExtensionSnapshot | None,
+) -> dict[str, Any]:
+    if snapshot is None:
+        return payload
+    raw_rows = payload.get("presets")
+    rows = cast(list[dict[str, Any]], raw_rows) if isinstance(raw_rows, list) else []
+    existing_plugin_rows = [row for row in rows if row.get("source") == "agent-plugin"]
+    plugin_rows = [
+        _agent_plugin_payload(package)
+        for package in snapshot.packages
+        if package.source is ExtensionSource.AGENT_PLUGIN
+    ]
+    result = dict(payload)
+    result["presets"] = [
+        *(row for row in rows if row.get("source") != "agent-plugin"),
+        *plugin_rows,
+    ]
+    installed_count = payload.get("installed_count", 0)
+    base_count = installed_count if isinstance(installed_count, int) else 0
+    base_count -= sum(int(bool(row.get("enabled"))) for row in existing_plugin_rows)
+    result["installed_count"] = max(0, base_count) + sum(
+        int(bool(row.get("enabled"))) for row in plugin_rows
+    )
+    return result
 
 
 def mcp_presets_payload(
@@ -951,6 +992,7 @@ def mcp_presets_payload(
     tool_preview: Mapping[str, list[str]] | None = None,
     runtime_status: Mapping[str, str] | None = None,
     config_path: Path | None = None,
+    extension_snapshot: ExtensionSnapshot | None = None,
 ) -> dict[str, Any]:
     config = load_config(config_path) if config_path is not None else load_config()
     known = _known_preset_names()
@@ -964,11 +1006,10 @@ def mcp_presets_payload(
         for name, cfg in sorted(config.tools.mcp_servers.items())
         if name not in known
     ]
-    existing_names = {str(row["name"]) for row in (*preset_rows, *custom_rows)}
     plugin_rows = [
-        _agent_plugin_payload(plugin)
-        for plugin in discover_agent_plugins(config.workspace_path)
-        if f"plugin-{plugin.name}" not in existing_names
+        _agent_plugin_payload(package)
+        for package in (extension_snapshot.packages if extension_snapshot is not None else ())
+        if package.source is ExtensionSource.AGENT_PLUGIN
     ]
     payload: dict[str, Any] = {
         "presets": [*preset_rows, *custom_rows, *plugin_rows],
@@ -1603,23 +1644,58 @@ def mcp_presets_action(
     raise McpPresetError(f"unknown MCP preset action '{action}'", status=404)
 
 
+def _safe_reload_names(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    sequence = cast(list[object] | tuple[object, ...], value)
+    names: list[str] = []
+    for raw_name in sequence[:256]:
+        if not isinstance(raw_name, str):
+            continue
+        name = safe_extension_message(raw_name)[:128]
+        if name and name != "Extension operation failed.":
+            names.append(name)
+    return names
+
+
 def attach_mcp_hot_reload_result(
     payload: dict[str, Any],
     result: dict[str, Any],
 ) -> dict[str, Any]:
-    """Merge an agent MCP reload acknowledgement into a WebUI settings payload."""
+    """Merge a bounded, safe MCP reload acknowledgement into a settings payload."""
+    safe_result: dict[str, Any] = {}
+    for key in (
+        "added",
+        "changed",
+        "removed",
+        "retried",
+        "connected",
+        "configured",
+        "failed",
+    ):
+        names = _safe_reload_names(result.get(key))
+        if names:
+            safe_result[key] = names
+    tools_removed = result.get("tools_removed")
+    if isinstance(tools_removed, int) and not isinstance(tools_removed, bool):
+        safe_result["tools_removed"] = max(0, min(tools_removed, 100_000))
+    safe_result["ok"] = bool(result.get("ok", False))
+    safe_result["requires_restart"] = bool(result.get("requires_restart", False))
+    message = safe_extension_message(result.get("message", ""))
+    if message != "Extension operation failed.":
+        safe_result["message"] = message
     payload = dict(payload)
-    payload["hot_reload"] = result
-    payload["requires_restart"] = bool(result.get("requires_restart"))
+    payload["hot_reload"] = safe_result
+    payload["requires_restart"] = safe_result["requires_restart"]
     last_action = dict(payload.get("last_action") or {})
     base_message = str(last_action.get("message") or "").strip()
-    reload_message = str(result.get("message") or "").strip()
+    reload_message = safe_result.get("message", "")
     if reload_message:
         last_action["message"] = (
             f"{base_message} {reload_message}" if base_message else reload_message
         )
     if "ok" not in last_action:
-        last_action["ok"] = bool(result.get("ok", False))
+        last_action["ok"] = safe_result["ok"]
     payload["last_action"] = last_action
     return payload
 
@@ -1631,6 +1707,10 @@ async def mcp_presets_settings_action(
     reload_mcp: McpReload | None = None,
     mcp_runtime_status: McpRuntimeStatus | None = None,
     config: WebUISettingsConfig | None = None,
+    extension_snapshot: ExtensionSnapshot | None = None,
+    extension_registry: ExtensionRegistry | None = None,
+    actor_user_id: str | None = None,
+    system_admin: bool = False,
 ) -> dict[str, Any]:
     """Run a WebUI MCP preset action and hot-reload the agent when config changes."""
     config_path = config.path if config is not None else None
@@ -1638,32 +1718,61 @@ async def mcp_presets_settings_action(
         return mcp_presets_payload(
             runtime_status=mcp_runtime_status() if mcp_runtime_status is not None else None,
             config_path=config_path,
+            extension_snapshot=extension_snapshot,
         )
-    name = (_query_first(query, "name") or "").strip()
-    if name.startswith("plugin-"):
-        plugin_config = load_config(config_path) if config_path is not None else load_config()
-        plugin_name = name.removeprefix("plugin-")
-        plugins = discover_agent_plugins(plugin_config.workspace_path)
-        plugin = next((item for item in plugins if item.name == plugin_name), None)
-        if name not in plugin_config.tools.mcp_servers and plugin is not None:
-            if action not in {"enable", "disable"}:
-                raise McpPresetError("Agent Plugins support enable and disable actions only")
-            await asyncio.to_thread(
-                set_agent_plugin_enabled,
-                plugin_config.workspace_path,
-                plugin_name,
-                action == "enable",
+
+    extension_id = (_query_first(query, "extension_id") or "").strip()
+    if extension_id:
+        if action not in {"enable", "disable"}:
+            raise McpPresetError("Agent Plugins support enable and disable actions only")
+        if extension_registry is None:
+            raise McpPresetError("extension registry is unavailable", status=503)
+        expected_revision = (_query_first(query, "expected_revision") or "").strip() or None
+        risk_acknowledged = (
+            (_query_first(query, "risk_acknowledged") or "").strip().lower() == "true"
+        )
+        result = await extension_registry.execute(
+            ExtensionActionRequest(
+                context=ExtensionActionContext(
+                    actor_id=actor_user_id or "",
+                    is_system_admin=system_admin,
+                ),
+                target_id=extension_id,
+                action=ExtensionAction(action),
+                expected_revision=expected_revision,
+                risk_acknowledged=risk_acknowledged,
             )
-            verb = "enabled" if action == "enable" else "disabled"
-            payload = mcp_presets_payload(
-                last_action={"ok": True, "message": f"{plugin.display_name} {verb}."},
-                config_path=config_path,
-            )
-            if reload_mcp is not None:
-                payload = attach_mcp_hot_reload_result(payload, await reload_mcp())
-            return payload
+        )
+        extension_snapshot = extension_registry.snapshot()
+        package = next(
+            (item for item in extension_snapshot.packages if item.id == result.package_id),
+            None,
+        )
+        verb = "enabled" if action == "enable" else "disabled"
+        payload = mcp_presets_payload(
+            last_action={
+                "ok": result.ok,
+                "message": result.message
+                or f"{package.display_name if package is not None else 'Agent Plugin'} {verb}.",
+            },
+            config_path=config_path,
+            extension_snapshot=extension_snapshot,
+        )
+        if result.ok and reload_mcp is not None:
+            payload = attach_mcp_hot_reload_result(payload, await reload_mcp())
+        return attach_mcp_runtime_status(
+            payload,
+            mcp_runtime_status() if mcp_runtime_status is not None else None,
+        )
+
     if action == "test":
         payload = await mcp_presets_test_action(query, config_path=config_path)
+        snapshot = (
+            extension_registry.snapshot()
+            if extension_registry is not None
+            else extension_snapshot
+        )
+        payload = _with_agent_plugin_rows(payload, snapshot)
         return attach_mcp_runtime_status(
             payload,
             mcp_runtime_status() if mcp_runtime_status is not None else None,
@@ -1686,6 +1795,12 @@ async def mcp_presets_settings_action(
         payload = await asyncio.to_thread(mcp_presets_action, action, query)
     if reload_mcp is not None:
         payload = attach_mcp_hot_reload_result(payload, await reload_mcp())
+    snapshot = (
+        extension_registry.snapshot()
+        if extension_registry is not None
+        else extension_snapshot
+    )
+    payload = _with_agent_plugin_rows(payload, snapshot)
     return attach_mcp_runtime_status(
         payload,
         mcp_runtime_status() if mcp_runtime_status is not None else None,

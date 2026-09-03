@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool, ToolResult
-from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.tools.registry import ToolRegistrationMetadata, ToolRegistry
+from nanobot.extensions.contracts import ExtensionSource
 
 if TYPE_CHECKING:
     from nanobot.agent.tools.context import RequestContext, ToolContext
@@ -92,35 +93,50 @@ class ToolLoader:
     def load(self, ctx: ToolContext, registry: ToolRegistry, *, scope: str = "core") -> list[str]:
         registered: list[str] = []
         builtin_names: set[str] = set()
-        sources = [(self.discover(), False), (self._discover_plugins().values(), True)]
-        for source, is_plugin_source in sources:
-            for tool_cls in source:
-                cls_label = tool_cls.__name__
-                try:
-                    if scope not in getattr(tool_cls, "_scopes", {"core"}):
-                        continue
-                    if not tool_cls.enabled(ctx):
-                        continue
-                    tool = tool_cls.create(ctx)
-                    if is_plugin_source:
-                        tool = _LegacyErrorPrefixTool(tool)
-                    if registry.has(tool.name):
-                        if is_plugin_source and tool.name in builtin_names:
-                            logger.warning(
-                                "Plugin %s skipped: conflicts with built-in tool %s",
-                                cls_label, tool.name,
-                            )
-                            continue
+        discovered_tools: list[tuple[str, type[Tool], ExtensionSource]] = [
+            ("nanobot-tools", tool_cls, ExtensionSource.BUILTIN)
+            for tool_cls in self.discover()
+        ]
+        discovered_tools.extend(
+            (entry_point_name, tool_cls, ExtensionSource.PYTHON_ENTRY_POINT)
+            for entry_point_name, tool_cls in self._discover_plugins().items()
+        )
+        for entry_point_name, tool_cls, registration_source in discovered_tools:
+            is_plugin_source = registration_source is ExtensionSource.PYTHON_ENTRY_POINT
+            cls_label = tool_cls.__name__
+            try:
+                if scope not in getattr(tool_cls, "_scopes", {"core"}):
+                    continue
+                if not tool_cls.enabled(ctx):
+                    continue
+                tool = tool_cls.create(ctx)
+                if is_plugin_source:
+                    tool = _LegacyErrorPrefixTool(tool)
+                if registry.has(tool.name):
+                    if is_plugin_source and tool.name in builtin_names:
                         logger.warning(
-                            "Tool name collision: %s from %s overwrites existing",
-                            tool.name, cls_label,
+                            "Plugin %s skipped: conflicts with built-in tool %s",
+                            cls_label, tool.name,
                         )
-                    registry.register(tool)
-                    registered.append(tool.name)
-                    if not is_plugin_source:
-                        builtin_names.add(tool.name)
-                except Exception:
-                    logger.exception("Failed to register tool: %s", cls_label)
+                        continue
+                    logger.warning(
+                        "Tool name collision: %s from %s overwrites existing",
+                        tool.name, cls_label,
+                    )
+                registry.register(
+                    tool,
+                    metadata=ToolRegistrationMetadata(
+                        source=registration_source,
+                        owner_name=entry_point_name,
+                        class_name=cls_label,
+                        scope=scope,
+                    ),
+                )
+                registered.append(tool.name)
+                if not is_plugin_source:
+                    builtin_names.add(tool.name)
+            except Exception:
+                logger.exception("Failed to register tool: %s", cls_label)
         return registered
 
 

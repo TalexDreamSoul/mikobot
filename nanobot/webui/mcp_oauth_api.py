@@ -42,6 +42,7 @@ class _OAuthCallbackError(RuntimeError):
 class _McpOAuthFlow:
     flow_id: str
     name: str
+    actor_user_id: str
     cfg: MCPServerConfig
     redirect_uri: str
     manual_callback: bool
@@ -110,9 +111,15 @@ class McpOAuthManager:
         cfg: MCPServerConfig,
         redirect_uri: str,
         *,
+        actor_user_id: str,
         reload_mcp: McpReload,
         reset_credentials: bool = False,
     ) -> dict[str, Any]:
+        if not actor_user_id:
+            raise McpOAuthError(
+                "MCP OAuth requires an authenticated administrator",
+                status=403,
+            )
         self._prune()
         redirect_uri, manual_callback = prepare_mcp_oauth_redirect_uri(redirect_uri)
         await self._cancel_name(name)
@@ -122,6 +129,7 @@ class McpOAuthManager:
         flow = _McpOAuthFlow(
             flow_id=secrets.token_urlsafe(24),
             name=name,
+            actor_user_id=actor_user_id,
             cfg=cfg,
             redirect_uri=redirect_uri,
             manual_callback=manual_callback,
@@ -153,9 +161,9 @@ class McpOAuthManager:
                 await ready_waiter
         return self._payload(flow)
 
-    async def status(self, flow_id: str) -> dict[str, Any]:
+    async def status(self, flow_id: str, *, actor_user_id: str) -> dict[str, Any]:
         self._prune()
-        flow = self._flow(flow_id)
+        flow = self._flow_for_actor(flow_id, actor_user_id)
         return self._payload(flow)
 
     def submit_callback(
@@ -188,10 +196,16 @@ class McpOAuthManager:
             callback_result.set_result((code, state))
         return flow.name
 
-    def submit_callback_url(self, *, flow_id: str, callback_url: str) -> dict[str, Any]:
+    def submit_callback_url(
+        self,
+        *,
+        flow_id: str,
+        callback_url: str,
+        actor_user_id: str,
+    ) -> dict[str, Any]:
         """Complete a flow from a full browser callback URL pasted into the WebUI."""
         self._prune()
-        flow = self._flow(flow_id)
+        flow = self._flow_for_actor(flow_id, actor_user_id)
         parsed = urlsplit(callback_url.strip())
         expected = urlsplit(flow.redirect_uri)
         if (
@@ -238,9 +252,9 @@ class McpOAuthManager:
         self.submit_callback(state=state, code=code, error=error)
         return self._payload(flow)
 
-    async def cancel(self, flow_id: str) -> dict[str, Any]:
+    async def cancel(self, flow_id: str, *, actor_user_id: str) -> dict[str, Any]:
         self._prune()
-        flow = self._flow(flow_id)
+        flow = self._flow_for_actor(flow_id, actor_user_id)
         await self._cancel_flow(flow)
         return self._payload(flow)
 
@@ -340,6 +354,14 @@ class McpOAuthManager:
     def _flow(self, flow_id: str) -> _McpOAuthFlow:
         flow = self._flows.get(flow_id)
         if flow is None:
+            raise McpOAuthError("Unknown or expired MCP OAuth flow", status=404)
+        return flow
+
+    def _flow_for_actor(self, flow_id: str, actor_user_id: object) -> _McpOAuthFlow:
+        if not isinstance(actor_user_id, str) or not actor_user_id:
+            raise McpOAuthError("MCP OAuth requires an authenticated administrator", status=403)
+        flow = self._flow(flow_id)
+        if not secrets.compare_digest(flow.actor_user_id, actor_user_id):
             raise McpOAuthError("Unknown or expired MCP OAuth flow", status=404)
         return flow
 

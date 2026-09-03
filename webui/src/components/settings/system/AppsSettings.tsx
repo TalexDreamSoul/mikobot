@@ -2,6 +2,7 @@ import {
   forwardRef,
   useId,
   useMemo,
+  useRef,
   useState,
   type ComponentPropsWithoutRef,
   type Dispatch,
@@ -22,6 +23,7 @@ import {
   RotateCcw,
   Search,
   Server,
+  ShieldAlert,
   SlidersHorizontal,
   TriangleAlert,
   Trash2,
@@ -38,6 +40,16 @@ import {
   McpManagementDialog,
   type McpManagementTab,
 } from "@/components/settings/system/McpManagementDialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -525,6 +537,13 @@ function McpAppsCatalogRow({
   const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
   const [managementOpen, setManagementOpen] = useState(false);
   const [managementTab, setManagementTab] = useState<McpManagementTab>("overview");
+  const [agentPluginWarningOpen, setAgentPluginWarningOpen] = useState(false);
+  const [agentPluginEnableTarget, setAgentPluginEnableTarget] = useState<{
+    id: string;
+    revision: string;
+    displayName: string;
+  } | null>(null);
+  const enableButtonRef = useRef<HTMLButtonElement>(null);
   const enableBusy = actionKey === `enable:${preset.name}`;
   const disableBusy = actionKey === `disable:${preset.name}`;
   const removeBusy = actionKey === `remove:${preset.name}`;
@@ -535,6 +554,7 @@ function McpAppsCatalogRow({
   const anotherOAuthBusy = Boolean(actionKey?.startsWith("oauth:")) && !oauthBusy;
   const busy = enableBusy || disableBusy || removeBusy || testBusy || reconnectBusy || toolsBusy || oauthBusy;
   const agentPlugin = preset.source === "agent-plugin";
+  const agentPluginExecutable = agentPlugin && preset.risk_acknowledgement_required === true;
   const toggleable = preset.enabled !== undefined;
   const isOAuth = preset.auth === "oauth";
   const missingFields = preset.required_fields.filter((field) => field.required && !field.configured);
@@ -565,6 +585,48 @@ function McpAppsCatalogRow({
   const callbackHelpId = `${callbackInputId}-help`;
   const callbackErrorId = `${callbackInputId}-error`;
 
+  const requestEnable = () => {
+    if (!agentPlugin) {
+      onAction("enable", preset.name, values);
+      return;
+    }
+    if (!preset.extension_id || !preset.extension_revision) return;
+    if (agentPluginExecutable) {
+      setAgentPluginEnableTarget({
+        id: preset.extension_id,
+        revision: preset.extension_revision,
+        displayName: preset.display_name,
+      });
+      setAgentPluginWarningOpen(true);
+      return;
+    }
+    onAction("enable", preset.name, {
+      extension_id: preset.extension_id,
+      expected_revision: preset.extension_revision,
+    });
+  };
+  const confirmAgentPluginEnable = () => {
+    if (!agentPluginEnableTarget) return;
+    onAction("enable", preset.name, {
+      extension_id: agentPluginEnableTarget.id,
+      expected_revision: agentPluginEnableTarget.revision,
+      risk_acknowledged: "true",
+    });
+  };
+  const disablePreset = () => {
+    if (!agentPlugin) {
+      onAction("disable", preset.name);
+      return;
+    }
+    if (!preset.extension_id) return;
+    const actionValues: Record<string, string> = {
+      extension_id: preset.extension_id,
+    };
+    if (preset.extension_revision) {
+      actionValues.expected_revision = preset.extension_revision;
+    }
+    onAction("disable", preset.name, actionValues);
+  };
   const enableOrOpenSetup = () => {
     if (isOAuth) {
       onOAuthConnect(preset.name);
@@ -575,7 +637,7 @@ function McpAppsCatalogRow({
       setManagementOpen(true);
       return;
     }
-    onAction("enable", preset.name, values);
+    requestEnable();
   };
   const openManagement = (tab: McpManagementTab = "overview") => {
     setManagementTab(tab);
@@ -675,7 +737,7 @@ function McpAppsCatalogRow({
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem
                     disabled={busy}
-                    onClick={() => onAction("disable", preset.name)}
+                    onClick={disablePreset}
                   >
                     <PauseCircle aria-hidden />
                     {tx("settings.nanobotFeatures.disable", "Disable")}
@@ -699,10 +761,11 @@ function McpAppsCatalogRow({
             )
           ) : preset.enabled === false ? (
             <AppsActionButton
-              ariaLabel={tx("settings.nanobotFeatures.enable", "Enable")}
+              ref={agentPlugin ? enableButtonRef : undefined}
+              ariaLabel={`${preset.display_name}: ${tx("settings.nanobotFeatures.enable", "Enable")}`}
               visibleLabel={tx("settings.nanobotFeatures.enable", "Enable")}
               busy={enableBusy}
-              onClick={() => onAction("enable", preset.name, values)}
+              onClick={requestEnable}
             />
           ) : isOAuth && preset.install_supported ? (
             <AppsActionButton
@@ -722,7 +785,7 @@ function McpAppsCatalogRow({
               busy={enableBusy}
               onClick={() => {
                 if (hasFields) openManagement("connection");
-                else onAction("enable", preset.name, values);
+                else requestEnable();
               }}
             />
           ) : preset.install_supported ? (
@@ -868,6 +931,49 @@ function McpAppsCatalogRow({
           onToolsChange={onToolsChange}
         />
       ) : null}
+
+      <AlertDialog
+        open={agentPluginWarningOpen}
+        onOpenChange={(open) => {
+          setAgentPluginWarningOpen(open);
+          if (!open) {
+            setAgentPluginEnableTarget(null);
+            setTimeout(() => enableButtonRef.current?.focus(), 0);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-control bg-muted text-foreground">
+              <ShieldAlert className="h-5 w-5" aria-hidden />
+            </div>
+            <AlertDialogTitle>
+              {t("settings.apps.agentPluginEnableTitle", {
+                name: agentPluginEnableTarget?.displayName ?? preset.display_name,
+                defaultValue: "Enable {{name}}?",
+              })}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="leading-6">
+              {tx(
+                "settings.apps.agentPluginEnableWarning",
+                "This Agent Plugin is operator-trusted, unisolated executable code. It may access files, credentials, network, and other resources visible to the nanobot process. nanobot does not verify this plugin or make it safe.",
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="w-full sm:w-auto">
+              {t("common.cancel", { defaultValue: "Cancel" })}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={!agentPluginEnableTarget || enableBusy}
+              onClick={confirmAgentPluginEnable}
+              className="w-full sm:w-auto"
+            >
+              {tx("settings.apps.agentPluginEnableConfirm", "Enable plugin")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </article>
   );
 }
