@@ -1356,6 +1356,12 @@ export type ChannelRuntimeStatus = "running" | "starting" | "failed" | "stopped"
 export interface NanobotFeaturesPayload {
   features: NanobotFeatureInfo[];
   enabled_count: number;
+  /**
+   * Set when the gateway withheld the host inventory because the caller is not a
+   * system administrator. `features` is then empty because nothing was disclosed,
+   * not because nothing is installed.
+   */
+  restricted?: boolean;
   requires_restart?: boolean;
   last_action?: {
     ok: boolean;

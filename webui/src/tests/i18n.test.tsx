@@ -611,6 +611,20 @@ describe("webui i18n", () => {
     expect(settings.skills.marketplaceTrendingTitle).toBe("各市场热门技能");
   });
 
+  it("localizes the restricted channel inventory notice for Simplified Chinese", () => {
+    // Only en and zh-CN carry this copy; every other locale deep-merges over English
+    // until it is translated, which is why these keys are not in the leak lists above.
+    const channels = resources["zh-CN"].common.settings.channels;
+    const english = resources.en.common.settings.channels;
+
+    expect(channels.restrictedTitle).toBe("需要管理员权限");
+    expect(channels.restrictedDescription).toBe(
+      "只有系统管理员可以查看和配置此主机上安装的渠道。",
+    );
+    expect(english.restrictedTitle).toBe("Administrator access required");
+    expect(channels.restrictedDescription).not.toBe(english.restrictedDescription);
+  });
+
   it("keeps the Simplified Chinese group workflow localized", () => {
     const workbench = resources["zh-CN"].common.workbench;
 

@@ -405,9 +405,9 @@
     },
     "capabilities": {
       "providerSupport": "Hỗ trợ nhà cung cấp",
-      "providerInstallOnSave": "Hỗ trợ cần thiết sẽ được cài đặt tự động khi bạn lưu nhà cung cấp này.",
+      "providerInstallOnSave": "Khi lưu, bạn sẽ được yêu cầu xác nhận cài đặt hỗ trợ cần thiết trước. Hãy lưu lại sau khi cài xong.",
       "searchSupport": "Hỗ trợ nhà cung cấp tìm kiếm",
-      "searchInstallOnSave": "Hỗ trợ Olostep sẽ được cài đặt tự động khi bạn lưu.",
+      "searchInstallOnSave": "Khi lưu, bạn sẽ được yêu cầu xác nhận cài đặt hỗ trợ Olostep trước. Hãy lưu lại sau khi cài xong.",
       "installing": "Đang cài đặt hỗ trợ..."
     },
     "models": {

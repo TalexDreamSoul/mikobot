@@ -620,9 +620,9 @@
     },
     "capabilities": {
       "providerSupport": "Suporte do provedor",
-      "providerInstallOnSave": "O suporte necessário será instalado automaticamente ao salvar este provedor.",
+      "providerInstallOnSave": "Ao salvar, você confirmará primeiro a instalação do suporte necessário. Salve novamente após a conclusão.",
       "searchSupport": "Suporte do provedor de pesquisa",
-      "searchInstallOnSave": "O suporte ao Olostep será instalado automaticamente ao salvar.",
+      "searchInstallOnSave": "Ao salvar, você confirmará primeiro a instalação do suporte Olostep. Salve novamente após a conclusão.",
       "installing": "Instalando suporte..."
     },
     "api": {

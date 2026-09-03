@@ -205,7 +205,7 @@
       "noClaimedChannels": "尚未认领渠道",
       "noProjects": "尚未分配项目",
       "channelInstance": "渠道实例",
-      "chooseChannel": "请选择渠道实例",
+      "chooseChannel": "请选择渠道实例", "channelsRestricted": "只有系统管理员可以列出此主机上的 channel 实例。请让管理员为此 bot 分配 channel。",
       "claimChannel": "认领渠道",
       "projectChannel": "用于项目验证的已认领渠道",
       "chooseClaimedChannel": "请选择已认领渠道",
@@ -878,9 +878,9 @@
     },
     "capabilities": {
       "providerSupport": "提供商支持",
-      "providerInstallOnSave": "保存此提供商时会自动安装所需支持。",
+      "providerInstallOnSave": "保存时会先请你确认安装所需支持，安装完成后请再次保存。",
       "searchSupport": "搜索提供商支持",
-      "searchInstallOnSave": "保存时会自动安装 Olostep 支持。",
+      "searchInstallOnSave": "保存时会先请你确认安装 Olostep 支持，安装完成后请再次保存。",
       "installing": "正在安装支持…"
     },
     "api": {
@@ -975,6 +975,8 @@
       "catalog": "渠道",
       "loading": "正在加载渠道...",
       "empty": "没有匹配的渠道。",
+      "restrictedTitle": "需要管理员权限",
+      "restrictedDescription": "只有系统管理员可以查看和配置此主机上安装的渠道。",
       "restartRequired": "重启 nanobot 以应用更新后的渠道支持。",
       "requires": "需要：{{requirements}}",
       "setUp": "设置",

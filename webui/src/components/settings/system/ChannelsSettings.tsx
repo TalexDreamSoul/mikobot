@@ -10,6 +10,7 @@ import {
   type ChannelFilter,
 } from "@/components/settings/channels/ChannelIdentity";
 import { ChannelCatalogRow, ChannelSetupPanel } from "@/components/settings/channels/ChannelSetupPanel";
+import { nanobotFeaturesRestricted } from "@/components/settings/contracts";
 import {
   DismissibleStatusMessage,
   RestartRequiredNotice,
@@ -61,6 +62,10 @@ export function ChannelsSettings({
   const containerRef = useRef<HTMLDivElement>(null);
   const compactDetailTopRef = useRef<HTMLButtonElement>(null);
   const [compactDetailOpen, setCompactDetailOpen] = useState(false);
+  // The gateway withholds the host channel inventory from a non-administrator. Search,
+  // filter counts, and the "no match" empty state would all read as "this host has no
+  // channels", so the section says who can see them instead.
+  const restricted = nanobotFeaturesRestricted(nanobotFeatures);
   const allChannels = (nanobotFeatures?.features ?? [])
     .filter((feature) => feature.type === "channel")
     .filter((feature) => feature.settings_visible !== false)
@@ -137,7 +142,7 @@ export function ChannelsSettings({
       ref={containerRef}
       className="flex min-h-full flex-1 flex-col xl:min-h-0 xl:overflow-hidden"
     >
-      {!showingCompactDetail ? (
+      {!showingCompactDetail && !restricted ? (
         <section className="shrink-0 space-y-4">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
             <div className="relative min-w-0 flex-1">
@@ -205,6 +210,21 @@ export function ChannelsSettings({
           <div className="flex h-36 items-center justify-center text-sm text-muted-foreground">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
             {tx("settings.channels.loading", "Loading Channels...")}
+          </div>
+        ) : restricted ? (
+          <div
+            role="status"
+            className="min-h-0 flex-1 space-y-1 px-3 py-12 text-center text-sm text-muted-foreground"
+          >
+            <p className="font-medium text-foreground">
+              {tx("settings.channels.restrictedTitle", "Administrator access required")}
+            </p>
+            <p>
+              {tx(
+                "settings.channels.restrictedDescription",
+                "Only a system administrator can see and configure the channels installed on this host.",
+              )}
+            </p>
           </div>
         ) : channels.length ? splitLayout ? (
           <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(400px,460px)] gap-6 overflow-hidden">

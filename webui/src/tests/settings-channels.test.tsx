@@ -1439,4 +1439,33 @@ describe("Settings channels", () => {
     expect(websocketSwitch).toHaveAttribute("aria-checked", "true");
     expect(requestMutationMock).not.toHaveBeenCalled();
   });
+
+  it("says an administrator is required rather than showing a host with no channels", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/settings") return jsonResponse(settingsPayload());
+      if (url === "/api/settings/cli-apps") return jsonResponse({ apps: [], installed_count: 0 });
+      if (url === "/api/settings/mcp-presets") return jsonResponse({ presets: [], installed_count: 0 });
+      if (url === "/api/settings/nanobot-features") {
+        // The projection the gateway returns to a member: no package, revision, or
+        // lifecycle, plus the marker that says the inventory was withheld.
+        return jsonResponse({ features: [], enabled_count: 0, restricted: true });
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderSettingsView({ initialSection: "channels" });
+
+    expect(await screen.findByText("Administrator access required")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Only a system administrator can see and configure the channels installed on this host.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No channels match this filter.")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Search channels")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(requestMutationMock).not.toHaveBeenCalled();
+  });
 });

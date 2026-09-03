@@ -405,9 +405,9 @@
     },
     "capabilities": {
       "providerSupport": "供應商支援",
-      "providerInstallOnSave": "儲存此供應商時會自動安裝所需支援。",
+      "providerInstallOnSave": "儲存時會先請你確認安裝所需支援，安裝完成後請再次儲存。",
       "searchSupport": "搜尋供應商支援",
-      "searchInstallOnSave": "儲存時會自動安裝 Olostep 支援。",
+      "searchInstallOnSave": "儲存時會先請你確認安裝 Olostep 支援，安裝完成後請再次儲存。",
       "installing": "正在安裝支援…"
     },
     "models": {

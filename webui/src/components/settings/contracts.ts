@@ -1,4 +1,4 @@
-import type { SettingsPayload } from "@/lib/types";
+import type { NanobotFeaturesPayload, SettingsPayload } from "@/lib/types";
 
 export type SettingsSectionKey =
   | "overview"
@@ -31,3 +31,14 @@ export type ApplySettingsPayload = (
 ) => void;
 
 export type MaybeRestartHostEngine = (payload: RestartAwarePayload) => Promise<void>;
+
+/**
+ * The gateway withholds the host extension inventory from anyone it cannot prove is a
+ * system administrator, and marks that projection `restricted` so the UI can say so
+ * instead of rendering a host that merely looks empty.
+ */
+export function nanobotFeaturesRestricted(
+  payload: NanobotFeaturesPayload | null | undefined,
+): boolean {
+  return payload?.restricted === true;
+}

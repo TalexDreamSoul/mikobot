@@ -205,7 +205,7 @@
       "noClaimedChannels": "No claimed channels",
       "noProjects": "No assigned projects",
       "channelInstance": "Channel instance",
-      "chooseChannel": "Choose a channel instance",
+      "chooseChannel": "Choose a channel instance", "channelsRestricted": "Only a system administrator can list the channel instances on this host. Ask an administrator to assign a channel to this bot.",
       "claimChannel": "Claim channel",
       "projectChannel": "Claimed channel used for project verification",
       "chooseClaimedChannel": "Choose a claimed channel",
@@ -878,9 +878,9 @@
     },
     "capabilities": {
       "providerSupport": "Provider support",
-      "providerInstallOnSave": "Required support will be installed automatically when you save this provider.",
+      "providerInstallOnSave": "Saving asks you to confirm the required support install first. Save again once it finishes.",
       "searchSupport": "Search provider support",
-      "searchInstallOnSave": "Olostep support will be installed automatically when you save.",
+      "searchInstallOnSave": "Saving asks you to confirm the Olostep support install first. Save again once it finishes.",
       "installing": "Installing support..."
     },
     "api": {
@@ -975,6 +975,8 @@
       "catalog": "Channels",
       "loading": "Loading Channels...",
       "empty": "No channels match this filter.",
+      "restrictedTitle": "Administrator access required",
+      "restrictedDescription": "Only a system administrator can see and configure the channels installed on this host.",
       "restartRequired": "Restart nanobot to apply updated channel support.",
       "requires": "Requires: {{requirements}}",
       "setUp": "Set up",

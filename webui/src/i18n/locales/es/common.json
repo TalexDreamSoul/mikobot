@@ -405,9 +405,9 @@
     },
     "capabilities": {
       "providerSupport": "Compatibilidad del proveedor",
-      "providerInstallOnSave": "La compatibilidad necesaria se instalará automáticamente al guardar este proveedor.",
+      "providerInstallOnSave": "Al guardar, primero se te pedirá confirmar la instalación de la compatibilidad necesaria. Vuelve a guardar cuando termine.",
       "searchSupport": "Compatibilidad del proveedor de búsqueda",
-      "searchInstallOnSave": "La compatibilidad con Olostep se instalará automáticamente al guardar.",
+      "searchInstallOnSave": "Al guardar, primero se te pedirá confirmar la instalación de la compatibilidad de Olostep. Vuelve a guardar cuando termine.",
       "installing": "Instalando compatibilidad..."
     },
     "models": {

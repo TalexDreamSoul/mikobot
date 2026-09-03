@@ -111,7 +111,6 @@ export function createSystemSettingsActions({
     mcpOAuthFlowRef,
     mcpOAuthNavigatedUrlRef,
     mcpOAuthPopupRef,
-    nanobotFeatures,
     setApiService,
     setApiServiceAction,
     setApiServiceError,
@@ -143,6 +142,13 @@ export function createSystemSettingsActions({
     setNanobotFeaturesError,
   } = state;
 
+  // Installing a missing capability downloads and runs third-party code inside
+  // this process, so the operator has to acknowledge that risk first. This
+  // helper therefore never installs and never claims an acknowledgement: it
+  // reports true when every requested capability is already present, and
+  // otherwise hands the first missing one to the install confirmation dialog,
+  // which performs the acknowledged install through handleNanobotFeatureAction.
+  // Cancelling the dialog leaves the capability and the caller untouched.
   const installCapabilities = async (names: string[]): Promise<boolean> => {
     const unavailable = names.find(
       (name) => !featureCatalog.some((feature) => feature.name === name),
@@ -155,27 +161,9 @@ export function createSystemSettingsActions({
       (feature) => names.includes(feature.name) && !feature.installed,
     );
     if (!missing.length) return true;
-    setNanobotFeatureAction(`enable:${names.join("+")}`);
     setNanobotFeaturesError(null);
-    try {
-      let latest = nanobotFeatures;
-      for (const feature of missing) {
-        latest = await enableNanobotFeature(client, feature.name, {
-          ...nanobotFeatureActionOptions(feature),
-          riskAcknowledged: true,
-        });
-        if (latest.requires_restart) {
-          setPendingRestartSections((prev) => ({ ...prev, runtime: true }));
-        }
-      }
-      if (latest) setNanobotFeatures(latest);
-      return true;
-    } catch (err) {
-      setNanobotFeaturesError((err as Error).message);
-      return false;
-    } finally {
-      setNanobotFeatureAction(null);
-    }
+    setNanobotFeatureConfirm(missing[0]);
+    return false;
   };
 
   const handleApiServiceAction = async (

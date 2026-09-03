@@ -405,9 +405,9 @@
     },
     "capabilities": {
       "providerSupport": "제공자 지원",
-      "providerInstallOnSave": "이 제공자를 저장하면 필요한 지원이 자동으로 설치됩니다.",
+      "providerInstallOnSave": "저장하면 필요한 지원 설치를 먼저 확인하라는 안내가 표시됩니다. 설치가 끝나면 다시 저장하세요.",
       "searchSupport": "검색 제공자 지원",
-      "searchInstallOnSave": "저장하면 Olostep 지원이 자동으로 설치됩니다.",
+      "searchInstallOnSave": "저장하면 Olostep 지원 설치를 먼저 확인하라는 안내가 표시됩니다. 설치가 끝나면 다시 저장하세요.",
       "installing": "지원 설치 중..."
     },
     "models": {

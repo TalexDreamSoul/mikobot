@@ -405,9 +405,9 @@
     },
     "capabilities": {
       "providerSupport": "Prise en charge du fournisseur",
-      "providerInstallOnSave": "La prise en charge requise sera installée automatiquement lors de l’enregistrement de ce fournisseur.",
+      "providerInstallOnSave": "L’enregistrement vous demande d’abord de confirmer l’installation de la prise en charge requise. Enregistrez à nouveau une fois terminée.",
       "searchSupport": "Prise en charge du fournisseur de recherche",
-      "searchInstallOnSave": "La prise en charge d’Olostep sera installée automatiquement lors de l’enregistrement.",
+      "searchInstallOnSave": "L’enregistrement vous demande d’abord de confirmer l’installation de la prise en charge Olostep. Enregistrez à nouveau une fois terminée.",
       "installing": "Installation de la prise en charge..."
     },
     "models": {

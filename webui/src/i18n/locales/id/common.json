@@ -405,9 +405,9 @@
     },
     "capabilities": {
       "providerSupport": "Dukungan penyedia",
-      "providerInstallOnSave": "Dukungan yang diperlukan akan dipasang otomatis saat Anda menyimpan penyedia ini.",
+      "providerInstallOnSave": "Saat menyimpan, Anda akan diminta mengonfirmasi pemasangan dukungan yang diperlukan. Simpan lagi setelah selesai.",
       "searchSupport": "Dukungan penyedia pencarian",
-      "searchInstallOnSave": "Dukungan Olostep akan dipasang otomatis saat Anda menyimpan.",
+      "searchInstallOnSave": "Saat menyimpan, Anda akan diminta mengonfirmasi pemasangan dukungan Olostep. Simpan lagi setelah selesai.",
       "installing": "Memasang dukungan..."
     },
     "models": {

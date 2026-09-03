@@ -219,6 +219,43 @@ describe("bot and organization controls", () => {
     expect(await screen.findByText("guides/release.md")).toBeInTheDocument();
   });
 
+  it("says an administrator is required instead of showing an empty claim list", async () => {
+    await i18n.changeLanguage("zh-CN");
+    // The gateway withholds the host inventory from a member, so an empty option list
+    // here means "not disclosed", not "this host has no channels".
+    vi.mocked(fetchNanobotFeatures).mockResolvedValue({
+      features: [],
+      enabled_count: 0,
+      restricted: true,
+    } as never);
+    vi.mocked(fetchSkills).mockResolvedValue({ skills: [] } as never);
+    const projects = {
+      summary: { bots: [releaseBot], projects: [project] },
+      organizationId: studio.id,
+      botId: releaseBot.id,
+      projectId: project.id,
+      botDetail: { channels: [], projects: [], capability_profiles: [] },
+      botDetailLoading: false,
+      busyKey: null,
+      selectBot: vi.fn(),
+      createBot: vi.fn(),
+      beginPairing: vi.fn(),
+      finishPairing: vi.fn(),
+    };
+
+    render(
+      <ClientProvider client={{ requestMutation: vi.fn() } as never} token="token">
+        <BotManagementPanel projects={projects as never} />
+      </ClientProvider>,
+    );
+
+    const channel = await screen.findByLabelText("渠道实例");
+    expect(channel).toBeDisabled();
+    expect(
+      screen.getByText("只有系统管理员可以列出此主机上的 channel 实例。请让管理员为此 bot 分配 channel。"),
+    ).toBeInTheDocument();
+  });
+
   it("waits for pairing consumption before replacing the visible code with completion", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-01T12:00:00Z"));

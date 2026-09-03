@@ -405,9 +405,9 @@
     },
     "capabilities": {
       "providerSupport": "プロバイダーサポート",
-      "providerInstallOnSave": "このプロバイダーを保存すると、必要なサポートが自動的にインストールされます。",
+      "providerInstallOnSave": "保存すると、必要なサポートのインストール確認が先に表示されます。完了後にもう一度保存してください。",
       "searchSupport": "検索プロバイダーサポート",
-      "searchInstallOnSave": "保存時に Olostep のサポートが自動的にインストールされます。",
+      "searchInstallOnSave": "保存すると、Olostep サポートのインストール確認が先に表示されます。完了後にもう一度保存してください。",
       "installing": "サポートをインストール中..."
     },
     "models": {

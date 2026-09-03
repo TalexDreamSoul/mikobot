@@ -27,6 +27,7 @@ import type {
   SkillDetail,
   SkillSummary,
 } from "@/lib/types";
+import { nanobotFeaturesRestricted } from "@/components/settings/contracts";
 import { useClient } from "@/providers/ClientProvider";
 
 interface ChannelOption {
@@ -47,6 +48,7 @@ export function BotManagementPanel({
   const [featuresLoading, setFeaturesLoading] = useState(true);
   const [skillsLoading, setSkillsLoading] = useState(true);
   const [featuresError, setFeaturesError] = useState<string | null>(null);
+  const [featuresRestricted, setFeaturesRestricted] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [discoveryRevision, setDiscoveryRevision] = useState(0);
   const [features, setFeatures] = useState<NanobotFeatureInfo[]>([]);
@@ -87,6 +89,7 @@ export function BotManagementPanel({
       .then((payload) => {
         if (!cancelled) {
           setFeatures(payload.features.filter((feature) => feature.type === "channel"));
+          setFeaturesRestricted(nanobotFeaturesRestricted(payload));
         }
       })
       .catch((reason) => {
@@ -409,11 +412,16 @@ export function BotManagementPanel({
                 </Button>
               </div>
             ) : null}
+            {featuresRestricted ? (
+              <p className="text-xs text-muted-foreground">
+                {t("projects.bots.channelsRestricted")}
+              </p>
+            ) : null}
             <select
               id="bot-channel-instance"
               value={selectedChannel}
               onChange={(event) => setSelectedChannel(event.target.value)}
-              disabled={featuresLoading || Boolean(featuresError)}
+              disabled={featuresLoading || Boolean(featuresError) || featuresRestricted}
               className="h-11 w-full rounded-control border border-input bg-background px-3 text-sm disabled:opacity-60"
             >
               <option value="">{t("projects.bots.chooseChannel")}</option>
