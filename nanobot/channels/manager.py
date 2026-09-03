@@ -10,7 +10,6 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from filelock import FileLock
 from loguru import logger
 
 from nanobot.bus.events import OutboundMessage
@@ -45,6 +44,7 @@ from nanobot.utils.restart import (
 if TYPE_CHECKING:
     from nanobot.collaboration import CollaborationRepository
     from nanobot.cron.service import CronService
+    from nanobot.extensions.registry import ExtensionRegistry
     from nanobot.session.manager import SessionManager
     from nanobot.triggers.local_store import LocalTriggerStore
 
@@ -106,6 +106,7 @@ class ChannelManager:
         webui_runtime_surface: str = "browser",
         webui_runtime_capabilities: dict[str, Any] | None = None,
         webui_mcp_runtime_status: Callable[[], Mapping[str, str]] | None = None,
+        webui_extension_registry: ExtensionRegistry | None = None,
         webui_mcp_reload: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         webui_skill_state_action: Callable[[set[str]], None] | None = None,
         webui_recovery_action: (
@@ -132,6 +133,7 @@ class ChannelManager:
         self._webui_runtime_surface = webui_runtime_surface
         self._webui_runtime_capabilities = dict(webui_runtime_capabilities or {})
         self._webui_mcp_runtime_status = webui_mcp_runtime_status
+        self._webui_extension_registry = webui_extension_registry
         self._webui_mcp_reload = webui_mcp_reload
         self._webui_skill_state_action = webui_skill_state_action
         self._webui_recovery_action = webui_recovery_action
@@ -202,12 +204,12 @@ class ChannelManager:
                 local_trigger_store=self._local_trigger_store,
                 cron_pending_job_ids=self._webui_cron_pending_job_ids,
                 local_trigger_pending_ids=self._webui_local_trigger_pending_ids,
-                channel_feature_action=self.apply_channel_feature_action,
-                channel_runtime_status=self.get_status,
+                channel_pairing_action=self.channel_pairing_action,
                 mcp_runtime_status=self._webui_mcp_runtime_status,
                 mcp_reload=self._webui_mcp_reload,
                 skill_state_action=self._webui_skill_state_action,
                 recovery_action=self._webui_recovery_action,
+                extension_registry=self._webui_extension_registry,
                 collaboration=self._collaboration_repository,
                 logger=logger,
             )
@@ -280,24 +282,38 @@ class ChannelManager:
         content: str,
         sender_id: str,
     ) -> bool:
+        from nanobot.collaboration import CollaborationConflictError
         from nanobot.collaboration.pairing import normalize_assignment_code
         from nanobot.collaboration.store import CollaborationNotFoundError
+        from nanobot.extensions.contracts import ExtensionSource
+        from nanobot.extensions.targets import resolve_extension_feature_target
 
         repository = self._collaboration_repository
-        if repository is None:
+        registry = self._webui_extension_registry
+        if repository is None or registry is None:
             return False
         try:
+            target = resolve_extension_feature_target(
+                registry.snapshot(), channel_type, instance_id
+            )
+            if (
+                target is None
+                or target.source is not ExtensionSource.CHANNEL_PACKAGE
+                or not target.revision
+            ):
+                return False
             code = normalize_assignment_code(content)
-        except ValueError:
-            return False
-        try:
             await repository.verify_pairing_challenge(
                 code,
                 channel_type=channel_type,
                 instance_id=instance_id,
+                channel_revision=target.revision,
                 sender_id=sender_id,
             )
-        except CollaborationNotFoundError:
+        except (CollaborationConflictError, CollaborationNotFoundError, ValueError):
+            return False
+        except Exception:
+            logger.exception("Unable to verify assignment pairing")
             return False
         return True
 
@@ -632,14 +648,14 @@ class ChannelManager:
                 pairing_config,
                 runtime_name=runtime_name,
             )
-        except Exception as exc:
+        except Exception:
             self._mark_runtime_error((runtime_name,), "Pairing listener could not be started.")
             logger.exception("Failed to build pairing listener {}", runtime_name)
             return {
                 "handled": True,
                 "ok": False,
                 "requires_restart": False,
-                "message": f"{plugin.display_name} pairing listener failed: {exc}",
+                "message": "Pairing listener could not be started. Check gateway logs.",
             }
 
         if runtime_name in self.channels:
@@ -657,50 +673,142 @@ class ChannelManager:
             "requires_restart": False,
             "message": f"{plugin.display_name} pairing listener is ready.",
         }
-    def _persist_enabled_instance(
-        self, plugin: ChannelPlugin, section: Any, instance_id: str
-    ) -> Any:
-        from nanobot.config.loader import load_config, save_config
 
-        updater = plugin.management.update_instance_config
-        if updater is None:
-            raise RuntimeError(f"{plugin.name} does not support instance updates")
-        config_lock = FileLock(
-            str(self._config_path.with_suffix(f"{self._config_path.suffix}.lock"))
+    async def channel_pairing_action(
+        self, channel_type: str, instance_id: str
+    ) -> dict[str, Any]:
+        """Route legacy WebUI pairing injection through the exact-instance port."""
+        return cast(
+            dict[str, Any],
+            await self.apply_channel_instance_action("pairing", channel_type, instance_id),
         )
-        with config_lock:
-            config = load_config(self._config_path)
-            latest_section = self._channel_section(
+
+    async def apply_channel_instance_action(
+        self, action: str, channel_type: str, instance_id: str
+    ) -> dict[str, object]:
+        """Apply one runtime action to one configured channel instance."""
+        action_value = cast(object, action)
+        if not isinstance(action_value, str) or not (action := action_value.strip().lower()):
+            return {
+                "handled": True,
+                "ok": False,
+                "requires_restart": False,
+                "message": "Channel action is required.",
+            }
+        runtime_action = {
+            "enable": "enable",
+            "disable": "disable",
+            "reconnect": "enable",
+            "pairing": "pairing",
+        }.get(action)
+        if runtime_action is None:
+            return {
+                "handled": True,
+                "ok": False,
+                "requires_restart": False,
+                "message": "Channel action is not supported.",
+            }
+        channel_type_value = cast(object, channel_type)
+        if not isinstance(channel_type_value, str) or not (
+            channel_type := channel_type_value.strip()
+        ):
+            return {
+                "handled": True,
+                "ok": False,
+                "requires_restart": False,
+                "message": "Channel type is required.",
+            }
+        instance_id_value = cast(object, instance_id)
+        if not isinstance(instance_id_value, str) or not (
+            instance_id := instance_id_value.strip()
+        ):
+            return {
+                "handled": True,
+                "ok": False,
+                "requires_restart": False,
+                "message": "Channel instance is required.",
+            }
+
+        from nanobot.channels.registry import discover_plugins
+
+        plugin = discover_plugins({channel_type}).get(channel_type)
+        if plugin is None:
+            return {
+                "handled": True,
+                "ok": False,
+                "requires_restart": False,
+                "message": "Channel type is not available.",
+            }
+        try:
+            latest_config = self.config
+            if hasattr(self, "_config_path"):
+                from nanobot.config.loader import load_config
+
+                latest_config = load_config(self._config_path)
+                self.config = latest_config
+            section = self._channel_section(
                 plugin.name,
-                config=config,
+                config=latest_config,
                 default_enabled=plugin.default_enabled,
             )
-            if latest_section is None:
-                latest_section = section
-            if hasattr(latest_section, "model_dump"):
-                latest_section = latest_section.model_dump(mode="json", by_alias=True)
-            updated_section = updater(
-                latest_section,
-                {"enabled": True, "pairingRequired": False},
-                instance_id=instance_id,
+            has_instance = any(
+                spec.instance_id == instance_id
+                for spec in channel_instance_specs(plugin, section, enabled_only=False)
             )
-            setattr(config.channels, plugin.name, updated_section)
-            save_config(config, self._config_path)
-            self.config = config
-            return updated_section
+        except Exception:
+            logger.exception("Failed to validate channel instance action")
+            return {
+                "handled": True,
+                "ok": False,
+                "requires_restart": False,
+                "message": "Channel action could not be validated.",
+            }
+        if not has_instance:
+            return {
+                "handled": True,
+                "ok": False,
+                "requires_restart": False,
+                "message": "Channel instance is not available.",
+            }
 
-    async def apply_channel_feature_action(
+        result = await self._apply_channel_runtime_action(
+            runtime_action, plugin.name, instance_id
+        )
+        result_value = cast(object, result)
+        if not isinstance(result_value, Mapping):
+            return {
+                "handled": True,
+                "ok": False,
+                "requires_restart": True,
+                "message": "Channel action could not be completed.",
+            }
+        result_mapping = cast(Mapping[str, object], result_value)
+        ok = bool(result_mapping.get("ok", False)) and bool(
+            result_mapping.get("handled", False)
+        )
+        messages = {
+            "enable": ("Channel enabled.", "Channel could not be enabled."),
+            "disable": ("Channel disabled.", "Channel could not be disabled."),
+            "reconnect": ("Channel reconnected.", "Channel could not be reconnected."),
+            "pairing": (
+                "Pairing listener is ready.",
+                "Pairing listener could not be started.",
+            ),
+        }
+        return {
+            "handled": True,
+            "ok": ok,
+            "requires_restart": bool(result_mapping.get("requires_restart", False)),
+            "message": messages[action][0 if ok else 1],
+        }
+
+    async def _apply_channel_runtime_action(
         self,
         action: str,
         name: str,
         instance_id: str | None = None,
     ) -> dict[str, Any]:
-        """Apply a WebUI channel enable/disable action without restarting the gateway.
-
-        Returns a small transport-neutral result. ``handled=False`` means the
-        optional feature is not a channel and should keep the default feature
-        response semantics.
-        """
+        """Reconcile one selected channel runtime without persisting configuration."""
         name = name.strip()
         instance_id = (instance_id or "").strip() or None
         if not name:
@@ -718,13 +826,8 @@ class ChannelManager:
                 "requires_restart": True,
                 "message": f"{plugin.display_name} is always enabled and is applied on restart.",
             }
-        if action == "activate" and plugin.management.update_instance_config is None:
-            return {"handled": False}
         if action == "pairing":
             return await self._apply_pairing_only_action(plugin, instance_id)
-        from nanobot.config.loader import load_config
-
-        self.config = load_config()
         section = self._channel_section(name, default_enabled=plugin.default_enabled)
         channel_setup_spec(name, plugin=plugin)
         instance_id = resolve_channel_action_target(instance_id)
@@ -751,14 +854,7 @@ class ChannelManager:
                 "message": f"{name} channel stopped." if stopped else f"{name} channel disabled.",
             }
 
-        if action == "activate":
-            section = self._persist_enabled_instance(plugin, section, instance_id)
-            specs = [
-                spec
-                for spec in channel_instance_specs(plugin, section, enabled_only=True)
-                if spec.instance_id == instance_id
-            ]
-        elif action == "enable":
+        if action == "enable":
             specs = channel_instance_specs(plugin, section) if section is not None else []
             specs = [spec for spec in specs if spec.instance_id == instance_id]
         else:

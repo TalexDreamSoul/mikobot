@@ -110,7 +110,7 @@ def test_descriptor_rejects_runtime_class_owned_by_another_name():
 
 
 @pytest.mark.asyncio
-async def test_apply_channel_feature_action_starts_and_stops_channel(monkeypatch):
+async def test_instance_action_starts_and_stops_exact_default_channel(monkeypatch):
     disabled = Config.model_validate({
         "channels": {
             "websocket": {"enabled": False},
@@ -126,12 +126,12 @@ async def test_apply_channel_feature_action_starts_and_stops_channel(monkeypatch
 
     configs = iter([enabled, disabled])
     _stub_registry(monkeypatch, _plugin(_HotChannel))
-    monkeypatch.setattr("nanobot.config.loader.load_config", lambda: next(configs))
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path: next(configs))
 
     manager = ChannelManager(disabled, MessageBus())
     manager._started = True
 
-    enabled_result = await manager.apply_channel_feature_action("enable", "hot")
+    enabled_result = await manager.apply_channel_instance_action("enable", "hot", "default")
 
     assert enabled_result["handled"] is True
     assert enabled_result["requires_restart"] is False
@@ -139,7 +139,7 @@ async def test_apply_channel_feature_action_starts_and_stops_channel(monkeypatch
     await asyncio.wait_for(channel.started.wait(), timeout=1)
     assert channel.is_running is True
 
-    disabled_result = await manager.apply_channel_feature_action("disable", "hot")
+    disabled_result = await manager.apply_channel_instance_action("disable", "hot", "default")
 
     assert disabled_result["handled"] is True
     assert disabled_result["requires_restart"] is False
@@ -148,7 +148,7 @@ async def test_apply_channel_feature_action_starts_and_stops_channel(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_apply_channel_feature_action_keeps_running_channel_when_rebuild_fails(monkeypatch):
+async def test_instance_action_keeps_running_channel_when_rebuild_fails(monkeypatch):
     enabled = Config.model_validate({
         "channels": {
             "websocket": {"enabled": False},
@@ -157,7 +157,7 @@ async def test_apply_channel_feature_action_keeps_running_channel_when_rebuild_f
     })
 
     _stub_registry(monkeypatch, _plugin(_HotChannel))
-    monkeypatch.setattr("nanobot.config.loader.load_config", lambda: enabled)
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path: enabled)
 
     manager = ChannelManager(enabled, MessageBus())
     old_channel = manager.channels["hot"]
@@ -168,7 +168,7 @@ async def test_apply_channel_feature_action_keeps_running_channel_when_rebuild_f
 
     monkeypatch.setattr(manager, "_build_channel", fail_build)
 
-    result = await manager.apply_channel_feature_action("enable", "hot")
+    result = await manager.apply_channel_instance_action("enable", "hot", "default")
 
     assert result["requires_restart"] is False
     assert result["ok"] is False
@@ -178,7 +178,7 @@ async def test_apply_channel_feature_action_keeps_running_channel_when_rebuild_f
 
 
 @pytest.mark.asyncio
-async def test_apply_channel_feature_action_uses_channel_runtime_name(monkeypatch):
+async def test_instance_action_uses_exact_channel_runtime_name(monkeypatch):
     config = Config.model_validate({
         "channels": {
             "websocket": {"enabled": False},
@@ -193,13 +193,13 @@ async def test_apply_channel_feature_action_uses_channel_runtime_name(monkeypatc
     })
 
     _stub_registry(monkeypatch, _plugin(_MultiHotChannel, multi_instance=True))
-    monkeypatch.setattr("nanobot.config.loader.load_config", lambda: config)
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path: config)
 
     manager = ChannelManager(config, MessageBus())
     product = manager.channels["multi.product"]
     product._running = True
 
-    result = await manager.apply_channel_feature_action("disable", "multi", "product")
+    result = await manager.apply_channel_instance_action("disable", "multi", "product")
 
     assert result["requires_restart"] is False
     assert "multi" in manager.channels
@@ -248,20 +248,20 @@ async def test_default_multi_channel_action_reconciles_only_default_runtime(monk
 
     _stub_registry(monkeypatch, _plugin(_MultiHotChannel, multi_instance=True))
     configs = iter([disabled, enabled])
-    monkeypatch.setattr("nanobot.config.loader.load_config", lambda: next(configs))
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path: next(configs))
 
     manager = ChannelManager(initial, MessageBus())
     default = manager.channels["multi"]
     product = manager.channels["multi.product"]
 
-    disabled_result = await manager.apply_channel_feature_action("disable", "multi")
+    disabled_result = await manager.apply_channel_instance_action("disable", "multi", "default")
 
     assert disabled_result["requires_restart"] is False
     assert set(manager.channels) == {"multi.product"}
     assert default.stopped.is_set()
     assert not product.stopped.is_set()
 
-    enabled_result = await manager.apply_channel_feature_action("enable", "multi")
+    enabled_result = await manager.apply_channel_instance_action("enable", "multi", "default")
 
     assert enabled_result["requires_restart"] is False
     assert set(manager.channels) == {"multi", "multi.product"}

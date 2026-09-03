@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import typer
+from filelock import FileLock
 from loguru import logger
 from rich.console import Console
 
@@ -34,6 +35,11 @@ from nanobot.cli.webui_support import (
 )
 from nanobot.config.paths import is_default_workspace
 from nanobot.config.schema import Config
+from nanobot.extensions.adapters import (
+    ChannelExtensionServices,
+    OptionalFeatureExtensionServices,
+)
+from nanobot.extensions.runtime import build_core_extension_registry, runtime_skills_loader
 from nanobot.gateway.runtime import GatewayInstance
 from nanobot.security.network import is_loopback_host
 from nanobot.session.keys import UNIFIED_SESSION_KEY, last_channel_from_metadata
@@ -443,7 +449,7 @@ def _run_gateway(
     session_manager = SessionManager(config.workspace_path)
 
     # Use the same runtime identity for foreground and managed gateway processes.
-    from nanobot.config.loader import get_config_path
+    from nanobot.config.loader import get_config_path, load_config, save_config
     from nanobot.gateway.runtime import (
         GatewayClientLease,
         GatewayRuntime,
@@ -456,6 +462,7 @@ def _run_gateway(
     config_path = str(instance.config_path)
     gateway_runtime = GatewayRuntime(paths=instance.paths)
     gateway_start_options = instance.start_options(port=port)
+    config_file = Path(config_path)
 
     # Preserve existing single-workspace installs, but keep custom workspaces clean.
     if is_default_workspace(config.workspace_path):
@@ -500,6 +507,55 @@ def _run_gateway(
         hook_factories=[create_file_edit_activity_hook],
         tool_registry=tools,
         recovery_admission=recovery,
+    )
+    def _mutate_channel_config(mutation: Callable[[Config], object]) -> object:
+        config_lock = FileLock(
+            str(config_file.with_suffix(f"{config_file.suffix}.lock"))
+        )
+        with config_lock:
+            latest_config = load_config(config_file)
+            result = mutation(latest_config)
+            save_config(latest_config, config_file)
+            return result
+
+    async def _apply_channel_runtime_action(
+        action: str, channel_type: str, instance_id: str
+    ) -> dict[str, object]:
+        return await channels.apply_channel_instance_action(
+            action, channel_type, instance_id
+        )
+
+    def _refresh_channel_metadata(channel_type: str, instance_id: str) -> None:
+        try:
+            from nanobot.channels.contracts import refresh_channel_feature_metadata
+            from nanobot.channels.registry import load_channel_class
+
+            refresh_channel_feature_metadata(
+                load_channel_class(channel_type), config_file, instance_id=instance_id
+            )
+        except Exception:
+            logger.warning("Channel metadata refresh failed after enablement")
+
+    channel_services = ChannelExtensionServices(
+        mutate_config=_mutate_channel_config,
+        runtime_action=_apply_channel_runtime_action,
+        refresh_metadata=_refresh_channel_metadata,
+    )
+    optional_feature_services = OptionalFeatureExtensionServices()
+
+
+    def _channel_runtime_status() -> dict[str, Any]:
+        return channels.get_status()
+
+    extensions = build_core_extension_registry(
+        config,
+        tools,
+        skills_loader=runtime_skills_loader(agent),
+        config_loader=lambda: load_config(Path(config_path)),
+        mcp_runtime_status=mcp_provider.runtime_status,
+        channel_runtime_status=_channel_runtime_status,
+        channel_services=channel_services,
+        optional_feature_services=optional_feature_services,
     )
     def _schedule_webui_background(awaitable: Awaitable[None]) -> None:
         agent.schedule_background(cast(Coroutine[Any, Any, None], awaitable))
@@ -736,6 +792,7 @@ def _run_gateway(
         webui_static_dist=webui_static_dist,
         webui_runtime_surface=webui_runtime_surface,
         webui_runtime_capabilities=webui_runtime_capabilities,
+        webui_extension_registry=extensions,
         webui_mcp_runtime_status=mcp_provider.runtime_status,
         webui_mcp_reload=mcp_provider.reload,
         webui_skill_state_action=_webui_skill_state_action,

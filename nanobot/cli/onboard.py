@@ -1309,43 +1309,45 @@ def _configure_providers(config: Config) -> None:
 # --- Channel Configuration ---
 
 
-@lru_cache(maxsize=1)
-def _get_channel_info() -> dict[str, tuple[str, type[BaseModel]]]:
-    """Get channel info (display name + config class) from channel modules."""
-    import importlib
-
-    from nanobot.channels.registry import discover_all
-
-    result: dict[str, tuple[str, type[BaseModel]]] = {}
-    for name, channel_cls in discover_all().items():
-        try:
-            mod = importlib.import_module(channel_cls.__module__)
-            config_name = channel_cls.__name__.replace("Channel", "Config")
-            config_cls = getattr(mod, config_name, None)
-            if config_cls and isinstance(config_cls, type) and issubclass(config_cls, BaseModel):
-                display_name = getattr(channel_cls, "display_name", name.capitalize())
-                result[name] = (display_name, config_cls)
-        except Exception:
-            logger.warning("Failed to load channel module: {}", name)
-    return result
-
-
 def _get_channel_names() -> dict[str, str]:
-    """Get channel display names."""
-    return {name: info[0] for name, info in _get_channel_info().items()}
+    """Get manifest display names without importing channel runtimes."""
+    from nanobot.channels.registry import discover_plugins
+
+    return {
+        name: plugin.display_name
+        for name, plugin in discover_plugins().items()
+    }
 
 
 def _get_channel_config_class(channel: str) -> type[BaseModel] | None:
-    """Get channel config class."""
-    entry = _get_channel_info().get(channel)
-    return entry[1] if entry else None
+    """Load only the selected channel runtime to derive its config model."""
+    import importlib
+
+    channel_cls = _get_channel_class(channel)
+    if channel_cls is None:
+        return None
+    try:
+        module = importlib.import_module(channel_cls.__module__)
+        config_name = channel_cls.__name__.replace("Channel", "Config")
+        config_cls = getattr(module, config_name, None)
+        return (
+            config_cls
+            if isinstance(config_cls, type) and issubclass(config_cls, BaseModel)
+            else None
+        )
+    except Exception:
+        logger.warning("Failed to load selected channel module: {}", channel)
+        return None
 
 
 def _get_channel_class(channel: str) -> type[Any] | None:
-    """Get channel implementation class."""
-    from nanobot.channels.registry import discover_all
+    """Load only the selected channel runtime class."""
+    from nanobot.channels.registry import load_channel_plugin
 
-    return discover_all().get(channel)
+    try:
+        return load_channel_plugin(channel).load_channel_class()
+    except (ImportError, ValueError, TypeError):
+        return None
 
 
 def _channel_supports_login(channel_cls: type[Any] | None) -> bool:

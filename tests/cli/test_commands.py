@@ -458,7 +458,7 @@ def test_onboard_uses_explicit_config_and_workspace_paths(tmp_path, monkeypatch)
     config_path = tmp_path / "instance" / "config.json"
     workspace_path = tmp_path / "workspace"
 
-    monkeypatch.setattr("nanobot.channels.registry.discover_all", lambda: {})
+    monkeypatch.setattr("nanobot.channels.registry.discover_plugins", lambda: {})
 
     result = runner.invoke(
         app,
@@ -486,7 +486,7 @@ def test_onboard_wizard_preserves_explicit_config_in_next_steps(tmp_path, monkey
         "nanobot.cli.onboard.run_onboard",
         lambda initial_config: OnboardResult(config=initial_config, should_save=True),
     )
-    monkeypatch.setattr("nanobot.channels.registry.discover_all", lambda: {})
+    monkeypatch.setattr("nanobot.channels.registry.discover_plugins", lambda: {})
 
     result = runner.invoke(
         app,
@@ -532,38 +532,433 @@ def test_config_dump_excludes_oauth_provider_blocks():
     assert "githubCopilot" not in providers
 
 
-def test_plugins_list_uses_explicit_config(monkeypatch, tmp_path: Path):
-    from nanobot.channels.plugin import ChannelPlugin
+class _CliExtensionRegistry:
+    """Registry double that exposes the command's lifecycle boundary."""
 
-    config_path = tmp_path / "config.json"
-    config_path.write_text(
-        json.dumps({"channels": {"example": {"enabled": True}}}),
-        encoding="utf-8",
+    def __init__(self, snapshot, *, lifecycle, ok: bool = True, message: str = "Applied."):
+        self._snapshot = snapshot
+        self._lifecycle = lifecycle
+        self._ok = ok
+        self._message = message
+        self.snapshot_calls = 0
+        self.requests = []
+        self.config_mutations = 0
+
+    def snapshot(self):
+        self.snapshot_calls += 1
+        return self._snapshot
+
+    async def execute(self, request):
+        from nanobot.extensions.contracts import ExtensionActionResult
+
+        self.requests.append(request)
+        self.config_mutations += 1
+        return ExtensionActionResult(
+            ok=self._ok,
+            action=request.action,
+            package_id=request.target_id.split("/", maxsplit=1)[0],
+            target_id=request.target_id,
+            lifecycle=self._lifecycle,
+            message=self._message,
+        )
+
+
+def _cli_extension_package(
+    *,
+    source,
+    name: str,
+    display_name: str,
+    lifecycle,
+    actions,
+    component_kind,
+    instances: tuple[str, ...],
+):
+    """Build a canonical descriptor tree for CLI selection behavior."""
+    from nanobot.extensions.contracts import (
+        ExtensionComponentDescriptor,
+        ExtensionExecution,
+        ExtensionPackageDescriptor,
+        ExtensionTrust,
+        extension_component_id,
+        extension_package_id,
     )
-    plugin = ChannelPlugin(
-        name="example",
-        display_name="Example",
-        runtime="example.runtime:ExampleChannel",
-    )
-    monkeypatch.setattr(
-        "nanobot.channels.registry.discover_plugins",
-        lambda enabled_names=None: (
-            {"example": plugin}
-            if enabled_names is None or "example" in enabled_names
-            else {}
+
+    package_id = extension_package_id(source, name)
+    return ExtensionPackageDescriptor(
+        id=package_id,
+        name=name,
+        display_name=display_name,
+        source=source,
+        trust=ExtensionTrust.FIRST_PARTY,
+        execution=ExtensionExecution.IN_PROCESS,
+        lifecycle=lifecycle,
+        revision="current-revision",
+        permissions_enforced=False,
+        actions=actions,
+        components=tuple(
+            ExtensionComponentDescriptor(
+                id=extension_component_id(package_id, component_kind, instance),
+                package_id=package_id,
+                kind=component_kind,
+                name=instance,
+                display_name=instance,
+                execution=ExtensionExecution.IN_PROCESS,
+                lifecycle=lifecycle,
+                revision="current-revision",
+                actions=actions,
+            )
+            for instance in instances
         ),
     )
-    monkeypatch.setattr(
-        "nanobot.optional_features.optional_dependency_groups",
-        lambda: {},
+
+
+def _cli_snapshot(*packages):
+    from nanobot.extensions.contracts import ExtensionSnapshot
+
+    return ExtensionSnapshot(packages=packages)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["channels", "status"],
+        ["plugins", "list"],
+    ],
+)
+def test_channel_inventory_renders_offline_desired_state_without_runtime_import(
+    monkeypatch, tmp_path: Path, arguments: list[str]
+) -> None:
+    """Offline desired-enabled channels render configuration truth, never FAILED."""
+    from nanobot.channels.plugin import ChannelPlugin
+    from nanobot.extensions.contracts import (
+        ExtensionAction,
+        ExtensionComponentKind,
+        ExtensionLifecycle,
+        ExtensionSource,
     )
 
-    result = runner.invoke(app, ["plugins", "list", "--config", str(config_path)])
+    config_path = tmp_path / "instance" / "config.json"
+    channel = _cli_extension_package(
+        source=ExtensionSource.CHANNEL_PACKAGE,
+        name="relay",
+        display_name="Relay",
+        lifecycle=ExtensionLifecycle.FAILED,
+        actions=frozenset({ExtensionAction.INSPECT}),
+        component_kind=ExtensionComponentKind.CHANNEL,
+        instances=("worker",),
+    )
+    registry = _CliExtensionRegistry(_cli_snapshot(channel), lifecycle=ExtensionLifecycle.FAILED)
+    builder_calls: list[Path] = []
+    selected_identity = tmp_path / "default" / "config.json"
+
+    def set_config_path(path: Path) -> None:
+        nonlocal selected_identity
+        selected_identity = path
+
+    def build_registry(path: Path) -> _CliExtensionRegistry:
+        assert selected_identity == config_path.resolve()
+        builder_calls.append(path)
+        return registry
+
+    monkeypatch.setattr("nanobot.config.loader.set_config_path", set_config_path)
+    monkeypatch.setattr(
+        "nanobot.extensions.management.build_management_extension_registry", build_registry
+    )
+    monkeypatch.setattr(
+        "nanobot.channels.registry.load_channel_plugin",
+        lambda _name: (_ for _ in ()).throw(AssertionError("inventory loaded a channel runtime")),
+    )
+    monkeypatch.setattr(
+        ChannelPlugin,
+        "load_channel_class",
+        lambda _plugin: (_ for _ in ()).throw(AssertionError("inventory imported a channel runtime")),
+    )
+
+    result = runner.invoke(app, [*arguments, "--config", str(config_path)])
+
+    rendered = _without_rendered_line_breaks(_strip_ansi(result.stdout)).lower()
+    assert result.exit_code == 0
+    assert builder_calls == [config_path.resolve()]
+    assert registry.snapshot_calls == 1
+    assert "relay" in rendered
+    assert "worker" in rendered
+    assert "configured, desired enabled (offline)" in rendered
+    assert "failed" not in rendered
+
+
+def test_channels_login_selects_custom_config_before_manifest_config_and_runtime_callbacks(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Login callbacks observe the explicit profile, never the process-default profile."""
+    from nanobot.channels.plugin import ChannelPlugin
+
+    config_path = tmp_path / "instance" / "config.json"
+    plugin = ChannelPlugin(
+        name="weixin",
+        display_name="Weixin",
+        runtime="cli_login_runtime_sentinel:RelayChannel",
+    )
+    selected_names: list[str] = []
+    runtime_configs: list[object] = []
+    selected_config = {"token": "selected-token"}
+    selected_identity = tmp_path / "default" / "config.json"
+    callback_identities: list[tuple[str, Path]] = []
+
+    def assert_selected_identity(callback: str) -> None:
+        callback_identities.append((callback, selected_identity))
+        assert selected_identity == config_path.resolve()
+
+    def set_config_path(path: Path) -> None:
+        nonlocal selected_identity
+        selected_identity = path
+
+    class _SelectedRuntime:
+        def __init__(self, config, *, bus) -> None:
+            del bus
+            assert_selected_identity("runtime")
+            runtime_configs.append(config)
+
+        async def login(self, *, force: bool) -> bool:
+            assert_selected_identity("login")
+            assert force is False
+            return True
+
+    def load_selected(name: str) -> ChannelPlugin:
+        assert_selected_identity("manifest")
+        selected_names.append(name)
+        if name != "weixin":
+            raise ImportError(name)
+        return plugin
+
+    def load_exact_runtime(candidate: ChannelPlugin):
+        assert_selected_identity("runtime import")
+        if candidate is not plugin:
+            raise AssertionError("login imported an unselected channel runtime")
+        return _SelectedRuntime
+
+    def load_selected_config(path: Path) -> SimpleNamespace:
+        assert_selected_identity("config")
+        assert path == config_path.resolve()
+        return SimpleNamespace(channels=SimpleNamespace(weixin=selected_config))
+
+    monkeypatch.setattr("nanobot.config.loader.set_config_path", set_config_path)
+    monkeypatch.setattr("nanobot.channels.registry.load_channel_plugin", load_selected)
+    monkeypatch.setattr(ChannelPlugin, "load_channel_class", load_exact_runtime)
+    monkeypatch.setattr(cli_commands, "_load_config_for_cli", load_selected_config)
+
+    result = runner.invoke(app, ["channels", "login", "weixin", "--config", str(config_path)])
 
     assert result.exit_code == 0
-    stripped_output = _strip_ansi(result.stdout)
-    assert "example" in stripped_output
-    assert "yes" in stripped_output
+    assert selected_names == ["weixin"]
+    assert runtime_configs == [selected_config]
+    assert callback_identities == [
+        ("manifest", config_path.resolve()),
+        ("config", config_path.resolve()),
+        ("runtime import", config_path.resolve()),
+        ("runtime", config_path.resolve()),
+        ("login", config_path.resolve()),
+    ]
+    assert "weixin login" in _strip_ansi(result.stdout).lower()
+
+
+@pytest.mark.parametrize("command", ["enable", "disable"])
+def test_plugins_instance_action_selects_config_before_exact_channel_dispatch(
+    monkeypatch, tmp_path: Path, command: str
+) -> None:
+    """Enable and disable use the explicit profile before exact registry dispatch."""
+    from nanobot.extensions.contracts import (
+        ExtensionAction,
+        ExtensionComponentKind,
+        ExtensionLifecycle,
+        ExtensionSource,
+    )
+
+    config_path = tmp_path / "instance" / "config.json"
+    actions = frozenset({ExtensionAction.INSPECT, ExtensionAction.ENABLE, ExtensionAction.DISABLE})
+    channel = _cli_extension_package(
+        source=ExtensionSource.CHANNEL_PACKAGE,
+        name="relay",
+        display_name="Relay",
+        lifecycle=ExtensionLifecycle.DISABLED,
+        actions=actions,
+        component_kind=ExtensionComponentKind.CHANNEL,
+        instances=("default", "worker"),
+    )
+    registry = _CliExtensionRegistry(
+        _cli_snapshot(channel), lifecycle=ExtensionLifecycle.RESTART_REQUIRED
+    )
+    builder_calls: list[Path] = []
+    callback_identities: list[tuple[str, Path]] = []
+    selected_identity = tmp_path / "default" / "config.json"
+
+    def set_config_path(path: Path) -> None:
+        nonlocal selected_identity
+        selected_identity = path
+
+    def assert_selected_identity(callback: str) -> None:
+        callback_identities.append((callback, selected_identity))
+        assert selected_identity == config_path.resolve()
+
+    def build_registry(path: Path) -> _CliExtensionRegistry:
+        assert_selected_identity("registry")
+        builder_calls.append(path)
+        return registry
+
+    original_execute = registry.execute
+
+    async def execute_with_selected_identity(request):
+        assert_selected_identity("action")
+        return await original_execute(request)
+
+    monkeypatch.setattr("nanobot.config.loader.set_config_path", set_config_path)
+    monkeypatch.setattr(
+        "nanobot.extensions.management.build_management_extension_registry", build_registry
+    )
+    monkeypatch.setattr(registry, "execute", execute_with_selected_identity)
+
+    result = runner.invoke(
+        app,
+        ["plugins", command, "relay", "--instance", "worker", "--config", str(config_path)],
+    )
+
+    [request] = registry.requests
+    assert result.exit_code == 0
+    assert builder_calls == [config_path.resolve()]
+    assert callback_identities == [
+        ("registry", config_path.resolve()),
+        ("action", config_path.resolve()),
+    ]
+    assert request.action is ExtensionAction(command)
+    assert request.target_id.endswith("/channel:worker")
+    assert request.expected_revision == "current-revision"
+    assert request.context.is_system_admin is True
+    if command == "enable":
+        assert request.context.package_install_allowed is True
+        assert request.risk_acknowledged is True
+    else:
+        assert request.context.package_install_allowed is False
+        assert request.risk_acknowledged is False
+    assert registry.config_mutations == 1
+    assert "restart" in _strip_ansi(result.stdout).lower()
+
+
+def test_plugins_enable_installs_missing_optional_feature(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An unavailable extra issues one authorized install dispatch, not an installer call."""
+    from nanobot.extensions.contracts import (
+        ExtensionAction,
+        ExtensionComponentKind,
+        ExtensionLifecycle,
+        ExtensionSource,
+    )
+
+    optional = _cli_extension_package(
+        source=ExtensionSource.OPTIONAL_FEATURE,
+        name="spellcheck",
+        display_name="Spellcheck",
+        lifecycle=ExtensionLifecycle.UNAVAILABLE,
+        actions=frozenset({ExtensionAction.INSPECT, ExtensionAction.INSTALL}),
+        component_kind=ExtensionComponentKind.OPTIONAL_FEATURE,
+        instances=("spellcheck",),
+    )
+    registry = _CliExtensionRegistry(
+        _cli_snapshot(optional), lifecycle=ExtensionLifecycle.RESTART_REQUIRED
+    )
+
+    monkeypatch.setattr(
+        "nanobot.extensions.management.build_management_extension_registry", lambda _path: registry
+    )
+
+    result = runner.invoke(
+        app,
+        ["plugins", "enable", "spellcheck", "--config", str(tmp_path / "config.json")],
+    )
+
+    [request] = registry.requests
+    assert result.exit_code == 0
+    assert request.action is ExtensionAction.INSTALL
+    assert request.target_id == optional.id
+    assert request.context.package_install_allowed is True
+    assert request.risk_acknowledged is True
+    assert "restart" in _strip_ansi(result.stdout).lower()
+
+
+def test_plugins_enable_rejects_unknown_target_without_action_side_effect(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Unknown feature input produces a bounded failure before mutation or installation."""
+    from nanobot.extensions.contracts import (
+        ExtensionAction,
+        ExtensionComponentKind,
+        ExtensionLifecycle,
+        ExtensionSource,
+    )
+
+    known = _cli_extension_package(
+        source=ExtensionSource.CHANNEL_PACKAGE,
+        name="relay",
+        display_name="Relay",
+        lifecycle=ExtensionLifecycle.DISABLED,
+        actions=frozenset({ExtensionAction.INSPECT, ExtensionAction.ENABLE}),
+        component_kind=ExtensionComponentKind.CHANNEL,
+        instances=("default",),
+    )
+    registry = _CliExtensionRegistry(_cli_snapshot(known), lifecycle=ExtensionLifecycle.ENABLED)
+
+    monkeypatch.setattr(
+        "nanobot.extensions.management.build_management_extension_registry", lambda _path: registry
+    )
+
+    result = runner.invoke(
+        app, ["plugins", "enable", "missing", "--config", str(tmp_path / "config.json")]
+    )
+
+    assert result.exit_code == 1
+    assert registry.requests == []
+    assert registry.config_mutations == 0
+    assert "unavailable" in _strip_ansi(result.stdout).lower()
+
+
+def test_plugins_enable_hides_failed_action_details(monkeypatch, tmp_path: Path) -> None:
+    """A failed action emits the bounded CLI failure, never an adapter detail."""
+    from nanobot.extensions.contracts import (
+        ExtensionAction,
+        ExtensionComponentKind,
+        ExtensionLifecycle,
+        ExtensionSource,
+    )
+
+    channel = _cli_extension_package(
+        source=ExtensionSource.CHANNEL_PACKAGE,
+        name="relay",
+        display_name="Relay",
+        lifecycle=ExtensionLifecycle.DISABLED,
+        actions=frozenset({ExtensionAction.INSPECT, ExtensionAction.ENABLE}),
+        component_kind=ExtensionComponentKind.CHANNEL,
+        instances=("default",),
+    )
+    registry = _CliExtensionRegistry(
+        _cli_snapshot(channel),
+        lifecycle=ExtensionLifecycle.FAILED,
+        ok=False,
+        message="credential at /private/runtime/token was rejected",
+    )
+    monkeypatch.setattr(
+        "nanobot.extensions.management.build_management_extension_registry", lambda _path: registry
+    )
+
+    result = runner.invoke(
+        app, ["plugins", "enable", "relay", "--config", str(tmp_path / "config.json")]
+    )
+
+    rendered = _strip_ansi(result.stdout).lower()
+    assert result.exit_code == 1
+    assert registry.config_mutations == 1
+    assert "extension action could not be completed" in rendered
+    assert "private" not in rendered
+    assert "credential" not in rendered
+
 
 
 def test_provider_logout_openai_codex_removes_local_oauth_files(tmp_path, monkeypatch):

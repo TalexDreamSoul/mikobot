@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import secrets
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, TypeGuard, cast
 
@@ -33,6 +35,7 @@ FeatureInstancesFactory = Callable[..., list[dict[str, Any]] | None]
 LocalStatePresent = Callable[[Any], bool]
 
 __all__ = [
+    "CHANNEL_INSTANCE_REVISION_FIELD",
     "ChannelActivation",
     "ChannelFieldSpec",
     "ChannelInstanceSpec",
@@ -44,19 +47,42 @@ __all__ = [
     "channel_default_config",
     "channel_field_value",
     "channel_instance_config",
+    "channel_instance_revision",
     "channel_instance_specs",
     "channel_local_state_present",
     "channel_runtime_name",
+    "new_channel_instance_revision",
     "resolve_channel_action_target",
     "channel_set_config_enabled",
-    "channel_update_instance_config",
+    "channel_assign_config_value",
+    "channel_coerce_config_value",
+    "channel_configure_instance",
     "channel_value_present",
     "refresh_channel_feature_metadata",
     "stringify_channel_value",
 ]
 
 
+CHANNEL_INSTANCE_REVISION_FIELD = "_extensionRevision"
 _MISSING = object()
+_MAX_CHANNEL_INSTANCE_SPECS = 512
+_MAX_CHANNEL_CONFIG_VALUES = 64
+_MAX_CHANNEL_INSTANCE_REVISION_LENGTH = 128
+_SKIP_CHANNEL_CONFIG_FIELD = object()
+
+
+def new_channel_instance_revision() -> str:
+    """Return a bounded opaque generation marker for one persisted instance."""
+    return secrets.token_urlsafe(24)
+
+
+def channel_instance_revision(config: Any) -> str | None:
+    """Return a valid persisted instance generation marker, if present."""
+    value = channel_field_value(config, CHANNEL_INSTANCE_REVISION_FIELD)
+    if not isinstance(value, str) or not value or len(value) > _MAX_CHANNEL_INSTANCE_REVISION_LENGTH:
+        return None
+    return value
+
 
 
 @dataclass(frozen=True)
@@ -342,7 +368,12 @@ def channel_instance_specs(
         raise TypeError(
             f"ChannelPlugin.management.instance_specs for '{plugin.name}' must return an iterable"
         )
-    specs = list(cast(Iterable[object], raw_specs))
+    specs = list(islice(cast(Iterable[object], raw_specs), _MAX_CHANNEL_INSTANCE_SPECS + 1))
+    if len(specs) > _MAX_CHANNEL_INSTANCE_SPECS:
+        raise ValueError(
+            f"ChannelPlugin.management.instance_specs for '{plugin.name}' returned more than "
+            f"{_MAX_CHANNEL_INSTANCE_SPECS} instances"
+        )
     if not _all_channel_instance_specs(specs):
         raise TypeError(
             f"ChannelPlugin.management.instance_specs for '{plugin.name}' returned an invalid item"
@@ -417,6 +448,124 @@ def channel_instance_config(
     return copied_config
 
 
+def channel_configure_instance(
+    plugin: ChannelPlugin,
+    section: Any,
+    raw_values: object,
+    *,
+    instance_id: str = "default",
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Coerce and persist one channel instance through its setup contract."""
+    setup = plugin.setup
+    if setup is None:
+        raise ValueError(f"channel '{plugin.name}' cannot be configured from WebUI")
+    if not isinstance(raw_values, Mapping):
+        raise ValueError("channel settings payload must be a JSON object")
+    values = cast(Mapping[object, object], raw_values)
+    if len(values) > _MAX_CHANNEL_CONFIG_VALUES:
+        raise ValueError("channel settings payload contains too many values")
+
+    prefix = f"channels.{plugin.name}."
+    pending: list[tuple[str, str, Any]] = []
+    for raw_key, raw_value in values.items():
+        if not isinstance(raw_key, str) or not raw_key:
+            raise ValueError("channel settings payload contains an invalid key")
+        if raw_key.startswith("channels.") and not raw_key.startswith(prefix):
+            raise ValueError(f"'{raw_key}' cannot be configured from WebUI")
+        field_name = raw_key[len(prefix) :] if raw_key.startswith(prefix) else raw_key
+        field = setup.fields.get(field_name)
+        if field is None or not field.writable:
+            raise ValueError(f"'{raw_key}' cannot be configured from WebUI")
+        save, value = channel_coerce_config_value(raw_key, raw_value, field.route_type)
+        if save:
+            pending.append((raw_key, field_name, value))
+
+    try:
+        channel_config = deepcopy(
+            channel_instance_config(plugin, section, instance_id=instance_id)
+        )
+        for _, field_name, value in pending:
+            channel_assign_config_value(channel_config, field_name, value)
+        channel_config[CHANNEL_INSTANCE_REVISION_FIELD] = new_channel_instance_revision()
+        updated = channel_update_instance_config(
+            plugin,
+            section,
+            channel_config,
+            instance_id=instance_id,
+        )
+    except ValueError as exc:
+        raise ValueError(f"Invalid {plugin.name} configuration: {exc}") from exc
+    return updated, tuple(raw_key for raw_key, _, _ in pending)
+
+
+def channel_coerce_config_value(
+    raw_key: str,
+    raw_value: object,
+    value_type: RouteFieldType,
+) -> tuple[bool, Any]:
+    if isinstance(value_type, tuple):
+        kind, allowed = value_type
+    else:
+        kind = value_type
+        allowed = None
+
+    if kind in {"string", "secret"}:
+        value = raw_value.strip() if isinstance(raw_value, str) else str(raw_value)
+        if kind == "secret" and not value:
+            return False, _SKIP_CHANNEL_CONFIG_FIELD
+        return True, value
+
+    if kind == "list":
+        if raw_value is None:
+            return True, []
+        if isinstance(raw_value, str):
+            return True, [item.strip() for item in raw_value.split(",") if item.strip()]
+        if isinstance(raw_value, (list, tuple)):
+            items = cast(list[object] | tuple[object, ...], raw_value)
+            if all(item is None or isinstance(item, (str, int, float, bool)) for item in items):
+                return True, [str(item).strip() for item in items if str(item).strip()]
+        raise ValueError(f"'{raw_key}' must be a comma-separated list")
+
+    if kind == "int":
+        if raw_value in (None, ""):
+            return False, _SKIP_CHANNEL_CONFIG_FIELD
+        if not isinstance(raw_value, (str, int, float)):
+            raise ValueError(f"'{raw_key}' must be a number")
+        try:
+            return True, int(raw_value)
+        except ValueError as exc:
+            raise ValueError(f"'{raw_key}' must be a number") from exc
+
+    if kind == "bool":
+        if isinstance(raw_value, bool):
+            return True, raw_value
+        value = str(raw_value).strip().lower()
+        if value in {"true", "1", "yes", "on"}:
+            return True, True
+        if value in {"false", "0", "no", "off"}:
+            return True, False
+        raise ValueError(f"'{raw_key}' must be true or false")
+
+    if kind == "enum":
+        value = raw_value.strip() if isinstance(raw_value, str) else str(raw_value)
+        if not value:
+            return False, _SKIP_CHANNEL_CONFIG_FIELD
+        if allowed is None or value not in allowed:
+            options = ", ".join(sorted(allowed or ()))
+            raise ValueError(f"'{raw_key}' must be one of: {options}")
+        return True, value
+
+    raise ValueError(f"'{raw_key}' has an unsupported field type")
+
+
+def channel_assign_config_value(
+    channel_config: dict[str, Any],
+    field: str,
+    value: Any,
+) -> None:
+    _assign_channel_field(channel_config, field, value)
+
+
 def channel_update_instance_config(
     plugin: ChannelPlugin,
     section: Any,
@@ -441,13 +590,15 @@ def channel_set_config_enabled(
     enabled: bool,
     *,
     instance_id: str = "default",
+    pairing_completed: bool = False,
 ) -> dict[str, Any]:
     """Toggle one instance while preserving channel-owned config shape."""
-    from nanobot.config.loader import merge_missing_defaults
 
     values = channel_instance_config(plugin, section, instance_id=instance_id)
-    values = cast(dict[str, Any], merge_missing_defaults(values, channel_default_config(plugin)))
     values["enabled"] = enabled
+    if pairing_completed:
+        values["pairingRequired"] = False
+    values[CHANNEL_INSTANCE_REVISION_FIELD] = new_channel_instance_revision()
     return channel_update_instance_config(
         plugin,
         section,
@@ -575,6 +726,14 @@ def stringify_channel_value(value: Any) -> str:
     return str(value)
 
 
+def _is_absolute_path_value(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    return value.startswith(("/", "\\")) or (
+        len(value) >= 3 and value[0].isalpha() and value[1] == ":" and value[2] in {"/", "\\"}
+    )
+
+
 def _channel_feature_instance(
     channel_name: str,
     instance: ChannelInstanceSpec,
@@ -590,14 +749,14 @@ def _channel_feature_instance(
     configured_fields: list[str] = []
     setup_fields = setup_spec.fields.items() if setup_spec else ()
     for field_name, field_spec in setup_fields:
-        if not field_spec.writable:
+        if not field_spec.writable or not field_spec.snapshot:
             continue
         value = channel_field_value(config, field_name)
         if not channel_value_present(value):
             continue
         key = f"channels.{channel_name}.{field_name}"
         configured_fields.append(key)
-        if field_spec.kind != "secret":
+        if field_spec.kind != "secret" and not _is_absolute_path_value(value):
             config_values[key] = stringify_channel_value(value)
 
     result = {

@@ -4,6 +4,7 @@ These tests focus on the business logic behind the onboard wizard,
 without testing the interactive UI components.
 """
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -410,13 +411,79 @@ class TestProviderChannelInfo:
         assert "openai_codex" not in names
         assert "github_copilot" not in names
 
-    def test_get_channel_names_returns_dict(self):
-        from nanobot.cli.onboard import _get_channel_names
+    def test_get_channel_names_uses_manifests_without_loading_runtime(self, monkeypatch):
+        """The channel catalog must remain usable when every runtime is unavailable."""
+        from nanobot.channels import registry
 
-        names = _get_channel_names()
-        assert isinstance(names, dict)
-        # Should include at least some channels
-        assert len(names) >= 0
+        manifest = SimpleNamespace(
+            display_name="Manifest Channel",
+            load_channel_class=lambda: (_ for _ in ()).throw(
+                AssertionError("catalog imported a channel runtime")
+            ),
+        )
+
+        def unexpected_runtime_discovery(*_args, **_kwargs):
+            raise AssertionError("catalog must not discover channel runtimes")
+
+        monkeypatch.setattr(registry, "discover_plugins", lambda: {"manifest": manifest})
+        monkeypatch.setattr(registry, "load_channel_plugin", unexpected_runtime_discovery)
+
+        assert onboard_wizard._get_channel_names() == {"manifest": "Manifest Channel"}
+
+    def test_selected_channel_helpers_load_only_selected_runtime(self, monkeypatch):
+        """Config and login helpers resolve the selected manifest, never the catalog runtime set."""
+        from nanobot.channels import registry
+        from nanobot.channels.base import BaseChannel
+
+        class SelectedConfig(BaseModel):
+            token: str
+
+        class SelectedChannel(BaseChannel):
+            name = "selected"
+            display_name = "Selected Channel"
+
+            async def login(self, force: bool = False) -> bool:
+                return True
+
+            async def start(self) -> None:
+                pass
+
+            async def stop(self) -> None:
+                pass
+
+            async def send(self, msg) -> None:
+                pass
+
+        monkeypatch.setattr(
+            sys.modules[SelectedChannel.__module__],
+            "SelectedConfig",
+            SelectedConfig,
+            raising=False,
+        )
+
+        requested: list[str] = []
+        runtime_loads: list[str] = []
+
+        def load_selected_plugin(name: str):
+            requested.append(name)
+            if name != "selected":
+                raise AssertionError(f"unexpected channel runtime: {name}")
+            return SimpleNamespace(
+                load_channel_class=lambda: runtime_loads.append(name) or SelectedChannel
+            )
+
+        def unexpected_catalog_discovery(*_args, **_kwargs):
+            raise AssertionError("selected channel helpers must not discover all runtimes")
+
+        monkeypatch.setattr(registry, "load_channel_plugin", load_selected_plugin)
+        monkeypatch.setattr(registry, "discover_plugins", unexpected_catalog_discovery)
+
+        assert onboard_wizard._get_channel_config_class("selected") is SelectedConfig
+        channel_cls = onboard_wizard._get_channel_class("selected")
+        assert channel_cls is SelectedChannel
+        assert onboard_wizard._channel_supports_login(channel_cls) is True
+        assert requested == ["selected", "selected"]
+        assert runtime_loads == ["selected", "selected"]
 
     def test_get_provider_info_returns_valid_structure(self):
         from nanobot.cli.onboard import _get_provider_info

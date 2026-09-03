@@ -8,7 +8,7 @@ import os
 import sys
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Never
 
 # Force UTF-8 encoding for Windows console
 if sys.platform == "win32":
@@ -47,7 +47,6 @@ from rich.table import Table  # noqa: E402
 from rich.text import Text  # noqa: E402
 
 from nanobot import __logo__, __version__  # noqa: E402
-from nanobot import optional_features as feature_support  # noqa: E402
 from nanobot.agent.hooks import create_file_edit_activity_hook  # noqa: E402
 from nanobot.agent.loop import AgentLoop  # noqa: E402
 from nanobot.agent.tools.mcp import MCPProvider  # noqa: E402
@@ -74,7 +73,10 @@ from nanobot.cli.webui_support import (  # noqa: E402
     _validate_gateway_startup,
 )
 from nanobot.config.paths import get_workspace_path  # noqa: E402
-from nanobot.config.schema import Config  # noqa: E402
+from nanobot.extensions.runtime import (  # noqa: E402
+    build_core_extension_registry,
+    runtime_skills_loader,
+)
 from nanobot.security.network import is_loopback_host  # noqa: E402
 from nanobot.utils.helpers import sanitize_surrogates as _sanitize_surrogates  # noqa: E402,F401
 from nanobot.utils.helpers import (  # noqa: E402
@@ -251,36 +253,6 @@ def _onboard_plugins(config_path: Path) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def _print_enable_options(
-    extras: dict[str, list[str] | None],
-    channel_plugins: dict[str, Any],
-    config: Config,
-) -> None:
-    table = Table(title="Available Features")
-    table.add_column("Name", style="cyan")
-    table.add_column("Type")
-    table.add_column("Enabled")
-
-    for item in sorted(set(channel_plugins) | set(extras)):
-        plugin = channel_plugins.get(item)
-        is_channel = plugin is not None
-        enabled = (
-            feature_support.channel_enabled(
-                config,
-                item,
-                plugin,
-                default_enabled=plugin.default_enabled,
-            )
-            if is_channel
-            else feature_support.extra_installed(item, extras[item])
-        )
-        table.add_row(
-            item,
-            "channel" if is_channel else "feature",
-            "[green]yes[/green]" if enabled else "[dim]no[/dim]",
-        )
-
-    console.print(table)
 
 
 def _read_trigger_cli_message(message: str | None) -> str:
@@ -383,6 +355,12 @@ def serve(
     except ValueError as exc:
         console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
+    _extensions = build_core_extension_registry(
+        runtime_config,
+        tools,
+        skills_loader=runtime_skills_loader(agent_loop),
+        mcp_runtime_status=mcp_provider.runtime_status,
+    )
 
     model_name, preset_tag = _model_display(runtime_config)
     console.print(f"{__logo__} Starting OpenAI-compatible API server")
@@ -406,7 +384,7 @@ def serve(
     async def on_startup(_app: Any) -> None:
         await mcp_provider.connect()
 
-    async def on_cleanup(_app: Any) -> None:
+    async def on_cleanup(_app: Any, _extensions: object = _extensions) -> None:
         try:
             await agent_loop.aclose()
         finally:
@@ -504,32 +482,52 @@ channels_app = typer.Typer(help="Manage channels")
 app.add_typer(channels_app, name="channels")
 
 
+def _management_config_path(config: str | None) -> Path:
+    """Select one config identity before channel management callbacks run."""
+    from nanobot.config.loader import get_config_path, set_config_path
+
+    path = (
+        Path(config).expanduser().resolve(strict=False)
+        if config
+        else get_config_path().expanduser().resolve(strict=False)
+    )
+    set_config_path(path)
+    return path
+
+
+def _offline_channel_lifecycle_label(lifecycle: object) -> str:
+    """Render a management-only absent runtime as configuration state, not failure."""
+    from nanobot.extensions.contracts import ExtensionLifecycle
+
+    if lifecycle is ExtensionLifecycle.FAILED:
+        return "configured, desired enabled (offline)"
+    return str(lifecycle)
+
+
 @channels_app.command("status")
 def channels_status(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Show channel status."""
-    from nanobot.channels.registry import discover_all
+    """Show canonical channel package and instance lifecycle."""
+    selected_config_path = _management_config_path(config)
+    from nanobot.extensions.contracts import ExtensionComponentKind, ExtensionSource
+    from nanobot.extensions.management import build_management_extension_registry
 
-    _, loaded = _load_inspection_config(config=config)
-
+    snapshot = build_management_extension_registry(selected_config_path).snapshot()
     table = Table(title="Channel Status")
     table.add_column("Channel", style="cyan")
-    table.add_column("Enabled")
-
-    for name, cls in sorted(discover_all().items()):
-        section = getattr(loaded.channels, name, None)
-        if section is None:
-            enabled = False
-        elif isinstance(section, dict):
-            enabled = cast(dict[str, Any], section).get("enabled", False)
-        else:
-            enabled = getattr(section, "enabled", False)
-        table.add_row(
-            cls.display_name,
-            "[green]\u2713[/green]" if enabled else "[dim]\u2717[/dim]",
-        )
-
+    table.add_column("Instance")
+    table.add_column("Status")
+    for package in snapshot.packages:
+        if package.source is not ExtensionSource.CHANNEL_PACKAGE:
+            continue
+        for component in package.components:
+            if component.kind is ExtensionComponentKind.CHANNEL:
+                table.add_row(
+                    package.display_name,
+                    component.display_name,
+                    _offline_channel_lifecycle_label(component.lifecycle),
+                )
     console.print(table)
 
 
@@ -539,28 +537,21 @@ def channels_login(
     force: bool = typer.Option(False, "--force", "-f", help="Force re-authentication even if already logged in"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Authenticate with a channel via QR code or other interactive login."""
+    """Authenticate with one selected channel runtime."""
+    selected_config_path = _management_config_path(config)
     from nanobot.bus.queue import MessageBus
-    from nanobot.channels.registry import discover_all
+    from nanobot.channels.registry import load_channel_plugin
 
-    _, loaded = _load_inspection_config(config=config)
+    try:
+        plugin = load_channel_plugin(channel_name)
+    except ImportError:
+        console.print(f"[red]Unknown channel: {escape(channel_name)}[/red]")
+        raise typer.Exit(1) from None
+    loaded = _load_config_for_cli(selected_config_path)
     channel_cfg: Any = getattr(loaded.channels, channel_name, None) or {}
-
-    # Validate channel exists
-    all_channels = discover_all()
-    if channel_name not in all_channels:
-        available = ", ".join(all_channels.keys())
-        console.print(f"[red]Unknown channel: {channel_name}[/red]  Available: {available}")
-        raise typer.Exit(1)
-
-    console.print(f"{__logo__} {all_channels[channel_name].display_name} Login\n")
-
-    channel_factory = all_channels[channel_name]
-    channel = channel_factory(channel_cfg, bus=MessageBus())
-
-    success = asyncio.run(channel.login(force=force))
-
-    if not success:
+    console.print(f"{__logo__} {plugin.display_name} Login\n")
+    channel = plugin.load_channel_class()(channel_cfg, bus=MessageBus())
+    if not asyncio.run(channel.login(force=force)):
         raise typer.Exit(1)
 
 
@@ -576,71 +567,139 @@ app.add_typer(plugins_app, name="plugins")
 def plugins_list(
     config_path: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """List optional nanobot features."""
-    from nanobot.channels.registry import discover_plugins
-    from nanobot.config.loader import load_config, set_config_path
+    """List canonical channel and standalone optional feature descriptors."""
+    selected_config_path = _management_config_path(config_path)
+    from nanobot.extensions.contracts import ExtensionComponentKind, ExtensionSource
+    from nanobot.extensions.management import build_management_extension_registry
 
-    resolved_config_path = Path(config_path).expanduser().resolve() if config_path else None
-    if resolved_config_path is not None:
-        set_config_path(resolved_config_path)
+    snapshot = build_management_extension_registry(selected_config_path).snapshot()
+    table = Table(title="Available Features")
+    table.add_column("Name", style="cyan")
+    table.add_column("Instance")
+    table.add_column("Type")
+    table.add_column("Status")
+    for package in snapshot.packages:
+        if package.source is ExtensionSource.CHANNEL_PACKAGE:
+            for component in package.components:
+                if component.kind is ExtensionComponentKind.CHANNEL:
+                    table.add_row(
+                        package.display_name,
+                        component.display_name,
+                        "channel",
+                        _offline_channel_lifecycle_label(component.lifecycle),
+                    )
+        elif package.source is ExtensionSource.OPTIONAL_FEATURE:
+            table.add_row(package.display_name, "-", "feature", package.lifecycle.value)
+    console.print(table)
 
-    _print_enable_options(
-        feature_support.optional_dependency_groups(),
-        discover_plugins(),
-        load_config(resolved_config_path),
-    )
+
+def _extension_action_error(message: str) -> Never:
+    console.print(f"[red]{escape(message)}[/red]")
+    raise typer.Exit(1)
 
 
 @plugins_app.command("enable")
 def plugins_enable(
     name: str = typer.Argument(..., help="Feature name (e.g. weixin, matrix, bedrock)"),
+    instance: str | None = typer.Option(None, "--instance", help="Exact channel instance"),
     config_path: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
-    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show optional package install logs"),
 ):
-    """Enable a nanobot feature."""
-    from nanobot.config.loader import get_config_path, set_config_path
+    """Enable one exact channel instance or install one optional feature."""
+    selected_config_path = _management_config_path(config_path)
+    from nanobot.extensions.contracts import (
+        ExtensionAction,
+        ExtensionActionContext,
+        ExtensionActionRequest,
+        ExtensionLifecycle,
+        ExtensionSource,
+        safe_extension_message,
+    )
+    from nanobot.extensions.management import build_management_extension_registry
+    from nanobot.extensions.registry import ExtensionRegistryError
+    from nanobot.extensions.targets import resolve_extension_feature_target
 
-    resolved_config_path = Path(config_path).expanduser().resolve() if config_path else None
-    if resolved_config_path is not None:
-        set_config_path(resolved_config_path)
-    resolved_config_path = resolved_config_path or get_config_path()
-    _set_nanobot_logs(logs)
-
+    registry = build_management_extension_registry(selected_config_path)
+    target = resolve_extension_feature_target(registry.snapshot(), name, instance)
+    if target is None:
+        _extension_action_error("Extension action target is unavailable.")
+    if target.source is ExtensionSource.OPTIONAL_FEATURE:
+        if target.lifecycle is not ExtensionLifecycle.UNAVAILABLE:
+            console.print("[green]Optional feature is already enabled.[/green]")
+            return
+        action = ExtensionAction.INSTALL
+    else:
+        action = ExtensionAction.ENABLE
     try:
-        payload = feature_support.enable_optional_feature(
-            name,
-            config_path=resolved_config_path,
-            runner=feature_support.run_install_command,
+        result = asyncio.run(
+            registry.execute(
+                ExtensionActionRequest(
+                    context=ExtensionActionContext(
+                        actor_id="cli",
+                        is_system_admin=True,
+                        package_install_allowed=True,
+                    ),
+                    target_id=target.target_id,
+                    action=action,
+                    expected_revision=target.revision,
+                    risk_acknowledged=True,
+                )
+            )
         )
-    except feature_support.OptionalFeatureError as exc:
-        console.print(f"[red]{escape(exc.message)}[/red]")
-        raise typer.Exit(1) from exc
-
-    message = payload.get("last_action", {}).get("message") or f"Enabled feature '{name}'"
-    console.print(f"[green]{escape(message)}[/green]")
+    except ExtensionRegistryError as exc:
+        _extension_action_error(safe_extension_message(exc))
+    if not result.ok:
+        _extension_action_error("Extension action could not be completed.")
+    if result.lifecycle is ExtensionLifecycle.RESTART_REQUIRED:
+        console.print("[green]Channel enabled; restart required.[/green]")
+    else:
+        console.print("[green]Optional feature is ready.[/green]")
 
 
 @plugins_app.command("disable")
 def plugins_disable(
     name: str = typer.Argument(..., help="Channel name (e.g. telegram, matrix, slack)"),
+    instance: str | None = typer.Option(None, "--instance", help="Exact channel instance"),
     config_path: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Disable a nanobot channel feature."""
-    from nanobot.config.loader import get_config_path, set_config_path
+    """Disable one exact channel instance."""
+    selected_config_path = _management_config_path(config_path)
+    from nanobot.extensions.contracts import (
+        ExtensionAction,
+        ExtensionActionContext,
+        ExtensionActionRequest,
+        ExtensionLifecycle,
+        ExtensionSource,
+        safe_extension_message,
+    )
+    from nanobot.extensions.management import build_management_extension_registry
+    from nanobot.extensions.registry import ExtensionRegistryError
+    from nanobot.extensions.targets import resolve_extension_feature_target
 
-    resolved_config_path = Path(config_path).expanduser().resolve() if config_path else None
-    if resolved_config_path is not None:
-        set_config_path(resolved_config_path)
-    resolved_config_path = resolved_config_path or get_config_path()
-
+    registry = build_management_extension_registry(selected_config_path)
+    target = resolve_extension_feature_target(registry.snapshot(), name, instance)
+    if target is None or target.source is not ExtensionSource.CHANNEL_PACKAGE:
+        _extension_action_error("Only channel instances can be disabled.")
     try:
-        payload = feature_support.disable_optional_feature(name, config_path=resolved_config_path)
-    except feature_support.OptionalFeatureError as exc:
-        console.print(f"[red]{escape(exc.message)}[/red]")
-        raise typer.Exit(1) from exc
-
-    message = payload.get("last_action", {}).get("message") or f"Disabled channel '{name}'"
-    console.print(f"[green]{escape(message)}[/green] in {resolved_config_path}")
+        result = asyncio.run(
+            registry.execute(
+                ExtensionActionRequest(
+                    context=ExtensionActionContext(actor_id="cli", is_system_admin=True),
+                    target_id=target.target_id,
+                    action=ExtensionAction.DISABLE,
+                    expected_revision=target.revision,
+                )
+            )
+        )
+    except ExtensionRegistryError as exc:
+        _extension_action_error(safe_extension_message(exc))
+    if not result.ok:
+        _extension_action_error("Extension action could not be completed.")
+    message = (
+        "Channel disabled; restart required."
+        if result.lifecycle is ExtensionLifecycle.RESTART_REQUIRED
+        else "Channel disabled."
+    )
+    console.print(f"[green]{message}[/green]")
 
 # ============================================================================
 # MCP Interoperability Commands

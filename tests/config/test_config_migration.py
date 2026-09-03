@@ -186,8 +186,8 @@ def test_onboard_refresh_backfills_missing_channel_fields(tmp_path, monkeypatch)
         lambda: {"qq": load_channel_package("qq")},
     )
     monkeypatch.setattr(
-        "nanobot.channels.registry.discover_all",
-        lambda: pytest.fail("onboarding must not import channel runtimes"),
+        "nanobot.channels.plugin.ChannelPlugin.load_channel_class",
+        lambda _self: pytest.fail("onboarding must not import channel runtimes"),
     )
 
     from typer.testing import CliRunner

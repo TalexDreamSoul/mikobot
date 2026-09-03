@@ -65,39 +65,8 @@ def load_channel_class(name: str) -> type[BaseChannel]:
     return load_channel_plugin(name).load_channel_class()
 
 
-def discover_enabled(
-    enabled_names: set[str],
-    *,
-    _plugins: dict[str, ChannelPlugin] | None = None,
-    warn_import_errors: bool = False,
-) -> dict[str, type[BaseChannel]]:
-    """Load runtime classes only for enabled descriptors."""
-    plugins = _plugins if _plugins is not None else discover_plugins(enabled_names)
-    result: dict[str, type[BaseChannel]] = {}
-    for name, plugin in plugins.items():
-        if name not in enabled_names:
-            continue
-        try:
-            result[name] = plugin.load_channel_class()
-        except Exception as exc:
-            message = "Enabled channel '{}' runtime is not available: {}"
-            if warn_import_errors:
-                logger.warning(message, name, exc)
-            else:
-                logger.debug(message, name, exc)
-    return result
-
-
-def discover_all() -> dict[str, type[BaseChannel]]:
-    """Load every available channel runtime."""
-    plugins = discover_plugins()
-    return discover_enabled(set(plugins), _plugins=plugins)
-
-
 __all__ = [
     "channel_default_enabled",
-    "discover_all",
-    "discover_enabled",
     "discover_plugins",
     "load_channel_class",
     "load_channel_plugin",
