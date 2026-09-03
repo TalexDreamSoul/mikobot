@@ -26,6 +26,7 @@ import {
   startMcpOAuth,
   startApiService,
   stopApiService,
+  type NanobotFeatureActionTarget,
   updateAutomation,
   updateMcpServerTools,
 } from "@/lib/api";
@@ -40,6 +41,18 @@ import type {
   SessionAutomationJob,
 } from "@/lib/types";
 
+
+function nanobotFeatureActionOptions(feature: NanobotFeatureInfo) {
+  return feature.type === "channel"
+    ? {
+      extensionId: feature.action_target_id ?? "",
+      expectedRevision: feature.action_target_revision ?? "",
+    }
+    : {
+      extensionId: feature.extension_id ?? "",
+      expectedRevision: feature.extension_revision ?? "",
+    };
+}
 function isExpectedMcpOAuthPendingReloadFailure(
   payload: McpPresetsPayload,
   expectedName?: string,
@@ -131,16 +144,26 @@ export function createSystemSettingsActions({
   } = state;
 
   const installCapabilities = async (names: string[]): Promise<boolean> => {
-    const missing = names.filter(
-      (name) => !featureCatalog.find((feature) => feature.name === name)?.installed,
+    const unavailable = names.find(
+      (name) => !featureCatalog.some((feature) => feature.name === name),
+    );
+    if (unavailable) {
+      setNanobotFeaturesError("Extension action target is unavailable.");
+      return false;
+    }
+    const missing = featureCatalog.filter(
+      (feature) => names.includes(feature.name) && !feature.installed,
     );
     if (!missing.length) return true;
     setNanobotFeatureAction(`enable:${names.join("+")}`);
     setNanobotFeaturesError(null);
     try {
       let latest = nanobotFeatures;
-      for (const name of missing) {
-        latest = await enableNanobotFeature(client, name);
+      for (const feature of missing) {
+        latest = await enableNanobotFeature(client, feature.name, {
+          ...nanobotFeatureActionOptions(feature),
+          riskAcknowledged: true,
+        });
         if (latest.requires_restart) {
           setPendingRestartSections((prev) => ({ ...prev, runtime: true }));
         }
@@ -158,14 +181,22 @@ export function createSystemSettingsActions({
   const handleApiServiceAction = async (
     action: "start" | "stop",
     values?: { host: string; port: number; timeout: number; apiKey?: string },
+    target?: NanobotFeatureActionTarget,
   ) => {
     if (apiServiceAction) return;
+    const request = action === "start"
+      ? values && target
+        ? () => startApiService(client, values, target)
+        : null
+      : () => stopApiService(client);
+    if (!request) {
+      setApiServiceError("Extension action target is unavailable.");
+      return;
+    }
     setApiServiceAction(action);
     setApiServiceError(null);
     try {
-      const payload = action === "start"
-        ? await startApiService(client, values!)
-        : await stopApiService(client);
+      const payload = await request();
       setApiService(payload);
       const refreshed = await fetchNanobotFeatures(token);
       setNanobotFeatures(refreshed);
@@ -207,7 +238,11 @@ export function createSystemSettingsActions({
     confirmed = false,
   ) => {
     const feature = featureCatalog.find((item) => item.name === name);
-    if (action === "enable" && !confirmed && feature && !feature.installed && feature.install_supported) {
+    if (!feature) {
+      setNanobotFeaturesError("Extension action target is unavailable.");
+      return;
+    }
+    if (action === "enable" && !confirmed && !feature.installed && feature.install_supported) {
       setNanobotFeaturesError(null);
       setNanobotFeatureConfirm(feature);
       return;
@@ -217,9 +252,13 @@ export function createSystemSettingsActions({
     setNanobotFeatureConfirm(null);
     setNanobotFeaturesError(null);
     try {
+      const actionOptions = nanobotFeatureActionOptions(feature);
       const payload = action === "enable"
-        ? await enableNanobotFeature(client, name)
-        : await disableNanobotFeature(client, name);
+        ? await enableNanobotFeature(client, name, {
+          ...actionOptions,
+          ...(confirmed ? { riskAcknowledged: true } : {}),
+        })
+        : await disableNanobotFeature(client, name, actionOptions);
       setNanobotFeatures(payload);
       if (payload.requires_restart) {
         setPendingRestartSections((prev) => ({ ...prev, runtime: true }));

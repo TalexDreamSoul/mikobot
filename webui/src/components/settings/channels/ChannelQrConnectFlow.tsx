@@ -3,15 +3,18 @@ import QRCode from "qrcode";
 import { Check, Loader2, Network, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { NanobotFeatureInstallDialog } from "@/components/settings/shared/SettingsControls";
 import { Button } from "@/components/ui/button";
 import { usePageVisibility } from "@/hooks/usePageVisibility";
 import {
   cancelChannelConnect,
   pollChannelConnect,
   startChannelConnect,
+  type ChannelConnectTarget,
 } from "@/lib/api";
 import type {
   ChannelConnectPayload,
+  NanobotFeatureInfo,
   NanobotFeaturesPayload,
 } from "@/lib/types";
 import { useClient } from "@/providers/ClientProvider";
@@ -28,9 +31,8 @@ export type ChannelQrConnectLabels = {
   connect: string;
 };
 
-export type ChannelConnectStartOptions = {
+export type ChannelConnectStartOptions = Omit<ChannelConnectTarget, "riskAcknowledged"> & {
   domain?: string;
-  instanceId?: string;
   mode?: "replace" | "create";
   force?: boolean;
 };
@@ -44,8 +46,9 @@ export type ChannelQrConnectPendingContext = {
 };
 
 export function ChannelQrConnectFlow({
+  feature,
   channelName,
-  startOptions = {},
+  startOptions,
   idleLabel,
   connectRequestId,
   forceOnRepeat = false,
@@ -56,9 +59,10 @@ export function ChannelQrConnectFlow({
   resolveMessage,
   suppressSucceeded = false,
 }: {
+  feature: NanobotFeatureInfo;
   token: string;
   channelName: string;
-  startOptions?: ChannelConnectStartOptions;
+  startOptions: ChannelConnectStartOptions;
   idleLabel?: string;
   connectRequestId?: number;
   forceOnRepeat?: boolean;
@@ -77,12 +81,14 @@ export function ChannelQrConnectFlow({
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [installConfirm, setInstallConfirm] = useState<NanobotFeatureInfo | null>(null);
   const [handledRequestId, setHandledRequestId] = useState(0);
   const pollInFlight = useRef(false);
-  const startDomain = startOptions.domain;
-  const startInstanceId = startOptions.instanceId;
-  const startMode = startOptions.mode;
-  const startForce = startOptions.force;
+  const sessionTargetRef = useRef<ChannelConnectTarget | null>(null);
+  const pendingStartRef = useRef<{
+    force: boolean;
+    options: ChannelConnectStartOptions;
+  } | null>(null);
 
   const pending = connect?.status === "pending";
   const succeeded = connect?.status === "succeeded";
@@ -122,8 +128,10 @@ export function ChannelQrConnectFlow({
       || pollingPaused
       || !pageVisible
     ) return;
-    let cancelled = false;
     const sessionId = connect.session_id;
+    let cancelled = false;
+    const actionTarget = sessionTargetRef.current;
+    if (!actionTarget) return;
     const poll = async () => {
       if (pollInFlight.current) return;
       pollInFlight.current = true;
@@ -132,6 +140,7 @@ export function ChannelQrConnectFlow({
           client,
           channelName,
           sessionId,
+          actionTarget,
         );
         if (cancelled) return;
         setConnect((current) => ({
@@ -172,33 +181,57 @@ export function ChannelQrConnectFlow({
     pollingPaused,
   ]);
 
-  const start = useCallback(async (force = false) => {
+  const runStart = useCallback(async (
+    options: ChannelConnectStartOptions,
+    force = false,
+    riskAcknowledged = false,
+  ) => {
     setBusy(true);
     setError(null);
     try {
+      const actionTarget: ChannelConnectTarget = {
+        extensionId: options.extensionId,
+        expectedRevision: options.expectedRevision,
+        instanceId: options.instanceId,
+        ...(riskAcknowledged ? { riskAcknowledged: true } : {}),
+      };
       const payload = await startChannelConnect(client, channelName, {
-        domain: startDomain,
-        instanceId: startInstanceId,
-        mode: startMode,
-        force: force || startForce,
+        ...options,
+        ...actionTarget,
+        force: force || options.force,
       });
+      sessionTargetRef.current = actionTarget;
       setConnect(payload);
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setBusy(false);
     }
-  }, [channelName, client, startDomain, startForce, startInstanceId, startMode]);
+  }, [channelName, client]);
+
+  const requestStart = useCallback((force = false) => {
+    if (!feature.installed && feature.install_supported) {
+      pendingStartRef.current = { force, options: { ...startOptions } };
+      setInstallConfirm(feature);
+      return;
+    }
+    void runStart(startOptions, force);
+  }, [feature, runStart, startOptions]);
 
   useEffect(() => {
     if (!connectRequestId || connectRequestId === handledRequestId) return;
     setHandledRequestId(connectRequestId);
-    void start();
-  }, [connectRequestId, handledRequestId, start]);
+    requestStart();
+  }, [connectRequestId, handledRequestId, requestStart]);
 
   const cancel = async () => {
     if (!connect?.session_id) {
       setConnect(null);
+      return;
+    }
+    const actionTarget = sessionTargetRef.current;
+    if (!actionTarget) {
+      setError("Extension action target is unavailable.");
       return;
     }
     setBusy(true);
@@ -207,6 +240,7 @@ export function ChannelQrConnectFlow({
         client,
         channelName,
         connect.session_id,
+        actionTarget,
       );
       setConnect(payload);
     } catch (err) {
@@ -220,6 +254,11 @@ export function ChannelQrConnectFlow({
     params: Readonly<Record<string, string>> = {},
   ): Promise<ChannelConnectPayload | null> => {
     if (!connect?.session_id) return null;
+    const actionTarget = sessionTargetRef.current;
+    if (!actionTarget) {
+      setError("Extension action target is unavailable.");
+      return null;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -227,6 +266,7 @@ export function ChannelQrConnectFlow({
         client,
         channelName,
         connect.session_id,
+        actionTarget,
         params,
       );
       setConnect((current) => ({
@@ -251,6 +291,24 @@ export function ChannelQrConnectFlow({
 
   return (
     <div className="mt-3 space-y-3">
+      <NanobotFeatureInstallDialog
+        feature={installConfirm}
+        installing={busy}
+        onOpenChange={(open) => {
+          if (!open) {
+            pendingStartRef.current = null;
+            setInstallConfirm(null);
+          }
+        }}
+        onConfirm={() => {
+          const pendingStart = pendingStartRef.current;
+          pendingStartRef.current = null;
+          setInstallConfirm(null);
+          if (pendingStart) {
+            void runStart(pendingStart.options, pendingStart.force, true);
+          }
+        }}
+      />
       {pending ? (
         <div className="grid gap-4 rounded-control border border-border/70 p-4 sm:grid-cols-[auto_minmax(0,1fr)]">
           <div className="grid h-[196px] w-[196px] place-items-center rounded-control border border-border/60 bg-background">
@@ -341,7 +399,7 @@ export function ChannelQrConnectFlow({
           size="sm"
           variant="outline"
           className="h-8 rounded-full border-border/65 bg-background/80 px-3 text-[12px] font-semibold hover:bg-muted/70"
-          onClick={() => void start(forceOnRepeat && succeeded)}
+          onClick={() => requestStart(forceOnRepeat && succeeded)}
           disabled={!canStart}
         >
           {busy ? (

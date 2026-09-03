@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import type { AgentSettingsDraft } from "@/components/settings/models/ModelsSettings";
 import {
+  NanobotFeatureInstallDialog,
   NumberInput,
   ReadOnlyRow,
   SettingsGroup,
@@ -14,9 +15,19 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SegmentedControl } from "@/components/ui/segmented-control";
+import type { NanobotFeatureActionTarget } from "@/lib/api";
 import { isLoopbackHost } from "@/lib/network";
 import { getRuntimeHost, isNativeRuntime } from "@/lib/runtime";
 import type { ApiServicePayload, NanobotFeatureInfo, SettingsPayload } from "@/lib/types";
+
+type ApiServiceActionHandler = {
+  (
+    action: "start",
+    values: { host: string; port: number; timeout: number; apiKey?: string },
+    target: NanobotFeatureActionTarget,
+  ): void;
+  (action: "stop"): void;
+};
 
 export function RuntimeSettings({
   form,
@@ -28,6 +39,7 @@ export function RuntimeSettings({
   apiServiceLoading,
   apiServiceAction,
   apiServiceError,
+  apiFeature,
   langfuseFeature,
   capabilitiesLoading,
   capabilityAction,
@@ -44,14 +56,12 @@ export function RuntimeSettings({
   apiServiceLoading: boolean;
   apiServiceAction: "start" | "stop" | null;
   apiServiceError: string | null;
+  apiFeature?: NanobotFeatureInfo;
   langfuseFeature?: NanobotFeatureInfo;
   capabilitiesLoading: boolean;
   capabilityAction: string | null;
   capabilityError: string | null;
-  onApiServiceAction: (
-    action: "start" | "stop",
-    values?: { host: string; port: number; timeout: number; apiKey?: string },
-  ) => void;
+  onApiServiceAction: ApiServiceActionHandler;
   onInstallCapability: (name: string) => void;
 }) {
   const { t } = useTranslation();
@@ -89,6 +99,7 @@ export function RuntimeSettings({
   const [apiPort, setApiPort] = useState(apiDefaults.port);
   const [apiKey, setApiKey] = useState("");
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [apiInstallConfirm, setApiInstallConfirm] = useState<NanobotFeatureInfo | null>(null);
   useEffect(() => {
     if (!apiService) return;
     setApiHost(apiService.host);
@@ -98,6 +109,42 @@ export function RuntimeSettings({
   }, [apiService]);
   const apiNetworkAccess = !isLoopbackHost(apiHost);
   const apiMissingNetworkKey = apiNetworkAccess && !apiKey.trim() && !apiDefaults.api_key_hint;
+  const apiTargetAvailable = Boolean(
+    apiFeature?.extension_id?.trim() && apiFeature.extension_revision?.trim(),
+  );
+  const apiStartUnavailable = !apiTargetAvailable
+    || (apiFeature?.installed === false && !apiFeature.install_supported);
+  const startApi = (feature: NanobotFeatureInfo, riskAcknowledged: boolean) => {
+    const extensionId = feature.extension_id?.trim() ?? "";
+    const expectedRevision = feature.extension_revision?.trim() ?? "";
+    if (!extensionId || !expectedRevision) return;
+    onApiServiceAction(
+      "start",
+      {
+        host: apiHost,
+        port: apiPort,
+        timeout: apiDefaults.timeout,
+        apiKey: apiKey.trim() || undefined,
+      },
+      {
+        extensionId,
+        expectedRevision,
+        ...(riskAcknowledged ? { riskAcknowledged: true } : {}),
+      },
+    );
+  };
+  const requestApiServiceAction = () => {
+    if (apiDefaults.running) {
+      onApiServiceAction("stop");
+      return;
+    }
+    if (!apiFeature) return;
+    if (!apiFeature.installed && apiFeature.install_supported) {
+      setApiInstallConfirm(apiFeature);
+      return;
+    }
+    startApi(apiFeature, false);
+  };
   const engineState = isRestarting
     ? tx("settings.values.restartingEngine", "Restarting")
     : settings.apply_state?.status === "pending"
@@ -132,6 +179,17 @@ export function RuntimeSettings({
   };
   return (
     <div className="space-y-7">
+      <NanobotFeatureInstallDialog
+        feature={apiInstallConfirm}
+        installing={apiServiceAction === "start"}
+        onOpenChange={(open) => {
+          if (!open) setApiInstallConfirm(null);
+        }}
+        onConfirm={(feature) => {
+          setApiInstallConfirm(null);
+          startApi(feature, true);
+        }}
+      />
       {isNativeHost ? (
         <section>
           <SettingsSectionTitle>{tx("settings.sections.nativeHost", "Native host")}</SettingsSectionTitle>
@@ -229,20 +287,13 @@ export function RuntimeSettings({
               <Button
                 size="sm"
                 variant="outline"
-                disabled={apiServiceLoading || apiServiceAction !== null || apiMissingNetworkKey}
-                onClick={() =>
-                  onApiServiceAction(
-                    apiDefaults.running ? "stop" : "start",
-                    apiDefaults.running
-                      ? undefined
-                      : {
-                          host: apiHost,
-                          port: apiPort,
-                          timeout: apiDefaults.timeout,
-                          apiKey: apiKey.trim() || undefined,
-                        },
-                  )
+                disabled={
+                  apiServiceLoading
+                  || apiServiceAction !== null
+                  || apiMissingNetworkKey
+                  || (!apiDefaults.running && apiStartUnavailable)
                 }
+                onClick={requestApiServiceAction}
                 className="rounded-full"
               >
                 {apiServiceAction ? (

@@ -16,6 +16,7 @@ import {
   channelValuesForSave,
   defaultChannelFieldValues,
 } from "@/components/settings/channels/CredentialForm";
+import { NanobotFeatureInstallDialog } from "@/components/settings/shared/SettingsControls";
 import { Button } from "@/components/ui/button";
 import { useLogoFallback } from "@/hooks/useLogoFallback";
 import { normalizeLocale } from "@/i18n/config";
@@ -28,6 +29,7 @@ import { logoFallbackUrls } from "@/lib/provider-brand";
 import type {
   ChannelRuntimeStatus,
   ChannelSetupContractField,
+  NanobotChannelInstanceInfo,
   NanobotFeatureInfo,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -41,6 +43,15 @@ import {
   WEIXIN_ADVANCED_FIELD_KEYS,
   WEIXIN_PRIMARY_FIELD_KEYS,
 } from "./presentation";
+
+type WeixinSaveContext = {
+  enabled: boolean;
+  installed: boolean;
+  installSupported: boolean;
+  extensionId: string;
+  expectedRevision: string;
+  onFeaturesUpdate: ChannelPluginPanelProps["onFeaturesUpdate"];
+};
 
 export function WeixinPanel({
   token,
@@ -75,6 +86,8 @@ export function WeixinPanel({
   const [connectRequestId, setConnectRequestId] = useState(0);
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
   const [busyInstanceId, setBusyInstanceId] = useState<string | null>(null);
+  const [installConfirmInstance, setInstallConfirmInstance] = useState<NanobotChannelInstanceInfo | null>(null);
+  const [installConfirmSave, setInstallConfirmSave] = useState(false);
   const [instanceError, setInstanceError] = useState<string | null>(null);
   const [visibleSecrets, setVisibleSecrets] = useState<Record<string, boolean>>({});
   const [touchedFields, setTouchedFields] = useState<Set<string>>(() => new Set());
@@ -106,15 +119,26 @@ export function WeixinPanel({
   const fieldValuesRef = useRef(fieldValues);
   const touchedFieldsRef = useRef(touchedFields);
   const editableFieldsRef = useRef(editableFields);
-  const saveContextRef = useRef({
-    token,
+  const pendingSaveRef = useRef<{
+    values: Record<string, string>;
+    savedFields: Set<string>;
+    context: WeixinSaveContext;
+  } | null>(null);
+  const saveContextRef = useRef<WeixinSaveContext>({
     enabled: feature.enabled,
+    installed: feature.installed,
+    installSupported: feature.install_supported,
+    extensionId: feature.action_target_id ?? "",
+    expectedRevision: feature.action_target_revision ?? "",
     onFeaturesUpdate,
   });
   editableFieldsRef.current = editableFields;
   saveContextRef.current = {
-    token,
     enabled: feature.enabled,
+    installed: feature.installed,
+    installSupported: feature.install_supported,
+    extensionId: feature.action_target_id ?? "",
+    expectedRevision: feature.action_target_revision ?? "",
     onFeaturesUpdate,
   };
 
@@ -137,8 +161,15 @@ export function WeixinPanel({
   const saveSettings = useCallback(async (
     values: Record<string, string>,
     savedFields: Set<string>,
+    riskAcknowledged = false,
+    context: WeixinSaveContext = saveContextRef.current,
   ) => {
-    const context = saveContextRef.current;
+    if (context.enabled && !riskAcknowledged && !context.installed && context.installSupported) {
+      pendingSaveRef.current = { values, savedFields, context: { ...context } };
+      setSaveError(null);
+      setInstallConfirmSave(true);
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     setSaveState("idle");
@@ -147,7 +178,12 @@ export function WeixinPanel({
         client,
         "weixin",
         channelValuesForSave(editableFieldsRef.current, values),
-        { enable: context.enabled },
+        {
+          enable: context.enabled,
+          extensionId: context.extensionId,
+          expectedRevision: context.expectedRevision,
+          ...(riskAcknowledged ? { riskAcknowledged: true } : {}),
+        },
       );
       const remainingFields = new Set(touchedFieldsRef.current);
       for (const key of savedFields) {
@@ -210,13 +246,27 @@ export function WeixinPanel({
     (instance) => instance.id !== "default",
   );
 
-  const toggleInstance = async (instanceId: string, checked: boolean) => {
-    setBusyInstanceId(instanceId);
+  const toggleInstance = async (
+    instance: NanobotChannelInstanceInfo,
+    checked: boolean,
+    riskAcknowledged = false,
+  ) => {
+    if (checked && !riskAcknowledged && !feature.installed && feature.install_supported) {
+      setInstallConfirmInstance(instance);
+      return;
+    }
+    setBusyInstanceId(instance.id);
     setInstanceError(null);
     try {
+      const actionOptions = {
+        extensionId: instance.extension_id ?? "",
+        expectedRevision: instance.extension_revision ?? "",
+        instanceId: instance.id,
+        ...(riskAcknowledged ? { riskAcknowledged: true } : {}),
+      };
       const payload = checked
-        ? await enableNanobotFeature(client, feature.name, { instanceId })
-        : await disableNanobotFeature(client, feature.name, { instanceId });
+        ? await enableNanobotFeature(client, feature.name, actionOptions)
+        : await disableNanobotFeature(client, feature.name, actionOptions);
       onFeaturesUpdate(payload);
     } catch (reason) {
       setInstanceError((reason as Error).message);
@@ -227,6 +277,36 @@ export function WeixinPanel({
 
   return (
     <aside className="min-h-full rounded-panel bg-settings-surface p-5">
+      <NanobotFeatureInstallDialog
+        feature={installConfirmInstance ? feature : null}
+        installing={busyInstanceId !== null}
+        onOpenChange={(open) => {
+          if (!open) setInstallConfirmInstance(null);
+        }}
+        onConfirm={() => {
+          const instance = installConfirmInstance;
+          setInstallConfirmInstance(null);
+          if (instance) void toggleInstance(instance, true, true);
+        }}
+      />
+      <NanobotFeatureInstallDialog
+        feature={installConfirmSave ? feature : null}
+        installing={saving}
+        onOpenChange={(open) => {
+          if (!open) {
+            pendingSaveRef.current = null;
+            setInstallConfirmSave(false);
+          }
+        }}
+        onConfirm={() => {
+          const pending = pendingSaveRef.current;
+          pendingSaveRef.current = null;
+          setInstallConfirmSave(false);
+          if (pending) {
+            void saveSettings(pending.values, pending.savedFields, true, pending.context);
+          }
+        }}
+      />
       <div className="flex items-start justify-between gap-4">
         <div className="flex min-w-0 items-start gap-3">
           <WeixinLogo showBrandLogos={showBrandLogos} />
@@ -355,7 +435,7 @@ export function WeixinPanel({
                         defaultValue: "{{name}} instance",
                       })}
                       label={running ? onLabel : offLabel}
-                      onChange={(checked) => void toggleInstance(instance.id, checked)}
+                      onChange={(checked) => void toggleInstance(instance, checked)}
                     />
                   </div>
                   {expanded ? (

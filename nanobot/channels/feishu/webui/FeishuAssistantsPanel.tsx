@@ -8,6 +8,7 @@ import {
 } from "@/channel-plugins/i18n";
 import type { ChannelPluginPanelProps } from "@/channel-plugins/types";
 import { ChannelInstancesPanel } from "@/components/settings/channels/ChannelInstancesPanel";
+import { NanobotFeatureInstallDialog } from "@/components/settings/shared/SettingsControls";
 import { Button } from "@/components/ui/button";
 import { enableNanobotFeature } from "@/lib/api";
 import type {
@@ -54,6 +55,7 @@ export function FeishuAssistantsPanel({
           <FeishuInstanceAction
             key={instance.id}
             token={token}
+            feature={feature}
             instance={instance}
             onFeaturesUpdate={onFeaturesUpdate}
           />
@@ -71,6 +73,7 @@ export function FeishuAssistantsPanel({
             </p>
             <FeishuConnectFlow
               token={token}
+              feature={feature}
               instanceId="default"
               mode="create"
               idleLabel={tx("custom.createAssistant", "Create assistant")}
@@ -85,10 +88,12 @@ export function FeishuAssistantsPanel({
 
 function FeishuInstanceAction({
   token,
+  feature,
   instance,
   onFeaturesUpdate,
 }: {
   token: string;
+  feature: NanobotFeatureInfo;
   instance: NanobotChannelInstanceInfo;
   onFeaturesUpdate: (payload: NanobotFeaturesPayload) => void;
 }) {
@@ -97,6 +102,7 @@ function FeishuInstanceAction({
   const tx = channelTranslator(t, "feishu");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [installConfirmInstance, setInstallConfirmInstance] = useState<NanobotChannelInstanceInfo | null>(null);
   if (instance.pairing_only) {
     return (
       <p className="text-[12px] text-muted-foreground">
@@ -109,6 +115,8 @@ function FeishuInstanceAction({
     return (
       <FeishuConnectFlow
         token={token}
+        feature={feature}
+        instance={instance}
         instanceId={instance.id}
         mode="replace"
         idleLabel={t("settings.channels.connect", { defaultValue: "Connect" })}
@@ -117,12 +125,24 @@ function FeishuInstanceAction({
     );
   }
 
-  const reconnect = async () => {
+  const reconnect = async (
+    targetInstance: NanobotChannelInstanceInfo,
+    riskAcknowledged = false,
+  ) => {
+    if (!riskAcknowledged && !feature.installed && feature.install_supported) {
+      setInstallConfirmInstance(targetInstance);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       onFeaturesUpdate(
-        await enableNanobotFeature(client, "feishu", { instanceId: instance.id }),
+        await enableNanobotFeature(client, "feishu", {
+          extensionId: targetInstance.extension_id ?? "",
+          expectedRevision: targetInstance.extension_revision ?? "",
+          instanceId: targetInstance.id,
+          ...(riskAcknowledged ? { riskAcknowledged: true } : {}),
+        }),
       );
     } catch (err) {
       setError((err as Error).message);
@@ -133,14 +153,25 @@ function FeishuInstanceAction({
 
   return (
     <>
+      <NanobotFeatureInstallDialog
+        feature={installConfirmInstance ? feature : null}
+        installing={busy}
+        onOpenChange={(open) => {
+          if (!open) setInstallConfirmInstance(null);
+        }}
+        onConfirm={() => {
+          const targetInstance = installConfirmInstance;
+          setInstallConfirmInstance(null);
+          if (targetInstance) void reconnect(targetInstance, true);
+        }}
+      />
       <div className="mt-3 flex justify-end">
         <Button
           type="button"
           size="sm"
           variant="outline"
           className="h-8 rounded-full border-border/65 bg-background/80 px-3 text-[12px] font-semibold hover:bg-muted/70"
-          onClick={() => void reconnect()}
-          disabled={busy || !instance.enabled}
+          onClick={() => void reconnect(instance)}
         >
           {busy ? (
             <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
@@ -163,6 +194,10 @@ function defaultFeishuInstance(feature: NanobotFeatureInfo): NanobotChannelInsta
   return {
     id: "default",
     name: "nanobot",
+    extension_id: feature.action_target_id,
+    extension_revision: feature.action_target_revision,
+    extension_actions: feature.action_target_actions,
+    extension_lifecycle: feature.extension_lifecycle,
     enabled: feature.enabled,
     configured: Boolean(feature.configured),
     config_values: feature.config_values ?? {},

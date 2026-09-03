@@ -1,7 +1,14 @@
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
+import i18n from "@/i18n";
 import { installedMcpPresetsFromPayload } from "@/lib/mcp-preset-events";
-import { requestMutationMock, jsonResponse, settingsPayload, renderSettingsView, installSettingsViewTestHooks } from "@/tests/settings-test-utils";
+import {
+  installSettingsViewTestHooks,
+  jsonResponse,
+  renderSettingsView,
+  requestMutationMock,
+  settingsPayload,
+} from "@/tests/settings-test-utils";
 
 
 const installedAnyGen = {
@@ -22,8 +29,8 @@ const installedAnyGen = {
 };
 
 const agentPlugin = {
-  name: "plugin-computer-use",
-  display_name: "Computer Use",
+  name: "ext:agent_plugin:demo-plugin",
+  display_name: "Demo Plugin",
   category: "Plugin",
   description: "Control the desktop with a live preview.",
   requires: "screen-recording, accessibility",
@@ -36,6 +43,40 @@ const agentPlugin = {
   status: "disabled",
   required_fields: [],
   source: "agent-plugin",
+  extension_id: "ext:agent_plugin:demo-plugin",
+  extension_revision: "revision-demo-plugin-1",
+  extension_lifecycle: "disabled",
+  extension_trust: "operator_trusted",
+  extension_execution: "child_process",
+  risk_acknowledgement_required: true,
+  permissions_enforced: false,
+};
+
+const configuredPluginPrefixMcp = {
+  name: "plugin-configured-mcp",
+  display_name: "Configured MCP",
+  category: "MCP",
+  description: "A configured MCP server whose legacy name begins with plugin-.",
+  requires: "",
+  transport: "stdio",
+  install_supported: false,
+  installed: true,
+  configured: true,
+  enabled: false,
+  available: false,
+  status: "disabled",
+  required_fields: [],
+  source: "custom",
+};
+
+const dataOnlyAgentPlugin = {
+  ...agentPlugin,
+  name: "ext:agent_plugin:data-only",
+  display_name: "Data Only Plugin",
+  extension_id: "ext:agent_plugin:data-only",
+  extension_revision: "revision-data-only-1",
+  extension_execution: "data",
+  risk_acknowledgement_required: false,
 };
 
 describe("Settings system domains", () => {
@@ -46,48 +87,182 @@ describe("Settings system domains", () => {
     expect(installedMcpPresetsFromPayload({ presets: [enabled], installed_count: 1 })).toEqual([]);
   });
 
-  it("enables and disables an installed Agent Plugin explicitly", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === "/api/settings") return jsonResponse(settingsPayload());
-      if (url === "/api/settings/cli-apps") return jsonResponse({ apps: [], installed_count: 0 });
-      if (url === "/api/settings/mcp-presets") {
-        return jsonResponse({ presets: [agentPlugin], installed_count: 0 });
-      }
-      return jsonResponse({});
-    }));
-    requestMutationMock.mockImplementation(async (action: string) => {
-      const enabled = action.endsWith(".enable");
-      return {
-        presets: [{
-          ...agentPlugin,
-          enabled,
-          available: enabled,
-          status: enabled ? "enabled" : "disabled",
-        }],
-        installed_count: Number(enabled),
-      };
-    });
+  it("requires explicit plugin risk confirmation while preserving canonical and configured MCP payloads", async () => {
+    await act(() => i18n.changeLanguage("en"));
+    try {
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/settings") return jsonResponse(settingsPayload());
+        if (url === "/api/settings/cli-apps") return jsonResponse({ apps: [], installed_count: 0 });
+        if (url === "/api/settings/mcp-presets") {
+          return jsonResponse({ presets: [agentPlugin, dataOnlyAgentPlugin, configuredPluginPrefixMcp], installed_count: 1 });
+        }
+        return jsonResponse({});
+      }));
+      requestMutationMock.mockImplementation(async (action: string, values: Record<string, string>) => {
+        const pluginEnabled = action === "settings.mcp.enable" && values.name === agentPlugin.name;
+        const pluginDisabled = action === "settings.mcp.disable" && values.name === agentPlugin.name;
+        const enabled = pluginEnabled ? true : pluginDisabled ? false : agentPlugin.enabled;
+        return {
+          presets: [{
+            ...agentPlugin,
+            enabled,
+            available: enabled,
+            status: enabled ? "enabled" : "disabled",
+          }, dataOnlyAgentPlugin, configuredPluginPrefixMcp],
+          installed_count: Number(enabled),
+        };
+      });
 
-    renderSettingsView();
+      renderSettingsView();
 
-    expect(await screen.findByText("Computer Use")).toBeInTheDocument();
-    expect(screen.getByText("Plugins")).toBeInTheDocument();
-    expect(screen.getByText(/Control the desktop.*screen-recording, accessibility/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Enable" }));
+      const pluginHeading = await screen.findByRole("heading", { name: "Demo Plugin" });
+      const pluginRow = pluginHeading.closest("article");
+      expect(pluginRow).not.toBeNull();
+      const enablePlugin = within(pluginRow as HTMLElement).getByRole("button", { name: "Demo Plugin: Enable" });
+      fireEvent.click(enablePlugin);
 
-    await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith(
-      "settings.mcp.enable", { name: "plugin-computer-use" }, 20_000,
-    ));
-    const enabledButton = await screen.findByRole("button", { name: "Computer Use: Enabled" });
-    await waitFor(() => expect(enabledButton).toBeEnabled());
-    fireEvent.pointerDown(enabledButton, { button: 0, ctrlKey: false });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Disable" }));
+      const warning = await screen.findByRole("alertdialog", { name: "Enable Demo Plugin?" });
+      expect(within(warning).getByText(/operator-trusted, unisolated executable code/)).toBeInTheDocument();
+      await act(() => i18n.changeLanguage("zh-CN"));
+      const chineseWarning = screen.getByRole("alertdialog", { name: "启用 Demo Plugin？" });
+      expect(within(chineseWarning).getByText(
+        "此 Agent Plugin 是由操作员信任、未隔离的可执行代码。它可能访问 nanobot 进程可见的文件、凭据、网络及其他资源。nanobot 不会验证此插件，也不会使其变得安全。",
+      )).toBeInTheDocument();
+      fireEvent.click(within(chineseWarning).getByRole("button", { name: "取消" }));
+      expect(requestMutationMock).not.toHaveBeenCalled();
 
-    await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith(
-      "settings.mcp.disable", { name: "plugin-computer-use" }, 20_000,
-    ));
-    expect(await screen.findByRole("button", { name: "Enable" })).toBeInTheDocument();
+      await act(() => i18n.changeLanguage("en"));
+      fireEvent.click(enablePlugin);
+      const confirmation = await screen.findByRole("alertdialog", { name: "Enable Demo Plugin?" });
+      fireEvent.click(within(confirmation).getByRole("button", { name: "Enable plugin" }));
+      await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith(
+        "settings.mcp.enable",
+        {
+          name: "ext:agent_plugin:demo-plugin",
+          extension_id: "ext:agent_plugin:demo-plugin",
+          expected_revision: "revision-demo-plugin-1",
+          risk_acknowledged: "true",
+        },
+        20_000,
+      ));
+      expect(requestMutationMock).toHaveBeenCalledTimes(1);
+
+      const enabledButton = await screen.findByRole("button", { name: "Demo Plugin: Enabled" });
+      fireEvent.pointerDown(enabledButton, { button: 0, ctrlKey: false });
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Disable" }));
+      await waitFor(() => expect(requestMutationMock).toHaveBeenLastCalledWith(
+        "settings.mcp.disable",
+        {
+          name: "ext:agent_plugin:demo-plugin",
+          extension_id: "ext:agent_plugin:demo-plugin",
+          expected_revision: "revision-demo-plugin-1",
+        },
+        20_000,
+      ));
+      expect(requestMutationMock).toHaveBeenCalledTimes(2);
+      const dataOnlyHeading = await screen.findByRole("heading", { name: "Data Only Plugin" });
+      const dataOnlyRow = dataOnlyHeading.closest("article");
+      expect(dataOnlyRow).not.toBeNull();
+      fireEvent.click(within(dataOnlyRow as HTMLElement).getByRole("button", { name: "Data Only Plugin: Enable" }));
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+      await waitFor(() => expect(requestMutationMock).toHaveBeenLastCalledWith(
+        "settings.mcp.enable",
+        {
+          name: "ext:agent_plugin:data-only",
+          extension_id: "ext:agent_plugin:data-only",
+          expected_revision: "revision-data-only-1",
+        },
+        20_000,
+      ));
+      expect(requestMutationMock).toHaveBeenCalledTimes(3);
+
+      fireEvent.click(screen.getByRole("button", { name: "MCP" }));
+      const configuredHeading = await screen.findByRole("heading", { name: "Configured MCP" });
+      const configuredRow = configuredHeading.closest("article");
+      expect(configuredRow).not.toBeNull();
+      fireEvent.click(within(configuredRow as HTMLElement).getByRole("button", { name: "Configured MCP: Enable" }));
+      await waitFor(() => expect(requestMutationMock).toHaveBeenLastCalledWith(
+        "settings.mcp.enable",
+        { name: "plugin-configured-mcp" },
+        20_000,
+      ));
+      expect(requestMutationMock).toHaveBeenCalledTimes(4);
+    } finally {
+      await act(() => i18n.changeLanguage("en"));
+    }
+  });
+
+  it("binds plugin confirmation to the opened revision and restores focus on cancel", async () => {
+    await act(() => i18n.changeLanguage("en"));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const listedPlugin = { ...agentPlugin };
+    const replacementPlugin = {
+      ...agentPlugin,
+      display_name: "Replacement Plugin",
+      extension_revision: "revision-demo-plugin-2",
+    };
+    const refreshingMcp = {
+      ...configuredPluginPrefixMcp,
+      name: "refreshing-mcp",
+      display_name: "Refreshing MCP",
+      enabled: undefined,
+      runtime_status: "connecting",
+    };
+    let catalogPass = 0;
+    try {
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/settings") return jsonResponse(settingsPayload());
+        if (url === "/api/settings/cli-apps") return jsonResponse({ apps: [], installed_count: 0 });
+        if (url === "/api/settings/mcp-presets") {
+          const plugin = catalogPass++ === 0 ? listedPlugin : replacementPlugin;
+          return jsonResponse({ presets: [plugin, refreshingMcp], installed_count: 1 });
+        }
+        return jsonResponse({});
+      }));
+      requestMutationMock.mockResolvedValue({
+        presets: [replacementPlugin, refreshingMcp],
+        installed_count: 1,
+      });
+
+      renderSettingsView();
+
+      const pluginHeading = await screen.findByRole("heading", { name: "Demo Plugin" });
+      const enablePlugin = within(pluginHeading.closest("article") as HTMLElement).getByRole(
+        "button",
+        { name: "Demo Plugin: Enable" },
+      );
+      fireEvent.click(enablePlugin);
+      const warning = await screen.findByRole("alertdialog", { name: "Enable Demo Plugin?" });
+      const cancel = within(warning).getByRole("button", { name: "Cancel" });
+      await waitFor(() => expect(cancel).toHaveFocus());
+      fireEvent.keyDown(document, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+      await waitFor(() => expect(enablePlugin).toHaveFocus());
+
+      fireEvent.click(enablePlugin);
+      await screen.findByRole("alertdialog", { name: "Enable Demo Plugin?" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      await screen.findByText("Replacement Plugin", { selector: "h3" });
+      expect(screen.getByRole("alertdialog", { name: "Enable Demo Plugin?" })).toBeInTheDocument();
+      fireEvent.click(within(screen.getByRole("alertdialog", { name: "Enable Demo Plugin?" })).getByRole("button", { name: "Enable plugin" }));
+      await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith(
+        "settings.mcp.enable",
+        {
+          name: "ext:agent_plugin:demo-plugin",
+          extension_id: "ext:agent_plugin:demo-plugin",
+          expected_revision: "revision-demo-plugin-1",
+          risk_acknowledged: "true",
+        },
+        20_000,
+      ));
+    } finally {
+      vi.useRealTimers();
+      await act(() => i18n.changeLanguage("en"));
+    }
   });
 
 
@@ -185,7 +360,83 @@ describe("Settings system domains", () => {
     });
   });
 
-  it("starts the managed API server from System", async () => {
+  it("does not start an unavailable API service until its install is confirmed", async () => {
+    const base = settingsPayload();
+    const stopped = {
+      installed: false,
+      running: false,
+      managed: false,
+      host: "127.0.0.1",
+      port: 8900,
+      timeout: 120,
+      api_key_hint: null,
+      endpoint: "http://127.0.0.1:8900/v1",
+      command: "nanobot serve",
+    };
+    const apiFeature = {
+      name: "api",
+      display_name: "API",
+      type: "feature",
+      extension_id: "ext:optional_feature:api",
+      extension_revision: "api-package-revision",
+      extension_actions: ["install"],
+      extension_lifecycle: "unavailable",
+      action_target_id: "ext:optional_feature:api",
+      action_target_revision: "api-package-revision",
+      action_target_actions: ["install"],
+      enabled: false,
+      installed: false,
+      ready: false,
+      status: "missing_dependency",
+      install_supported: true,
+      requires_restart: false,
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/settings") return jsonResponse(base);
+      if (url === "/api/settings/api-service") return jsonResponse(stopped);
+      if (url === "/api/settings/nanobot-features") {
+        return jsonResponse({ features: [apiFeature], enabled_count: 0 });
+      }
+      return jsonResponse({});
+    }));
+    requestMutationMock.mockResolvedValue({ ...stopped, installed: true, running: true, managed: true });
+
+    renderSettingsView({ initialSection: "runtime", initialSettings: base, showSidebar: true });
+
+    const startButton = await screen.findByRole("button", { name: "Start API server" });
+    await waitFor(() => expect(startButton).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Local network" }));
+    fireEvent.change(screen.getByRole("spinbutton"), { target: { value: "9137" } });
+    fireEvent.change(screen.getByPlaceholderText("Enter an API key"), {
+      target: { value: "edited-network-secret" },
+    });
+    fireEvent.click(startButton);
+    const confirmation = await screen.findByRole("dialog", { name: "Install support for API?" });
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Cancel" }));
+    expect(requestMutationMock).not.toHaveBeenCalled();
+
+    fireEvent.click(startButton);
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "Install support for API?" })).getByRole(
+      "button",
+      { name: "Install and enable" },
+    ));
+    await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith(
+      "settings.api_service.start",
+      {
+        host: "0.0.0.0",
+        port: 9137,
+        timeout: 120,
+        api_key: "edited-network-secret",
+        extension_id: "ext:optional_feature:api",
+        expected_revision: "api-package-revision",
+        risk_acknowledged: true,
+      },
+      150_000,
+    ));
+  });
+
+  it("starts an installed API service with its exact target but no acknowledgement", async () => {
     const base = settingsPayload();
     const stopped = {
       installed: false,
@@ -203,7 +454,25 @@ describe("Settings system domains", () => {
       if (url === "/api/settings") return jsonResponse(base);
       if (url === "/api/settings/api-service") return jsonResponse(stopped);
       if (url === "/api/settings/nanobot-features") {
-        return jsonResponse({ features: [], enabled_count: 0 });
+        return jsonResponse({
+          features: [{
+            name: "api",
+            display_name: "API",
+            type: "feature",
+            extension_id: "ext:optional_feature:api",
+            extension_revision: "api-package-revision",
+            action_target_id: "ext:optional_feature:api",
+            action_target_revision: "api-package-revision",
+            action_target_actions: ["install"],
+            enabled: false,
+            installed: true,
+            ready: true,
+            status: "installed",
+            install_supported: true,
+            requires_restart: false,
+          }],
+          enabled_count: 0,
+        });
       }
       return jsonResponse({});
     });
@@ -220,14 +489,17 @@ describe("Settings system domains", () => {
     const startButton = await screen.findByRole("button", { name: "Start API server" });
     await waitFor(() => expect(startButton).toBeEnabled());
     fireEvent.click(startButton);
-
-    await waitFor(() => {
-      expect(requestMutationMock).toHaveBeenCalledWith(
-        "settings.api_service.start",
-        { host: "127.0.0.1", port: 8900, timeout: 120 },
-        150_000,
-      );
-    });
+    await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith(
+      "settings.api_service.start",
+      {
+        host: "127.0.0.1",
+        port: 8900,
+        timeout: 120,
+        extension_id: "ext:optional_feature:api",
+        expected_revision: "api-package-revision",
+      },
+      150_000,
+    ));
   });
 
   it("shows a visible uninstall button for installed CLI apps and calls uninstall", async () => {
@@ -343,6 +615,13 @@ describe("Settings system domains", () => {
             display_name: "Matrix",
             webui: "webui/index.ts",
             type: "channel",
+            extension_id: "ext:channel_package:matrix",
+            extension_revision: "matrix-package-revision",
+            extension_actions: ["inspect"],
+            extension_lifecycle: "unavailable",
+            action_target_id: "ext:channel_package:matrix/channel:default",
+            action_target_revision: "matrix-default-revision",
+            action_target_actions: ["configure", "enable", "install"],
             enabled: false,
             installed: false,
             ready: false,
@@ -364,6 +643,13 @@ describe("Settings system domains", () => {
             display_name: "Matrix",
             webui: "webui/index.ts",
             type: "channel",
+            extension_id: "ext:channel_package:matrix",
+            extension_revision: "matrix-package-revision-2",
+            extension_actions: ["inspect"],
+            extension_lifecycle: "enabled",
+            action_target_id: "ext:channel_package:matrix/channel:default",
+            action_target_revision: "matrix-default-revision-2",
+            action_target_actions: ["configure", "disable"],
             enabled: true,
             running: true,
             runtime_status: "running",
@@ -384,6 +670,13 @@ describe("Settings system domains", () => {
             display_name: "Matrix",
             webui: "webui/index.ts",
             type: "channel",
+            extension_id: "ext:channel_package:matrix",
+            extension_revision: "matrix-package-revision-3",
+            extension_actions: ["inspect"],
+            extension_lifecycle: "disabled",
+            action_target_id: "ext:channel_package:matrix/channel:default",
+            action_target_revision: "matrix-default-revision-3",
+            action_target_actions: ["configure", "enable"],
             enabled: false,
             installed: true,
             ready: false,
@@ -415,7 +708,12 @@ describe("Settings system domains", () => {
     await waitFor(() =>
       expect(requestMutationMock).toHaveBeenCalledWith(
         "settings.feature.enable",
-        { name: "matrix" },
+        {
+          name: "matrix",
+          extension_id: "ext:channel_package:matrix/channel:default",
+          expected_revision: "matrix-default-revision",
+          risk_acknowledged: true,
+        },
         150_000,
       ),
     );
@@ -436,7 +734,11 @@ describe("Settings system domains", () => {
     await waitFor(() =>
       expect(requestMutationMock).toHaveBeenCalledWith(
         "settings.feature.disable",
-        { name: "matrix" },
+        {
+          name: "matrix",
+          extension_id: "ext:channel_package:matrix/channel:default",
+          expected_revision: "matrix-default-revision-2",
+        },
         20_000,
       ),
     );

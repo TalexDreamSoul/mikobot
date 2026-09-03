@@ -1252,13 +1252,60 @@ export interface CliAppsPayload {
   };
 }
 
-export interface NanobotFeatureInfo {
+export type NanobotExtensionAction =
+  | "inspect"
+  | "configure"
+  | "enable"
+  | "disable"
+  | "reload"
+  | "reconnect"
+  | "install"
+  | "uninstall"
+  | "restart_required";
+
+export type NanobotExtensionLifecycle =
+  | "discovered"
+  | "unavailable"
+  | "disabled"
+  | "enabling"
+  | "enabled"
+  | "reloading"
+  | "disabling"
+  | "failed"
+  | "changed"
+  | "restart_required";
+
+export type NanobotExtensionTrust =
+  | "first_party"
+  | "operator_trusted"
+  | "workspace_content"
+  | "remote_service";
+
+export type NanobotExtensionExecution =
+  | "data"
+  | "in_process"
+  | "child_process"
+  | "remote";
+
+export interface NanobotExtensionDescriptor {
+  extension_id?: string;
+  extension_revision?: string | null;
+  extension_actions?: NanobotExtensionAction[];
+  extension_lifecycle?: NanobotExtensionLifecycle;
+  extension_trust?: NanobotExtensionTrust;
+  extension_execution?: NanobotExtensionExecution;
+}
+
+export interface NanobotFeatureInfo extends NanobotExtensionDescriptor {
   name: string;
   display_name: string;
   capabilities?: string[];
   settings_visible?: boolean;
   webui?: string;
   type: "channel" | "feature" | string;
+  action_target_id?: string;
+  action_target_revision?: string | null;
+  action_target_actions?: NanobotExtensionAction[];
   enabled: boolean;
   running?: boolean;
   runtime_status?: ChannelRuntimeStatus;
@@ -1289,7 +1336,7 @@ export interface ChannelSetupContract {
   official_url?: string;
 }
 
-export interface NanobotChannelInstanceInfo {
+export interface NanobotChannelInstanceInfo extends NanobotExtensionDescriptor {
   id: string;
   name: string;
   display_name?: string;
@@ -1413,6 +1460,13 @@ export interface McpPresetInfo {
   enabled_tools?: string[];
   source?: "preset" | "custom" | string;
   manifest?: AppManifest;
+  extension_id?: string;
+  extension_revision?: string | null;
+  extension_lifecycle?: string;
+  extension_trust?: string;
+  extension_execution?: string;
+  risk_acknowledgement_required?: boolean;
+  permissions_enforced?: boolean;
 }
 
 type McpOAuthFlowStatus =

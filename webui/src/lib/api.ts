@@ -1024,9 +1024,16 @@ export async function fetchApiService(token: string, base: string = ""): Promise
   return request<ApiServicePayload>(`${base}/api/settings/api-service`, token);
 }
 
+export interface NanobotFeatureActionTarget {
+  extensionId: string;
+  expectedRevision: string;
+  riskAcknowledged?: boolean;
+}
+
 export async function startApiService(
   transport: WebUIMutationTransport,
   values: { host: string; port: number; timeout: number; apiKey?: string },
+  target: NanobotFeatureActionTarget,
 ): Promise<ApiServicePayload> {
   return mutation<ApiServicePayload>(
     transport,
@@ -1036,6 +1043,7 @@ export async function startApiService(
       port: values.port,
       timeout: values.timeout,
       ...(values.apiKey !== undefined ? { api_key: values.apiKey } : {}),
+      ...nanobotFeatureActionPayload(target),
     },
     PACKAGE_MUTATION_TIMEOUT_MS,
   );
@@ -1047,15 +1055,37 @@ export async function stopApiService(
   return mutation<ApiServicePayload>(transport, "settings.api_service.stop");
 }
 
+export interface NanobotFeatureActionOptions extends NanobotFeatureActionTarget {
+  instanceId?: string;
+}
+
+export interface ChannelConfigureOptions extends NanobotFeatureActionOptions {
+  enable?: boolean;
+}
+
+function nanobotFeatureActionPayload(options: NanobotFeatureActionOptions): Record<string, unknown> {
+  const extensionId = options.extensionId.trim();
+  const expectedRevision = options.expectedRevision.trim();
+  if (!extensionId || !expectedRevision) {
+    throw new ApiError(400, "Extension action target is unavailable.");
+  }
+  return {
+    extension_id: extensionId,
+    expected_revision: expectedRevision,
+    ...(options.instanceId ? { instance_id: options.instanceId } : {}),
+    ...(options.riskAcknowledged ? { risk_acknowledged: true } : {}),
+  };
+}
+
 export async function enableNanobotFeature(
   transport: WebUIMutationTransport,
   name: string,
-  options: { instanceId?: string } = {},
+  options: NanobotFeatureActionOptions,
 ): Promise<NanobotFeaturesPayload> {
   return mutation<NanobotFeaturesPayload>(
     transport,
     "settings.feature.enable",
-    { name, ...(options.instanceId ? { instance_id: options.instanceId } : {}) },
+    { name, ...nanobotFeatureActionPayload(options) },
     PACKAGE_MUTATION_TIMEOUT_MS,
   );
 }
@@ -1063,12 +1093,12 @@ export async function enableNanobotFeature(
 export async function disableNanobotFeature(
   transport: WebUIMutationTransport,
   name: string,
-  options: { instanceId?: string } = {},
+  options: NanobotFeatureActionOptions,
 ): Promise<NanobotFeaturesPayload> {
   return mutation<NanobotFeaturesPayload>(
     transport,
     "settings.feature.disable",
-    { name, ...(options.instanceId ? { instance_id: options.instanceId } : {}) },
+    { name, ...nanobotFeatureActionPayload(options) },
   );
 }
 
@@ -1092,23 +1122,42 @@ export async function runPairingAction(
   return mutation<PairingPayload>(transport, `settings.pairing.${action}`, { code });
 }
 
+export type ChannelConnectTarget = Pick<
+  NanobotFeatureActionOptions,
+  "extensionId" | "expectedRevision" | "riskAcknowledged"
+> & {
+  instanceId: string;
+};
+
+export interface ChannelConnectStartOptions extends ChannelConnectTarget {
+  domain?: string;
+  mode?: "replace" | "create";
+  force?: boolean;
+}
+
+function channelConnectTargetPayload(options: ChannelConnectTarget): Record<string, unknown> {
+  const instanceId = options.instanceId.trim();
+  if (!instanceId) {
+    throw new ApiError(400, "Extension action target is unavailable.");
+  }
+  return {
+    ...nanobotFeatureActionPayload(options),
+    instance_id: instanceId,
+  };
+}
+
 export async function startChannelConnect(
   transport: WebUIMutationTransport,
   channel: string,
-  options: {
-    domain?: string;
-    instanceId?: string;
-    mode?: "replace" | "create";
-    force?: boolean;
-  } = {},
+  options: ChannelConnectStartOptions,
 ): Promise<ChannelConnectPayload> {
   return mutation<ChannelConnectPayload>(
     transport,
     "settings.channel.connect.start",
     {
       channel,
+      ...channelConnectTargetPayload(options),
       ...(options.domain ? { domain: options.domain } : {}),
-      ...(options.instanceId ? { instance_id: options.instanceId } : {}),
       ...(options.mode ? { mode: options.mode } : {}),
       ...(options.force ? { force: true } : {}),
     },
@@ -1120,15 +1169,27 @@ export async function pollChannelConnect(
   transport: WebUIMutationTransport,
   channel: string,
   sessionId: string,
+  options: ChannelConnectTarget,
   params: Readonly<Record<string, string>> = {},
 ): Promise<ChannelConnectPayload> {
   const values = Object.fromEntries(
-    Object.entries(params).filter(([key]) => key !== "session_id"),
+    Object.entries(params).filter(([key]) => ![
+      "extension_id",
+      "expected_revision",
+      "instance_id",
+      "risk_acknowledged",
+      "session_id",
+    ].includes(key)),
   );
   return mutation<ChannelConnectPayload>(
     transport,
     "settings.channel.connect.poll",
-    { channel, session_id: sessionId, ...values },
+    {
+      channel,
+      session_id: sessionId,
+      ...channelConnectTargetPayload(options),
+      ...values,
+    },
     PACKAGE_MUTATION_TIMEOUT_MS,
   );
 }
@@ -1137,11 +1198,16 @@ export async function cancelChannelConnect(
   transport: WebUIMutationTransport,
   channel: string,
   sessionId: string,
+  options: ChannelConnectTarget,
 ): Promise<ChannelConnectPayload> {
   return mutation<ChannelConnectPayload>(
     transport,
     "settings.channel.connect.cancel",
-    { channel, session_id: sessionId },
+    {
+      channel,
+      session_id: sessionId,
+      ...channelConnectTargetPayload(options),
+    },
   );
 }
 
@@ -1149,7 +1215,7 @@ export async function configureChannel(
   transport: WebUIMutationTransport,
   name: string,
   values: Record<string, string>,
-  options: { enable?: boolean; instanceId?: string } = {},
+  options: ChannelConfigureOptions,
 ): Promise<ChannelConfigurePayload> {
   return mutation<ChannelConfigurePayload>(
     transport,
@@ -1158,7 +1224,7 @@ export async function configureChannel(
       name,
       values,
       ...(options.enable !== undefined ? { enable: options.enable } : {}),
-      ...(options.instanceId ? { instance_id: options.instanceId } : {}),
+      ...nanobotFeatureActionPayload(options),
     },
     PACKAGE_MUTATION_TIMEOUT_MS,
   );

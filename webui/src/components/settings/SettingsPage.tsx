@@ -492,6 +492,9 @@ export function SettingsPage({
             apiServiceLoading={apiServiceLoading}
             apiServiceAction={apiServiceAction}
             apiServiceError={apiServiceError}
+            apiFeature={featureCatalog.find(
+              (feature) => feature.name === "api" && feature.type === "feature",
+            )}
             langfuseFeature={featureCatalog.find((feature) => feature.name === "langfuse")}
             capabilitiesLoading={nanobotFeaturesLoading}
             capabilityAction={nanobotFeatureAction}

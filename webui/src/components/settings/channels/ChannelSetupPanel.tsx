@@ -48,6 +48,7 @@ import {
   ChannelValidationDetails,
 } from "@/components/settings/channels/ChannelSetupParts";
 import { ChannelInstancesPanel } from "@/components/settings/channels/ChannelInstancesPanel";
+import { NanobotFeatureInstallDialog } from "@/components/settings/shared/SettingsControls";
 import { Button } from "@/components/ui/button";
 import {
   configureChannel,
@@ -286,6 +287,7 @@ function ChannelSetupSurface({
   const [validation, setValidation] = useState<ChannelValidationPayload | null>(null);
   const [visibleSecrets, setVisibleSecrets] = useState<Record<string, boolean>>({});
   const [touchedFields, setTouchedFields] = useState<Set<string>>(() => new Set());
+  const [installConfirm, setInstallConfirm] = useState<NanobotFeatureInfo | null>(null);
   const configValuesKey = JSON.stringify(feature.config_values ?? {});
   const configuredFields = useMemo(
     () => new Set(feature.configured_fields ?? []),
@@ -348,13 +350,16 @@ function ChannelSetupSurface({
     });
   };
 
-  const saveCredentialSettings = async () => {
+  const saveCredentialSettings = async (
+    targetFeature: NanobotFeatureInfo,
+    riskAcknowledged = false,
+  ) => {
     setSaving(true);
     setValidating(true);
     setNotice(null);
     const values = channelValuesForSubmit(fields, fieldValues, touchedFields);
     try {
-      const validationPayload = await validateChannel(client, feature.name, values);
+      const validationPayload = await validateChannel(client, targetFeature.name, values);
       setValidation(validationPayload);
       if (!validationPayload.can_enable) {
         setNotice(
@@ -365,9 +370,14 @@ function ChannelSetupSurface({
       }
       const payload = await configureChannel(
         client,
-        feature.name,
+        targetFeature.name,
         values,
-        { enable: true },
+        {
+          enable: true,
+          extensionId: targetFeature.action_target_id ?? "",
+          expectedRevision: targetFeature.action_target_revision ?? "",
+          ...(riskAcknowledged ? { riskAcknowledged: true } : {}),
+        },
       );
       if (payload.nanobot_features) {
         onFeaturesUpdate(payload.nanobot_features);
@@ -379,6 +389,14 @@ function ChannelSetupSurface({
       setSaving(false);
       setValidating(false);
     }
+  };
+
+  const requestSaveCredentialSettings = () => {
+    if (!feature.installed && feature.install_supported) {
+      setInstallConfirm(feature);
+      return;
+    }
+    void saveCredentialSettings(feature);
   };
 
   const checkCurrentSettings = async () => {
@@ -408,9 +426,20 @@ function ChannelSetupSurface({
       className="mt-5 space-y-5"
       onSubmit={(event) => {
         event.preventDefault();
-        if (mode === "credentials") void saveCredentialSettings();
+        if (mode === "credentials") requestSaveCredentialSettings();
       }}
     >
+      <NanobotFeatureInstallDialog
+        feature={installConfirm}
+        installing={saving}
+        onOpenChange={(open) => {
+          if (!open) setInstallConfirm(null);
+        }}
+        onConfirm={(targetFeature) => {
+          setInstallConfirm(null);
+          void saveCredentialSettings(targetFeature, true);
+        }}
+      />
       <section>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="text-[13px] font-semibold text-foreground">

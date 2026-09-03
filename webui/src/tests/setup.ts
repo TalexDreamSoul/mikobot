@@ -27,7 +27,10 @@ function createTestStorage(): Storage {
   };
 }
 
-if (typeof window !== "undefined" && typeof localStorage.setItem !== "function") {
+// happy-dom may expose no global ``localStorage`` at all, so probe it without
+// dereferencing it: the guard below is what installs the replacement.
+const existingStorage = (globalThis as { localStorage?: Storage }).localStorage;
+if (typeof window !== "undefined" && typeof existingStorage?.setItem !== "function") {
   const storage = createTestStorage();
   Object.defineProperty(window, "localStorage", {
     value: storage,

@@ -217,18 +217,24 @@ describe("webui API helpers", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("configures channels through the authenticated WebSocket", async () => {
+  it("configures channels with an opaque target and current revision", async () => {
     await configureChannel(
       mutationTransport,
       "discord",
       { "channels.discord.token": "saved-secret" },
-      { enable: true },
+      {
+        enable: true,
+        extensionId: "ext:channel_package:discord/channel:default",
+        expectedRevision: "discord-default-revision",
+      },
     );
 
     expect(requestMutation).toHaveBeenCalledWith(
       "settings.channel.configure",
       {
         name: "discord",
+        extension_id: "ext:channel_package:discord/channel:default",
+        expected_revision: "discord-default-revision",
         enable: true,
         values: { "channels.discord.token": "saved-secret" },
       },
@@ -237,25 +243,53 @@ describe("webui API helpers", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("serializes channel QR connect request envelopes", async () => {
-    await startChannelConnect(mutationTransport, "weixin", { force: true });
+  it("persists a confirmed channel QR acknowledgement across its exact session target", async () => {
+    const target = {
+      extensionId: "ext:channel_package:weixin/channel:office",
+      expectedRevision: "weixin-office-revision",
+      instanceId: "office",
+      riskAcknowledged: true,
+    };
+
+    await startChannelConnect(mutationTransport, "weixin", { ...target, force: true });
     expect(requestMutation).toHaveBeenLastCalledWith(
       "settings.channel.connect.start",
-      { channel: "weixin", force: true },
+      {
+        channel: "weixin",
+        extension_id: "ext:channel_package:weixin/channel:office",
+        expected_revision: "weixin-office-revision",
+        instance_id: "office",
+        force: true,
+        risk_acknowledged: true,
+      },
       150_000,
     );
 
-    await pollChannelConnect(mutationTransport, "weixin", "session+/=");
+    await pollChannelConnect(mutationTransport, "weixin", "session+/=", target);
     expect(requestMutation).toHaveBeenLastCalledWith(
       "settings.channel.connect.poll",
-      { channel: "weixin", session_id: "session+/=" },
+      {
+        channel: "weixin",
+        session_id: "session+/=",
+        extension_id: "ext:channel_package:weixin/channel:office",
+        expected_revision: "weixin-office-revision",
+        instance_id: "office",
+        risk_acknowledged: true,
+      },
       150_000,
     );
 
-    await cancelChannelConnect(mutationTransport, "weixin", "session+/=");
+    await cancelChannelConnect(mutationTransport, "weixin", "session+/=", target);
     expect(requestMutation).toHaveBeenLastCalledWith(
       "settings.channel.connect.cancel",
-      { channel: "weixin", session_id: "session+/=" },
+      {
+        channel: "weixin",
+        session_id: "session+/=",
+        extension_id: "ext:channel_package:weixin/channel:office",
+        expected_revision: "weixin-office-revision",
+        instance_id: "office",
+        risk_acknowledged: true,
+      },
       20_000,
     );
   });
@@ -811,7 +845,7 @@ describe("webui API helpers", () => {
     );
   });
 
-  it("reads and toggles nanobot optional features", async () => {
+  it("reads features and sends opaque default and named action targets", async () => {
     vi.mocked(fetch).mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -828,45 +862,83 @@ describe("webui API helpers", () => {
       }),
     );
 
-    await enableNanobotFeature(mutationTransport, "matrix");
+    await enableNanobotFeature(mutationTransport, "matrix", {
+      extensionId: "ext:channel_package:matrix/channel:default",
+      expectedRevision: "matrix-default-revision",
+      riskAcknowledged: true,
+    });
     expect(requestMutation).toHaveBeenLastCalledWith(
       "settings.feature.enable",
-      { name: "matrix" },
+      {
+        name: "matrix",
+        extension_id: "ext:channel_package:matrix/channel:default",
+        expected_revision: "matrix-default-revision",
+        risk_acknowledged: true,
+      },
       150_000,
     );
 
-    await disableNanobotFeature(mutationTransport, "matrix");
+    await disableNanobotFeature(mutationTransport, "matrix", {
+      extensionId: "ext:channel_package:matrix/channel:office",
+      expectedRevision: "matrix-office-revision",
+      instanceId: "office",
+    });
     expect(requestMutation).toHaveBeenLastCalledWith(
       "settings.feature.disable",
-      { name: "matrix" },
+      {
+        name: "matrix",
+        instance_id: "office",
+        extension_id: "ext:channel_package:matrix/channel:office",
+        expected_revision: "matrix-office-revision",
+      },
       20_000,
     );
   });
 
-  it("manages the API service capability", async () => {
+  it("serializes API settings with the exact catalog target and explicit acknowledgement", async () => {
     await fetchApiService("tok");
     expect(fetch).toHaveBeenCalledWith(
       "/api/settings/api-service",
       expect.objectContaining({ headers: { Authorization: "Bearer tok" } }),
     );
 
+    const target = {
+      extensionId: "ext:optional_feature:api",
+      expectedRevision: "api-package-revision",
+    };
     await startApiService(
       mutationTransport,
       { host: "127.0.0.1", port: 8900, timeout: 120 },
+      target,
     );
     expect(requestMutation).toHaveBeenLastCalledWith(
       "settings.api_service.start",
-      { host: "127.0.0.1", port: 8900, timeout: 120 },
+      {
+        host: "127.0.0.1",
+        port: 8900,
+        timeout: 120,
+        extension_id: "ext:optional_feature:api",
+        expected_revision: "api-package-revision",
+      },
       150_000,
     );
 
     await startApiService(
       mutationTransport,
       { host: "0.0.0.0", port: 8900, timeout: 120, apiKey: "secret-token" },
+      { ...target, riskAcknowledged: true },
     );
     expect(requestMutation).toHaveBeenLastCalledWith(
       "settings.api_service.start",
-      { host: "0.0.0.0", port: 8900, timeout: 120, api_key: "secret-token" },
+      {
+        host: "0.0.0.0",
+        port: 8900,
+        timeout: 120,
+        api_key: "secret-token",
+        extension_id: "ext:optional_feature:api",
+        expected_revision: "api-package-revision",
+        risk_acknowledged: true,
+      },
       150_000,
     );
 

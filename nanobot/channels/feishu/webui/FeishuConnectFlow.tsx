@@ -2,10 +2,16 @@ import { useTranslation } from "react-i18next";
 
 import { channelTranslator } from "@/channel-plugins/i18n";
 import { ChannelQrConnectFlow } from "@/components/settings/channels/ChannelQrConnectFlow";
-import type { NanobotFeaturesPayload } from "@/lib/types";
+import type {
+  NanobotChannelInstanceInfo,
+  NanobotFeatureInfo,
+  NanobotFeaturesPayload,
+} from "@/lib/types";
 
 export function FeishuConnectFlow({
   token,
+  feature,
+  instance,
   instanceId = "default",
   mode = "replace",
   idleLabel,
@@ -13,6 +19,8 @@ export function FeishuConnectFlow({
   onFeaturesUpdate,
 }: {
   token: string;
+  feature: NanobotFeatureInfo;
+  instance?: NanobotChannelInstanceInfo;
   instanceId?: string;
   mode?: "replace" | "create";
   idleLabel?: string;
@@ -21,11 +29,21 @@ export function FeishuConnectFlow({
 }) {
   const { t } = useTranslation();
   const tx = channelTranslator(t, "feishu");
+  const actionTarget = {
+    extensionId: instance?.extension_id
+      ?? (instanceId === "default" ? feature.action_target_id : "")
+      ?? "",
+    expectedRevision: instance?.extension_revision
+      ?? (instanceId === "default" ? feature.action_target_revision : "")
+      ?? "",
+    instanceId,
+  };
   return (
     <ChannelQrConnectFlow
+      feature={feature}
       token={token}
       channelName="feishu"
-      startOptions={{ domain: "feishu", instanceId, mode }}
+      startOptions={{ domain: "feishu", mode, ...actionTarget }}
       idleLabel={idleLabel}
       connectRequestId={connectRequestId}
       onFeaturesUpdate={onFeaturesUpdate}

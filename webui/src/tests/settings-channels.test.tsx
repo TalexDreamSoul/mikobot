@@ -132,6 +132,13 @@ describe("Settings channels", () => {
             name: "matrix",
             display_name: "Matrix",
             type: "channel",
+            extension_id: "ext:channel_package:matrix",
+            extension_revision: "matrix-package-revision",
+            extension_actions: ["inspect"],
+            extension_lifecycle: "unavailable",
+            action_target_id: "ext:channel_package:matrix/channel:default",
+            action_target_revision: "matrix-default-revision",
+            action_target_actions: ["configure", "enable", "install"],
             enabled: true,
             running: false,
             runtime_status: "failed",
@@ -153,6 +160,13 @@ describe("Settings channels", () => {
         name: "matrix",
         display_name: "Matrix",
         type: "channel",
+        extension_id: "ext:channel_package:matrix",
+        extension_revision: "matrix-package-revision-2",
+        extension_actions: ["inspect"],
+        extension_lifecycle: "enabled",
+        action_target_id: "ext:channel_package:matrix/channel:default",
+        action_target_revision: "matrix-default-revision-2",
+        action_target_actions: ["configure", "disable"],
         enabled: true,
         installed: true,
         ready: true,
@@ -178,7 +192,12 @@ describe("Settings channels", () => {
     await waitFor(() =>
       expect(requestMutationMock).toHaveBeenCalledWith(
         "settings.feature.enable",
-        { name: "matrix" },
+        {
+          name: "matrix",
+          extension_id: "ext:channel_package:matrix/channel:default",
+          expected_revision: "matrix-default-revision",
+          risk_acknowledged: true,
+        },
         150_000,
       ),
     );
@@ -242,11 +261,18 @@ describe("Settings channels", () => {
             display_name: "Feishu",
             webui: "webui/index.tsx",
             type: "channel",
+            extension_id: "ext:channel_package:feishu",
+            extension_revision: "feishu-package-revision",
+            extension_actions: ["inspect"],
+            extension_lifecycle: "unavailable",
+            action_target_id: "ext:channel_package:feishu/channel:default",
+            action_target_revision: "feishu-default-revision",
+            action_target_actions: ["configure", "enable", "reconnect", "install"],
             enabled: false,
             configured: false,
-            installed: true,
+            installed: false,
             ready: false,
-            status: "not_enabled",
+            status: "missing_dependency",
             install_supported: true,
             requires_restart: true,
           }],
@@ -276,16 +302,45 @@ describe("Settings channels", () => {
       { timeout: 3_000 },
     ));
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    const confirmation = await screen.findByRole("dialog", { name: "Install support for Feishu?" });
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Cancel" }));
+    expect(requestMutationMock).not.toHaveBeenCalled();
 
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "Install support for Feishu?" })).getByRole(
+      "button",
+      { name: "Install and enable" },
+    ));
     await waitFor(() =>
       expect(requestMutationMock).toHaveBeenCalledWith(
         "settings.channel.connect.start",
-        { channel: "feishu", domain: "feishu", instance_id: "default", mode: "replace" },
+        {
+          channel: "feishu",
+          domain: "feishu",
+          instance_id: "default",
+          mode: "replace",
+          extension_id: "ext:channel_package:feishu/channel:default",
+          expected_revision: "feishu-default-revision",
+          risk_acknowledged: true,
+        },
         150_000,
       ),
     );
     expect(await screen.findByText("Scan with Feishu")).toBeInTheDocument();
     expect(screen.getByText("Waiting for authorization...")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(requestMutationMock).toHaveBeenLastCalledWith(
+      "settings.channel.connect.cancel",
+      {
+        channel: "feishu",
+        session_id: "feishu-session",
+        instance_id: "default",
+        extension_id: "ext:channel_package:feishu/channel:default",
+        expected_revision: "feishu-default-revision",
+        risk_acknowledged: true,
+      },
+      20_000,
+    ));
   });
 
   it("starts Feishu connect from the default assistant action", async () => {
@@ -301,6 +356,13 @@ describe("Settings channels", () => {
             display_name: "Feishu",
             webui: "webui/index.tsx",
             type: "channel",
+            extension_id: "ext:channel_package:feishu",
+            extension_revision: "feishu-package-revision",
+            extension_actions: ["inspect"],
+            extension_lifecycle: "disabled",
+            action_target_id: "ext:channel_package:feishu/channel:default",
+            action_target_revision: "feishu-default-revision",
+            action_target_actions: ["configure", "enable", "reconnect"],
             enabled: false,
             configured: false,
             installed: true,
@@ -338,7 +400,14 @@ describe("Settings channels", () => {
     await waitFor(() =>
       expect(requestMutationMock).toHaveBeenCalledWith(
         "settings.channel.connect.start",
-        { channel: "feishu", domain: "feishu", instance_id: "default", mode: "replace" },
+        {
+          channel: "feishu",
+          domain: "feishu",
+          instance_id: "default",
+          mode: "replace",
+          extension_id: "ext:channel_package:feishu/channel:default",
+          expected_revision: "feishu-default-revision",
+        },
         150_000,
       ),
     );
@@ -358,6 +427,13 @@ describe("Settings channels", () => {
             display_name: "Feishu",
             webui: "webui/index.tsx",
             type: "channel",
+            extension_id: "ext:channel_package:feishu",
+            extension_revision: "feishu-package-revision",
+            extension_actions: ["inspect"],
+            extension_lifecycle: "disabled",
+            action_target_id: "ext:channel_package:feishu/channel:default",
+            action_target_revision: "feishu-default-revision",
+            action_target_actions: ["configure", "enable"],
             enabled: false,
             configured: true,
             installed: true,
@@ -380,6 +456,13 @@ describe("Settings channels", () => {
             display_name: "Feishu",
             webui: "webui/index.tsx",
             type: "channel",
+            extension_id: "ext:channel_package:feishu",
+            extension_revision: "feishu-package-revision-2",
+            extension_actions: ["inspect"],
+            extension_lifecycle: "enabled",
+            action_target_id: "ext:channel_package:feishu/channel:default",
+            action_target_revision: "feishu-default-revision-2",
+            action_target_actions: ["configure", "disable"],
             enabled: true,
             running: true,
             runtime_status: "running",
@@ -387,6 +470,10 @@ describe("Settings channels", () => {
             instances: [{
               id: "default",
               name: "nanobot",
+              extension_id: "ext:channel_package:feishu/channel:default",
+              extension_revision: "feishu-default-revision-2",
+              extension_actions: ["configure", "disable"],
+              extension_lifecycle: "enabled",
               enabled: true,
               running: true,
               runtime_status: "running",
@@ -422,7 +509,12 @@ describe("Settings channels", () => {
     await waitFor(() =>
       expect(requestMutationMock).toHaveBeenCalledWith(
         "settings.feature.enable",
-        { name: "feishu", instance_id: "default" },
+        {
+          name: "feishu",
+          instance_id: "default",
+          extension_id: "ext:channel_package:feishu/channel:default",
+          expected_revision: "feishu-default-revision",
+        },
         150_000,
       ),
     );
@@ -625,9 +717,9 @@ describe("Settings channels", () => {
         type: "channel",
         enabled: true,
         configured: true,
-        installed: true,
+        installed: false,
         ready: true,
-        status: "enabled",
+        status: "missing_dependency",
         running: true,
         runtime_status: "running",
         install_supported: true,
@@ -637,6 +729,10 @@ describe("Settings channels", () => {
           name: "nanobot",
           display_name: "Support Bot",
           avatar_url: "https://example.com/support.png",
+          extension_id: "ext:channel_package:feishu/channel:default",
+          extension_revision: "feishu-default-revision",
+          extension_actions: ["configure", "disable"],
+          extension_lifecycle: "enabled",
           enabled: true,
           running: true,
           runtime_status: "running",
@@ -677,9 +773,24 @@ describe("Settings channels", () => {
     expect(screen.getByText("cli_sup...port")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Replace assistant" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    const confirmation = await screen.findByRole("dialog", { name: "Install support for Feishu?" });
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Cancel" }));
+    expect(requestMutationMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "Install support for Feishu?" })).getByRole(
+      "button",
+      { name: "Install and enable" },
+    ));
     await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith(
       "settings.feature.enable",
-      { name: "feishu", instance_id: "default" },
+      {
+        name: "feishu",
+        instance_id: "default",
+        extension_id: "ext:channel_package:feishu/channel:default",
+        expected_revision: "feishu-default-revision",
+        risk_acknowledged: true,
+      },
       150_000,
     ));
     expect(document.querySelector('img[src="https://example.com/support.png"]')).toBeTruthy();
@@ -873,11 +984,18 @@ describe("Settings channels", () => {
             display_name: "Discord",
             webui: "webui/index.ts",
             type: "channel",
+            extension_id: "ext:channel_package:discord",
+            extension_revision: "discord-package-revision",
+            extension_actions: ["inspect"],
+            extension_lifecycle: "unavailable",
+            action_target_id: "ext:channel_package:discord/channel:default",
+            action_target_revision: "discord-default-revision",
+            action_target_actions: ["configure", "enable", "install"],
             enabled: false,
             configured: false,
-            installed: true,
+            installed: false,
             ready: false,
-            status: "not_enabled",
+            status: "missing_dependency",
             install_supported: true,
             requires_restart: true,
             setup: channelSetupContract("discord"),
@@ -911,6 +1029,13 @@ describe("Settings channels", () => {
               display_name: "Discord",
               webui: "webui/index.ts",
               type: "channel",
+              extension_id: "ext:channel_package:discord",
+              extension_revision: "discord-package-revision-2",
+              extension_actions: ["inspect"],
+              extension_lifecycle: "enabled",
+              action_target_id: "ext:channel_package:discord/channel:default",
+              action_target_revision: "discord-default-revision-2",
+              action_target_actions: ["configure", "disable"],
               enabled: true,
               running: true,
               runtime_status: "running",
@@ -947,18 +1072,23 @@ describe("Settings channels", () => {
       { name: "All messages" },
     ));
     fireEvent.click(screen.getByRole("button", { name: "Check and enable" }));
+    const confirmation = await screen.findByRole("dialog", { name: "Install support for Discord?" });
+    expect(requestMutationMock).not.toHaveBeenCalled();
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Cancel" }));
+    expect(requestMutationMock).not.toHaveBeenCalled();
 
-    await waitFor(() =>
-      expect(
-        requestMutationMock.mock.calls.some(([action]) => (
-          action === "settings.channel.configure"
-        )),
-      ).toBe(true),
-    );
-    expect(requestMutationMock).toHaveBeenCalledWith(
+    fireEvent.click(screen.getByRole("button", { name: "Check and enable" }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "Install support for Discord?" })).getByRole(
+      "button",
+      { name: "Install and enable" },
+    ));
+    await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith(
       "settings.channel.configure",
       {
         name: "discord",
+        extension_id: "ext:channel_package:discord/channel:default",
+        expected_revision: "discord-default-revision",
+        risk_acknowledged: true,
         enable: true,
         values: {
           "channels.discord.token": "discord-token",
@@ -967,7 +1097,7 @@ describe("Settings channels", () => {
         },
       },
       150_000,
-    );
+    ));
     expect(await screen.findByText("Checked and enabled.")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Discord channel" })).toHaveAttribute(
       "aria-checked",
@@ -988,6 +1118,13 @@ describe("Settings channels", () => {
             display_name: "Discord",
             webui: "webui/index.ts",
             type: "channel",
+            extension_id: "ext:channel_package:discord",
+            extension_revision: "discord-package-revision",
+            extension_actions: ["inspect"],
+            extension_lifecycle: "disabled",
+            action_target_id: "ext:channel_package:discord/channel:default",
+            action_target_revision: "discord-default-revision",
+            action_target_actions: ["configure", "enable"],
             enabled: false,
             configured: true,
             installed: true,
@@ -1018,6 +1155,13 @@ describe("Settings channels", () => {
         display_name: "Discord",
         webui: "webui/index.ts",
         type: "channel",
+        extension_id: "ext:channel_package:discord",
+        extension_revision: "discord-package-revision-2",
+        extension_actions: ["inspect"],
+        extension_lifecycle: "enabled",
+        action_target_id: "ext:channel_package:discord/channel:default",
+        action_target_revision: "discord-default-revision-2",
+        action_target_actions: ["configure", "disable"],
         enabled: true,
         configured: true,
         installed: true,
@@ -1058,7 +1202,11 @@ describe("Settings channels", () => {
     await waitFor(() =>
       expect(requestMutationMock).toHaveBeenCalledWith(
         "settings.feature.enable",
-        { name: "discord" },
+        {
+          name: "discord",
+          extension_id: "ext:channel_package:discord/channel:default",
+          expected_revision: "discord-default-revision",
+        },
         150_000,
       ),
     );

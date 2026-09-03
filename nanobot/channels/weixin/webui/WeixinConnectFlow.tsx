@@ -135,11 +135,23 @@ export function WeixinConnectFlow({
     );
   };
 
+  const instance = feature.instances?.find((item) => item.id === instanceId);
+  const actionTarget = {
+    extensionId: instance?.extension_id
+      ?? (instanceId === "default" ? feature.action_target_id : "")
+      ?? "",
+    expectedRevision: instance?.extension_revision
+      ?? (instanceId === "default" ? feature.action_target_revision : "")
+      ?? "",
+    instanceId,
+  };
+
   return (
     <ChannelQrConnectFlow
+      feature={feature}
       token={token}
       channelName="weixin"
-      startOptions={{ force: authExpired, instanceId, mode }}
+      startOptions={{ force: authExpired, mode, ...actionTarget }}
       idleLabel={authExpired ? scanAgainLabel : idleLabel}
       connectRequestId={connectRequestId}
       forceOnRepeat

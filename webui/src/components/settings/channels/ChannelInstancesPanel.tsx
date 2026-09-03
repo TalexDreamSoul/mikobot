@@ -24,6 +24,7 @@ import {
   ChannelGuideLink,
   ChannelSetupSteps,
 } from "@/components/settings/channels/ChannelSetupParts";
+import { NanobotFeatureInstallDialog } from "@/components/settings/shared/SettingsControls";
 import { Button } from "@/components/ui/button";
 import { useLogoFallback } from "@/hooks/useLogoFallback";
 import {
@@ -72,6 +73,10 @@ export function ChannelInstancesPanel({
   const instances = providedInstances ?? feature.instances ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busyInstanceId, setBusyInstanceId] = useState<string | null>(null);
+  const [installConfirm, setInstallConfirm] = useState<{
+    action: "enable" | "configure";
+    instance: NanobotChannelInstanceInfo;
+  } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const selected = selectedId ? instances.find((instance) => instance.id === selectedId) : undefined;
   const setup = useMemo(
@@ -106,13 +111,27 @@ export function ChannelInstancesPanel({
     setVisibleSecrets({});
   }, [instanceFields, selected?.id, selectedValuesKey]);
 
-  const toggleInstance = async (instance: NanobotChannelInstanceInfo, checked: boolean) => {
+  const toggleInstance = async (
+    instance: NanobotChannelInstanceInfo,
+    checked: boolean,
+    riskAcknowledged = false,
+  ) => {
+    if (checked && !riskAcknowledged && !feature.installed && feature.install_supported) {
+      setInstallConfirm({ action: "enable", instance });
+      return;
+    }
     setBusyInstanceId(instance.id);
     setNotice(null);
     try {
+      const actionOptions = {
+        extensionId: instance.extension_id ?? "",
+        expectedRevision: instance.extension_revision ?? "",
+        instanceId: instance.id,
+        ...(riskAcknowledged ? { riskAcknowledged: true } : {}),
+      };
       const payload = checked
-        ? await enableNanobotFeature(client, feature.name, { instanceId: instance.id })
-        : await disableNanobotFeature(client, feature.name, { instanceId: instance.id });
+        ? await enableNanobotFeature(client, feature.name, actionOptions)
+        : await disableNanobotFeature(client, feature.name, actionOptions);
       onFeaturesUpdate(payload);
     } catch (err) {
       setNotice((err as Error).message);
@@ -121,8 +140,14 @@ export function ChannelInstancesPanel({
     }
   };
 
-  const saveSelectedInstanceSettings = async () => {
-    if (!selected) return;
+  const saveSelectedInstanceSettings = async (
+    instance: NanobotChannelInstanceInfo,
+    riskAcknowledged = false,
+  ) => {
+    if (instance.enabled && !riskAcknowledged && !feature.installed && feature.install_supported) {
+      setInstallConfirm({ action: "configure", instance });
+      return;
+    }
     setSavingFields(true);
     setNotice(null);
     try {
@@ -130,7 +155,13 @@ export function ChannelInstancesPanel({
         client,
         feature.name,
         channelValuesForSave(instanceFields, fieldValues),
-        { enable: selected.enabled, instanceId: selected.id },
+        {
+          enable: instance.enabled,
+          extensionId: instance.extension_id ?? "",
+          expectedRevision: instance.extension_revision ?? "",
+          instanceId: instance.id,
+          ...(riskAcknowledged ? { riskAcknowledged: true } : {}),
+        },
       );
       if (payload.nanobot_features) {
         onFeaturesUpdate(payload.nanobot_features);
@@ -145,6 +176,23 @@ export function ChannelInstancesPanel({
 
   return (
     <aside className="min-h-full rounded-panel bg-settings-surface p-5">
+      <NanobotFeatureInstallDialog
+        feature={installConfirm ? feature : null}
+        installing={busyInstanceId !== null || savingFields}
+        onOpenChange={(open) => {
+          if (!open) setInstallConfirm(null);
+        }}
+        onConfirm={() => {
+          const pending = installConfirm;
+          setInstallConfirm(null);
+          if (!pending) return;
+          if (pending.action === "enable") {
+            void toggleInstance(pending.instance, true, true);
+          } else {
+            void saveSelectedInstanceSettings(pending.instance, true);
+          }
+        }}
+      />
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-3">
           <ChannelLogo feature={feature} showBrandLogos={showBrandLogos} />
@@ -271,7 +319,7 @@ export function ChannelInstancesPanel({
                         className="mt-3"
                         onSubmit={(event) => {
                           event.preventDefault();
-                          void saveSelectedInstanceSettings();
+                          if (selected) void saveSelectedInstanceSettings(selected);
                         }}
                       >
                         <CredentialForm
