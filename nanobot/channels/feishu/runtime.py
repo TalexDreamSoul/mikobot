@@ -195,7 +195,10 @@ def _extract_share_card_content(content_json: dict[str, Any], msg_type: str) -> 
     elif msg_type == "system":
         parts.append("[system message]")
     elif msg_type == "merge_forward":
-        parts.append("[merged forward messages]")
+        # FeishuChannel expands this through the message API once the event arrives.
+        # This branch is the fallback for callers with no API client, and for a card
+        # whose message IDs Feishu did not expose.
+        parts.append("[merged forward messages: unavailable]")
 
     return "\n".join(parts) if parts else f"[{msg_type}]"
 
@@ -1930,6 +1933,111 @@ class FeishuChannel(BaseChannel):
         return None, f"[{msg_type}: download failed]"
 
     _REPLY_CONTEXT_MAX_LEN = 200
+    _MERGE_FORWARD_MAX_MESSAGES = 100
+    _MERGE_FORWARD_MAX_DEPTH = 3
+
+    @staticmethod
+    def _merge_forward_message_ids(content: dict[str, Any]) -> list[str]:
+        """Extract message IDs from the payload of a merge-forward card.
+
+        Feishu has used both ``message_id_list`` and nested message objects in
+        different API and event versions, so accept the known shapes while
+        deliberately ignoring unrelated IDs such as chat, user, and file IDs.
+        """
+        ids: list[str] = []
+        id_keys = {"message_id", "message_ids", "message_id_list"}
+
+        def visit(value: Any, key: str = "") -> None:
+            if len(ids) >= FeishuChannel._MERGE_FORWARD_MAX_MESSAGES:
+                return
+            mapping = _as_json_object(value)
+            if mapping is not None:
+                for child_key, child in mapping.items():
+                    normalized = str(child_key).lower()
+                    if normalized in id_keys or normalized in {
+                        "messages", "items", "content", "data",
+                    }:
+                        visit(child, normalized)
+                return
+            items = _as_json_list(value)
+            if items is not None:
+                for child in items:
+                    visit(child, key)
+                return
+            if isinstance(value, str) and key in id_keys:
+                candidate = value.strip()
+                if candidate and candidate not in ids:
+                    ids.append(candidate)
+
+        visit(content)
+        return ids
+
+    def _get_message_record_sync(self, message_id: str) -> tuple[str, dict[str, Any]] | None:
+        """Fetch one Feishu message's type and JSON body."""
+        from lark_oapi.api.im.v1 import GetMessageRequest
+
+        request = GetMessageRequest.builder().message_id(message_id).build()
+        response = self._client.im.v1.message.get(request)
+        if not response.success():
+            self.logger.debug(
+                "could not fetch forwarded message {}: code={}, msg={}",
+                message_id,
+                response.code,
+                response.msg,
+            )
+            return None
+        items = _as_json_list(getattr(response.data, "items", None))
+        if not items:
+            return None
+        msg_obj = items[0]
+        body = getattr(msg_obj, "body", None)
+        raw_content = getattr(body, "content", None) if body else None
+        if not raw_content:
+            return None
+        try:
+            content = _as_json_object(json.loads(raw_content))
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if content is None:
+            return None
+        return str(getattr(msg_obj, "msg_type", "") or ""), content
+
+    def _expand_merge_forward_sync(
+        self, content: dict[str, Any], *, depth: int = 0, seen: set[str] | None = None
+    ) -> str:
+        """Expand a merge-forward payload through the message API.
+
+        Bounded on three axes because the payload is remote input: recursion depth,
+        total messages, and already-visited IDs, so a forward that references itself
+        cannot spin.
+        """
+        if not self._client or depth > self._MERGE_FORWARD_MAX_DEPTH:
+            return ""
+        seen = seen or set()
+        rendered: list[str] = []
+        for message_id in self._merge_forward_message_ids(content):
+            if message_id in seen:
+                continue
+            seen.add(message_id)
+            try:
+                record = self._get_message_record_sync(message_id)
+                if not record:
+                    continue
+                msg_type, item = record
+                if msg_type == "text":
+                    text = str(item.get("text", "")).strip()
+                elif msg_type == "post":
+                    text, _ = _extract_post_content(item)
+                    text = text.strip()
+                elif msg_type == "merge_forward":
+                    text = self._expand_merge_forward_sync(item, depth=depth + 1, seen=seen)
+                else:
+                    text = _extract_share_card_content(item, msg_type).strip()
+                if text:
+                    rendered.append(text)
+            except Exception as exc:
+                self.logger.debug("error expanding forwarded message {}: {}", message_id, exc)
+        return "\n---\n".join(rendered)
 
     def _get_message_content_sync(self, message_id: str) -> str | None:
         """Fetch the text content of a Feishu message by ID (synchronous).
@@ -2811,13 +2919,24 @@ class FeishuChannel(BaseChannel):
 
                 content_parts.append(content_text)
 
+            elif msg_type == "merge_forward":
+                # The event payload only references the forwarded messages, so resolve
+                # them through the message API off the event loop and hand the agent the
+                # expanded text. The placeholder stays as the fallback.
+                loop = asyncio.get_running_loop()
+                text = await loop.run_in_executor(
+                    None, self._expand_merge_forward_sync, content_json
+                )
+                content_parts.append(
+                    text or _extract_share_card_content(content_json, msg_type)
+                )
+
             elif msg_type in (
                 "share_chat",
                 "share_user",
                 "interactive",
                 "share_calendar_event",
                 "system",
-                "merge_forward",
             ):
                 # Handle share cards and interactive messages
                 text = _extract_share_card_content(content_json, msg_type)
