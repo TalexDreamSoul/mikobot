@@ -24,10 +24,12 @@ from nanobot.extensions.targets import resolve_extension_package_target
 from nanobot.llm_usage import llm_usage_payload
 from nanobot.optional_features import OptionalFeatureError
 from nanobot.security.workspace_access import workspace_sandbox_status
+from nanobot.utils.redaction import redact_credentials
 from nanobot.webui.nanobot_features_api import (
     execute_nanobot_extension_action,
     nanobot_features_payload,
     resolve_nanobot_feature_target,
+    restricted_nanobot_features_payload,
 )
 from nanobot.webui.settings_capabilities import network_safety_payload
 from nanobot.webui.settings_contracts import (
@@ -52,6 +54,27 @@ def _sanitize_connector_payload(payload: Mapping[str, object]) -> dict[str, Any]
         if field in sanitized:
             sanitized[field] = safe_extension_message(sanitized[field])
     return sanitized
+
+
+_MAX_ACTION_ERROR = 400
+
+
+def _safe_action_error(exc: Exception) -> str:
+    """Bound and redact a domain error before it reaches an HTTP response body.
+
+    Host paths survive here on purpose, unlike in `_sanitize_connector_payload`: the
+    connect flow is reachable by a member, while both callers of this helper are
+    administrator-only, the reader can already open the config file, and
+    ``npx not found at /usr/local/bin`` is the useful half of the message.
+
+    What must not survive is a credential — package managers echo index URLs such as
+    ``https://user:token@pypi.internal/simple`` — or an unbounded tail:
+    `nanobot/apps/cli/service.py` caps its captured stderr at 12_000 characters, which
+    is thirty times what an error field should carry.
+    """
+    message = getattr(exc, "message", None)
+    text = message if isinstance(message, str) else str(exc)
+    return redact_credentials(text.strip())[:_MAX_ACTION_ERROR] or "Action failed."
 
 
 
@@ -238,6 +261,16 @@ def _requires_system_admin(action: str) -> bool:
     return action.startswith("cli-") and action != "cli-list"
 
 
+def _is_server_derived_admin(request: SettingsRequest) -> bool:
+    """Report whether the transport proved an administrator, not whether one was claimed.
+
+    Both halves matter: `system_admin` is only ever set from a resolved collaboration
+    identity, and an empty actor means that identity was never derived, so a request
+    carrying one without the other is refused rather than trusted.
+    """
+    return request.system_admin is True and bool((request.actor_user_id or "").strip())
+
+
 class SystemSettingsHandler:
     """Handle channel and system commands behind a transport-neutral request DTO."""
 
@@ -301,10 +334,7 @@ class SystemSettingsHandler:
         channel_name: str | None = None,
         connect_action: str | None = None,
     ) -> SettingsRouteResult:
-        if _requires_system_admin(action) and (
-            request.system_admin is not True
-            or not (request.actor_user_id or "").strip()
-        ):
+        if _requires_system_admin(action) and not _is_server_derived_admin(request):
             return SettingsRouteResult.failure(
                 403, "System administrator access is required"
             )
@@ -317,7 +347,7 @@ class SystemSettingsHandler:
                 operations,
             )
         if action == "features-list":
-            return await self._features(operations)
+            return await self._features(request)
         if action in {"features-enable", "features-disable"}:
             return await self._features_action(
                 request,
@@ -392,7 +422,7 @@ class SystemSettingsHandler:
             return SettingsRouteResult.failure(exc.status, exc.message)
         except Exception as exc:
             status = getattr(exc, "status", 500)
-            message = getattr(exc, "message", str(exc))
+            message = _safe_action_error(exc)
             if status >= 500:
                 self.logger.exception("CLI Apps action '{}' failed", action)
             return SettingsRouteResult.failure(status, message)
@@ -451,8 +481,14 @@ class SystemSettingsHandler:
 
     async def _features(
         self,
-        operations: SystemSettingsOperations,
+        request: SettingsRequest,
     ) -> SettingsRouteResult:
+        # The host inventory names every installed package and its revision, lifecycle,
+        # trust, execution location, and failure diagnostics. A member has no tenant-scoped
+        # slice of that to be shown, so the whole enumeration is withheld rather than
+        # trimmed, and the caller is told why instead of being shown an empty host.
+        if not _is_server_derived_admin(request):
+            return SettingsRouteResult.success(restricted_nanobot_features_payload())
         try:
             return SettingsRouteResult.success(await asyncio.to_thread(self._features_payload))
         except OptionalFeatureError as exc:
@@ -467,6 +503,12 @@ class SystemSettingsHandler:
         action: str,
         operations: SystemSettingsOperations,
     ) -> SettingsRouteResult:
+        # The registry refuses a non-administrator too, but only after the target has been
+        # resolved and reported. Refusing here keeps authorization ahead of disclosure.
+        if not _is_server_derived_admin(request):
+            return SettingsRouteResult.failure(
+                403, "System administrator access is required"
+            )
         try:
             name, instance_id, extension_id, revision, _acknowledged = self._feature_fields(request)
             target = resolve_nanobot_feature_target(self._registry().snapshot(), name, instance_id)
@@ -513,6 +555,13 @@ class SystemSettingsHandler:
         request: SettingsRequest,
         operations: SystemSettingsOperations,
     ) -> SettingsRouteResult:
+        # `ws_http` already elevates the owner of a claimed instance to administrator
+        # before dispatch, so this repeats that decision next to the write rather than
+        # trusting the one caller of `dispatch` to keep making it.
+        if not _is_server_derived_admin(request):
+            return SettingsRouteResult.failure(
+                403, "System administrator access is required"
+            )
         values = self.parse_channel_values(request)
         enable = (query_first(request.query, "enable") or "").strip().lower() in {"1", "true", "yes"}
         try:
@@ -578,6 +627,13 @@ class SystemSettingsHandler:
         request: SettingsRequest,
         operations: SystemSettingsOperations,
     ) -> SettingsRouteResult:
+        # Validation probes a channel with caller-supplied credentials and reports what
+        # the host saw, so it is gated on the same authority as configure and refuses
+        # before the channel name is read.
+        if not _is_server_derived_admin(request):
+            return SettingsRouteResult.failure(
+                403, "System administrator access is required"
+            )
         name = (query_first(request.query, "name") or "").strip()
         instance_id = (
             query_first(request.query, "instance_id") or "default"
@@ -617,8 +673,9 @@ class SystemSettingsHandler:
         action: str,
         operations: SystemSettingsOperations,
     ) -> SettingsRouteResult:
-        if request.system_admin is not True or not request.actor_user_id:
+        if not _is_server_derived_admin(request):
             return SettingsRouteResult.failure(403, "System administrator access is required")
+        actor_user_id = (request.actor_user_id or "").strip()
         try:
             requested_instance_id = (
                 query_first(request.query, "instance_id") or "default"
@@ -648,7 +705,7 @@ class SystemSettingsHandler:
 
         try:
             query = {key: list(values) for key, values in request.query.items()}
-            query["_actor_user_id"] = [request.actor_user_id]
+            query["_actor_user_id"] = [actor_user_id]
             payload_value = cast(object, await connector.handle(action, query))
             if not isinstance(payload_value, Mapping):
                 self.logger.warning("channel connector returned an invalid payload")
@@ -878,7 +935,7 @@ class SystemSettingsHandler:
             )
         except Exception as exc:
             status = getattr(exc, "status", 500)
-            message = getattr(exc, "message", str(exc))
+            message = _safe_action_error(exc)
             if status >= 500:
                 self.logger.exception(
                     "MCP preset action '{}' failed",

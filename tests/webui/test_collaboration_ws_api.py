@@ -684,8 +684,14 @@ async def test_ordinary_claimed_channel_owner_can_use_channel_control_mutation(t
     """A claimed channel owner may reach channel control without system-admin privileges."""
     handler = await _handler(tmp_path)
     connection = _proxy_connection("ordinary-channel-owner")
-    async def settings_dispatch(_connection, _request, path):
+    seen: list[tuple[object, object]] = []
+
+    async def settings_dispatch(_connection, request, path):
         if path == "/api/settings/channels/configure":
+            seen.append((
+                getattr(request, "_nanobot_settings_system_admin", None),
+                getattr(request, "_nanobot_settings_actor_user_id", None),
+            ))
             return http_json_response({"status": "ok"})
         return None
 
@@ -702,6 +708,13 @@ async def test_ordinary_claimed_channel_owner_can_use_channel_control_mutation(t
     )
 
     assert response.status_code == 200
+    # The elevation resolves before dispatch, so the domain sees a server-derived
+    # administrator with an actor. This is what lets the channel handlers repeat the
+    # authorization check beside their effect without refusing a legitimate owner.
+    assert len(seen) == 1
+    system_admin, actor_user_id = seen[0]
+    assert system_admin is True
+    assert isinstance(actor_user_id, str) and actor_user_id.strip()
 
 
 @pytest.mark.asyncio
@@ -730,6 +743,52 @@ async def test_ordinary_user_cannot_use_channel_control_mutation_for_unclaimed_i
     )
 
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("proxy_subject", "expected_admin"),
+    [(None, True), ("ordinary-member", False)],
+)
+async def test_features_read_derives_administration_only_for_the_local_owner(
+    tmp_path,
+    proxy_subject: str | None,
+    expected_admin: bool,
+) -> None:
+    """The host inventory read is not channel control, so it derives identity and nothing more.
+
+    With no OIDC configured the local owner still resolves as an administrator, which is
+    what keeps single-user installs whole. A proxy-authenticated member resolves with an
+    actor but no administration, which is what the domain gate refuses.
+    """
+    handler = await _handler(tmp_path)
+    path = "/api/settings/nanobot-features"
+    connection = (
+        _local_connection(path)
+        if proxy_subject is None
+        else _proxy_connection(proxy_subject, path)
+    )
+    seen: list[tuple[object, object]] = []
+
+    async def settings_dispatch(_connection, request, _path):
+        seen.append((
+            getattr(request, "_nanobot_settings_system_admin", None),
+            getattr(request, "_nanobot_settings_actor_user_id", None),
+        ))
+        return http_json_response({"features": []})
+
+    handler.settings_routes = SimpleNamespace(
+        dispatch=settings_dispatch,
+        is_mutation_path=lambda _path: False,
+    )
+
+    response = await handler.dispatch(connection, connection.request)
+
+    assert response is not None and response.status_code == 200
+    assert len(seen) == 1
+    system_admin, actor_user_id = seen[0]
+    assert system_admin is expected_admin
+    assert isinstance(actor_user_id, str) and actor_user_id.strip()
 
 
 @pytest.mark.asyncio

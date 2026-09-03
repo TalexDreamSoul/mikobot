@@ -1671,6 +1671,9 @@ def logout_oauth_provider(
     return settings_payload(config_path=config_path)
 
 
+_PUBLIC_MODEL_ACTIONS = frozenset({"provider-models"})
+
+
 class ModelSettingsHandler:
     """Handle model/provider commands after transport authentication and decoding."""
 
@@ -1689,6 +1692,16 @@ class ModelSettingsHandler:
         request: SettingsRequest,
         operations: ModelSettingsOperations,
     ) -> SettingsRouteResult:
+        # Every other model command writes the host-wide config file, including provider
+        # API keys and OAuth credentials, so the domain is closed by default. A local
+        # owner resolves as an administrator, so single-user installs are unaffected.
+        if action not in _PUBLIC_MODEL_ACTIONS and (
+            request.system_admin is not True
+            or not (request.actor_user_id or "").strip()
+        ):
+            return SettingsRouteResult.failure(
+                403, "System administrator access is required"
+            )
         try:
             if action == "agent-update":
                 payload = self.settings.mutate(operations.update_agent, request.query)

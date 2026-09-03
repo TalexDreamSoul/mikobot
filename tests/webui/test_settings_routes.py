@@ -208,6 +208,240 @@ async def test_every_mcp_mutation_rejects_non_admin_before_side_effects(
     assert not config_path.exists()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("actor_user_id", "system_admin"),
+    [("ordinary-member", False), (None, True), ("   ", True)],
+)
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/settings/update",
+        "/api/settings/model-configurations/create",
+        "/api/settings/model-configurations/update",
+        "/api/settings/model-configurations/delete",
+        "/api/settings/model-configurations/migrate",
+        "/api/settings/model-call-order/update",
+        "/api/settings/provider/create",
+        "/api/settings/provider/update",
+        "/api/settings/provider/oauth-login",
+        "/api/settings/provider/oauth-login/complete",
+        "/api/settings/provider/oauth-logout",
+    ],
+)
+async def test_model_routes_reject_non_admins_before_writing_provider_credentials(
+    tmp_path: Path,
+    path: str,
+    actor_user_id: str | None,
+    system_admin: bool,
+) -> None:
+    """Provider settings carry API keys, so no member may reach the host config file."""
+    config_path = tmp_path / "config.json"
+    refresh_calls = 0
+
+    def refresh_runtime_config() -> None:
+        nonlocal refresh_calls
+        refresh_calls += 1
+
+    request = _mutation_request(
+        path,
+        {"provider": "openai", "api_key": "attacker-supplied-key", "name": "openai"},
+        actor_user_id=actor_user_id,
+        system_admin=system_admin,
+    )
+
+    response = await _router(
+        config_path=config_path,
+        refresh_runtime_config=refresh_runtime_config,
+    ).dispatch(None, request, path)
+
+    assert response is not None
+    assert response.status_code == 403
+    assert refresh_calls == 0
+    assert not config_path.exists()
+
+
+# Every settings route needs a decided authorization posture. A route that is neither
+# refused for a member here nor listed below is undecided — which is exactly how the
+# pairing and capability gaps shipped. Adding a route means adding it to one of these.
+_MEMBER_REACHABLE_ROUTES = {
+    "/api/settings/provider-models": "read-only model list that the model picker needs",
+    "/api/settings/api-service": "read-only API service status",
+    "/api/settings/cli-apps": "read-only installed CLI app list",
+    "/api/settings/version-check": "read-only update check",
+    "/api/settings/mcp-presets": "read-only MCP preset list",
+    "/api/settings/nanobot-features": (
+        "read that projects to a restricted, non-enumerating payload for members; "
+        "proven by test_nanobot_features_projects_away_the_host_inventory_for_members"
+    ),
+}
+
+# Empty on purpose. Every settings route now refuses a member inside its own domain, so
+# nothing depends on ws_http.py alone. A route added here is one that a second caller of
+# dispatch would reach unprotected, which is the shape this file exists to catch.
+_ENFORCED_BEFORE_DISPATCH: dict[str, str] = {}
+
+
+@pytest.mark.asyncio
+async def test_no_settings_route_reaches_a_member_without_a_recorded_decision(
+    tmp_path: Path,
+) -> None:
+    """A newly added privileged route cannot ship undecided the way pairing did."""
+    from nanobot.webui.settings_routes import (
+        _CAPABILITY_ROUTES,
+        _MODEL_ROUTES,
+        _SYSTEM_ROUTES,
+    )
+
+    undecided: list[tuple[str, int]] = []
+    stale: list[str] = []
+    for path in (*_MODEL_ROUTES, *_CAPABILITY_ROUTES, *_SYSTEM_ROUTES):
+        request = _mutation_request(
+            path,
+            {"name": "probe", "provider": "openai", "code": "PROBE"},
+            actor_user_id="ordinary-member",
+            system_admin=False,
+        )
+        response = await _router(config_path=tmp_path / "config.json").dispatch(
+            None, request, path
+        )
+        status = 404 if response is None else response.status_code
+        declared = path in _MEMBER_REACHABLE_ROUTES or path in _ENFORCED_BEFORE_DISPATCH
+        if status == 403:
+            if declared:
+                stale.append(path)
+            continue
+        if declared:
+            continue
+        undecided.append((path, status))
+
+    assert stale == [], (
+        "these settings routes now refuse a non-administrator on their own, so their "
+        f"member-reachable / enforced-earlier declaration is out of date: {stale}"
+    )
+    assert undecided == [], (
+        "these settings routes ran for a non-administrator without being declared "
+        f"member-reachable or enforced earlier in the stack: {undecided}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("actor_user_id", "system_admin"),
+    [("ordinary-member", False), (None, True), ("   ", True)],
+)
+async def test_nanobot_features_projects_away_the_host_inventory_for_members(
+    monkeypatch: pytest.MonkeyPatch,
+    actor_user_id: str | None,
+    system_admin: bool,
+) -> None:
+    """The one member-reachable system read must not enumerate host packages."""
+    router = _router()
+
+    def unreachable() -> dict[str, object]:
+        raise AssertionError("the host inventory must not be built for a member")
+
+    monkeypatch.setattr(router._system, "_features_payload", unreachable)
+    request = _read_request(
+        "/api/settings/nanobot-features",
+        actor_user_id=actor_user_id,
+        system_admin=system_admin,
+    )
+
+    response = await router.dispatch(None, request, request.path)
+
+    assert response is not None
+    assert response.status_code == 200
+    assert json.loads(response.body) == {
+        "features": [],
+        "enabled_count": 0,
+        "restricted": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_nanobot_features_returns_the_host_inventory_to_an_administrator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The blocked read is real: an administrator still receives the full projection."""
+    router = _router()
+    inventory = {
+        "features": [
+            {
+                "name": "weixin",
+                "extension_id": "ext:channel_package:weixin",
+                "extension_revision": "weixin-r3",
+                "extension_lifecycle": "failed",
+                "runtime_error": "Channel runtime failed. Check gateway logs.",
+            }
+        ],
+        "enabled_count": 1,
+    }
+    monkeypatch.setattr(router._system, "_features_payload", lambda: inventory)
+    request = _read_request(
+        "/api/settings/nanobot-features",
+        actor_user_id="operator",
+        system_admin=True,
+    )
+
+    response = await router.dispatch(None, request, request.path)
+
+    assert response is not None
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["features"][0]["extension_revision"] == "weixin-r3"
+    assert "restricted" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/settings/channels/validate",
+        "/api/settings/channels/configure",
+        "/api/settings/nanobot-features/enable",
+        "/api/settings/nanobot-features/disable",
+    ],
+)
+@pytest.mark.parametrize(
+    ("actor_user_id", "system_admin"),
+    [("ordinary-member", False), (None, True), ("   ", True)],
+)
+async def test_channel_control_routes_refuse_members_without_relying_on_ws_http(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    actor_user_id: str | None,
+    system_admin: bool,
+) -> None:
+    """ws_http gates these first; a second caller of dispatch must not be able to skip it."""
+    validated: list[object] = []
+    monkeypatch.setattr(
+        "nanobot.webui.settings_routes.validate_channel_config",
+        lambda name, values, *, instance_id=None: validated.append(name) or {},
+    )
+    request = _mutation_request(
+        path,
+        {
+            "name": "weixin",
+            "instance_id": "tenant-b",
+            "extension_id": "ext:channel_package:weixin/channel:tenant-b",
+            "expected_revision": "weixin-r3",
+            "values": {"token": "attacker-supplied"},
+        },
+        actor_user_id=actor_user_id,
+        system_admin=system_admin,
+    )
+
+    response = await _router().dispatch(None, request, path)
+
+    assert response is not None
+    assert response.status_code == 403
+    assert json.loads(response.body) == {
+        "error": "System administrator access is required"
+    }
+    assert validated == []
+
+
 def _pending_pairing() -> list[dict[str, object]]:
     return [
         {
@@ -816,6 +1050,8 @@ async def test_oauth_completion_reads_websocket_payload(
             "flow_id": "flow-123",
             "authorization_response": authorization_response,
         },
+        actor_user_id="operator",
+        system_admin=True,
     )
 
     response = await router.dispatch(
@@ -902,7 +1138,9 @@ async def test_runtime_config_mutation_routes_refresh_live_runtime(
         return {"routed": function_name}
 
     monkeypatch.setattr(f"nanobot.webui.settings_routes.{function_name}", mutate)
-    request = _mutation_request(route_path, payload)
+    request = _mutation_request(
+        route_path, payload, actor_user_id="operator", system_admin=True
+    )
 
     response = await _router(
         refresh_runtime_config=refresh_runtime_config,
@@ -927,7 +1165,12 @@ async def test_model_update_route_forwards_session_rename_dependency(monkeypatch
 
     monkeypatch.setattr("nanobot.webui.settings_routes.update_model_configuration", update)
     path = "/api/settings/model-configurations/update"
-    request = _mutation_request(path, {"name": "openai", "new_name": "Codex"})
+    request = _mutation_request(
+        path,
+        {"name": "openai", "new_name": "Codex"},
+        actor_user_id="operator",
+        system_admin=True,
+    )
 
     response = await _router(
         rename_model_preset=rename_model_preset,

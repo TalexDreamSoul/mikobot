@@ -5,6 +5,7 @@ opaque target selection, and side-effect cardinality remain observable.
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any
@@ -149,6 +150,7 @@ def _system_operations(
     *,
     plugin: object | None = None,
     channel_pairing_action: object | None = None,
+    validate_channel_config: object | None = None,
 ) -> SystemSettingsOperations:
     def unused(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("legacy Settings operation must not be used")
@@ -156,7 +158,7 @@ def _system_operations(
     return SystemSettingsOperations(
         cli_apps_payload=unused,
         cli_apps_action=unused,
-        validate_channel_config=unused,
+        validate_channel_config=validate_channel_config or unused,
         load_channel_plugin=(lambda _name: plugin) if plugin is not None else unused,
         list_pending=lambda: (),
         approve_code=unused,
@@ -167,6 +169,17 @@ def _system_operations(
         check_for_update=unused,
         channel_pairing_action=channel_pairing_action,
     )
+
+
+def _admin_request(**overrides: Any) -> SettingsRequest:
+    """Build the request shape the transport hands a server-derived administrator."""
+    fields: dict[str, Any] = {
+        "query": {},
+        "actor_user_id": "server-operator",
+        "system_admin": True,
+    }
+    fields.update(overrides)
+    return SettingsRequest(**fields)
 
 
 def _system_handler(
@@ -522,7 +535,7 @@ async def test_settings_handler_lists_only_the_registry_snapshot_without_legacy_
     package = _optional_package("api")
     registry, adapter = _registry(package)
     result = await _system_handler(tmp_path, registry).handle(
-        "features-list", SettingsRequest(query={}), _system_operations()
+        "features-list", _admin_request(), _system_operations()
     )
 
     assert result.status == 200
@@ -550,6 +563,139 @@ async def test_settings_handler_lists_only_the_registry_snapshot_without_legacy_
     ]
     assert "last_action" not in result.payload
     assert adapter.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("actor_user_id", "system_admin"),
+    [("ordinary-member", False), (None, True), ("   ", True)],
+)
+async def test_features_list_withholds_the_whole_host_inventory_from_members(
+    tmp_path,
+    actor_user_id: str | None,
+    system_admin: bool,
+) -> None:
+    """A member learns no package, revision, lifecycle, trust, count, or adapter failure."""
+    registry, adapter = _registry(
+        replace(_channel_package(), lifecycle=ExtensionLifecycle.FAILED),
+        _optional_package("langfuse", revision="langfuse-r7"),
+    )
+
+    result = await _system_handler(tmp_path, registry).handle(
+        "features-list",
+        SettingsRequest(
+            query={},
+            actor_user_id=actor_user_id,
+            system_admin=system_admin,
+        ),
+        _system_operations(),
+    )
+
+    assert result.status == 200
+    assert result.payload == {"features": [], "enabled_count": 0, "restricted": True}
+    serialized = json.dumps(result.payload)
+    assert not [
+        secret
+        for secret in (
+            "relay",
+            "langfuse",
+            "langfuse-r7",
+            "relay-package-r1",
+            "runtime_error",
+            "extension_lifecycle",
+            "failed",
+        )
+        if secret in serialized
+    ]
+    assert adapter.requests == []
+
+
+@pytest.mark.asyncio
+async def test_features_list_still_discloses_failed_packages_to_administrators(
+    tmp_path,
+) -> None:
+    """The withheld inventory is real: the same snapshot reaches a server-derived admin."""
+    registry, _adapter = _registry(_optional_package("langfuse", revision="langfuse-r7"))
+
+    result = await _system_handler(tmp_path, registry).handle(
+        "features-list", _admin_request(), _system_operations()
+    )
+
+    assert result.status == 200
+    assert result.payload is not None
+    assert "restricted" not in result.payload
+    [feature] = result.payload["features"]
+    assert (
+        feature["name"],
+        feature["extension_revision"],
+        feature["extension_lifecycle"],
+    ) == ("langfuse", "langfuse-r7", "unavailable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["channel-validate", "channel-configure"])
+@pytest.mark.parametrize(
+    ("actor_user_id", "system_admin"),
+    [("ordinary-member", False), (None, True), ("   ", True)],
+)
+async def test_channel_control_actions_refuse_members_beside_the_effect(
+    tmp_path,
+    action: str,
+    actor_user_id: str | None,
+    system_admin: bool,
+) -> None:
+    """`ws_http` gates these first; the domain repeats the decision for any other caller."""
+    registry, adapter = _registry(_channel_package())
+
+    result = await _system_handler(tmp_path, registry).handle(
+        action,
+        SettingsRequest(
+            query={
+                "name": ["relay"],
+                "instance_id": ["office"],
+                "extension_id": ["ext:channel_package:relay/channel:office"],
+                "expected_revision": ["relay-package-r1"],
+            },
+            payload={"values": {"token": "attacker-supplied"}},
+            actor_user_id=actor_user_id,
+            system_admin=system_admin,
+        ),
+        _system_operations(),
+    )
+
+    assert result.status == 403
+    assert result.error == "System administrator access is required"
+    assert result.payload is None
+    assert adapter.effects == 0
+    assert adapter.requests == []
+
+
+@pytest.mark.asyncio
+async def test_channel_validate_still_runs_for_the_elevated_instance_owner(
+    tmp_path,
+) -> None:
+    """`ws_http` elevates the owner of a claimed instance, so the new gate cannot bite them."""
+    registry, _adapter = _registry(_channel_package())
+    validated: list[tuple[str, str]] = []
+
+    def validate(name: str, _values: object, *, instance_id: str) -> dict[str, object]:
+        validated.append((name, instance_id))
+        return {"status": "configured"}
+
+    result = await _system_handler(tmp_path, registry).handle(
+        "channel-validate",
+        SettingsRequest(
+            query={"name": ["relay"], "instance_id": ["office"]},
+            payload={"values": {"token": "owner-supplied"}},
+            actor_user_id="instance-owner",
+            system_admin=True,
+        ),
+        _system_operations(validate_channel_config=validate),
+    )
+
+    assert result.status == 200
+    assert result.payload == {"status": "configured"}
+    assert validated == [("relay", "office")]
 
 
 @pytest.mark.asyncio
@@ -973,7 +1119,7 @@ async def test_channel_feature_runtime_fields_use_aggregate_package_lifecycle(tm
     registry, _adapter = _registry(aggregate)
 
     result = await _system_handler(tmp_path, registry).handle(
-        "features-list", SettingsRequest(query={}), _system_operations()
+        "features-list", _admin_request(), _system_operations()
     )
 
     assert result.status == 200

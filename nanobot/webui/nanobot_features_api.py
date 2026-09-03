@@ -113,6 +113,18 @@ _MAX_LAST_ACTION_VALUES = 1_024
 _SECRET_ACTION_KEYWORDS = ("credential", "password", "secret", "token")
 
 
+def restricted_nanobot_features_payload() -> dict[str, Any]:
+    """Return the inventory projection a caller without host administration may read.
+
+    Package names, revisions, lifecycles, trust, execution location, and adapter
+    diagnostics are all host-wide facts, and nanobot has no per-member visibility model
+    that could filter them, so the inventory is withheld whole rather than sampled.
+    `restricted` lets Settings say an administrator is required instead of claiming that
+    nothing is installed.
+    """
+    return {"features": [], "enabled_count": 0, "restricted": True}
+
+
 def nanobot_features_payload(
     *,
     extension_snapshot: ExtensionSnapshot,
