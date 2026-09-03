@@ -40,8 +40,14 @@ from nanobot.channels.contracts import (
     CHANNEL_INSTANCE_REVISION_FIELD,
     new_channel_instance_revision,
 )
+from nanobot.channels.weixin.instances import (
+    DEFAULT_INSTANCE_ID,
+    runtime_channel_name,
+    validate_instance_id,
+)
 from nanobot.config.paths import get_media_dir, get_runtime_subdir
 from nanobot.config.schema import Base
+from nanobot.utils.helpers import safe_filename
 
 # ---------------------------------------------------------------------------
 # Protocol constants (from openclaw-weixin types.ts)
@@ -1475,6 +1481,46 @@ class WeixinChannel(BaseChannel):
     # Media download  (matches media-download.ts + pic-decrypt.ts)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _safe_media_filename(filename: str | None, fallback: str) -> str:
+        """Return a local-only filename for downloaded WeChat media."""
+        candidate = filename or fallback
+        # ``file_name`` is carried on the inbound message, so treat both POSIX
+        # and Windows separators as path boundaries before sanitizing; a
+        # download must not be able to escape the instance media dir.
+        candidate = safe_filename(os.path.basename(candidate.replace("\\", "/")))
+        if candidate in ("", ".", ".."):
+            return safe_filename(fallback) or uuid.uuid4().hex
+        return candidate
+
+    @classmethod
+    def _stored_media_filename(cls, filename: str | None, fallback: str) -> str:
+        """Return the on-disk name for a downloaded WeChat attachment.
+
+        The basename is sender-supplied, so a random token is prefixed: two
+        senders must not be able to write the same path, and one instance
+        must not be able to guess where another stored an attachment.
+        """
+        return f"{uuid.uuid4().hex[:16]}-{cls._safe_media_filename(filename, fallback)}"
+
+    def _instance_media_dir(self) -> Path:
+        """Return the media directory owned by this WeChat instance.
+
+        Namespacing by the instance's runtime name keeps one tenant's upload
+        from overwriting another tenant's file of the same name. The default
+        instance keeps the historical ``media/weixin`` directory, so media
+        written before this namespacing stays where the agent already knows
+        to find it.
+        """
+        instance_id = self.instance_id
+        try:
+            instance_id = validate_instance_id(instance_id)
+        except ValueError:
+            # The manager refuses to start an instance with an unusable id, so
+            # this only guards a hand-built channel from escaping the media root.
+            instance_id = DEFAULT_INSTANCE_ID
+        return get_media_dir(runtime_channel_name("weixin", instance_id))
+
     async def _download_media_item(
         self,
         typed_item: dict[str, Any],
@@ -1552,14 +1598,9 @@ class WeixinChannel(BaseChannel):
             if not data:
                 return None
 
-            media_dir = get_media_dir("weixin")
+            media_dir = self._instance_media_dir()
             ext = _ext_for_type(media_type)
-            if not filename:
-                ts = int(time.time())
-                hash_seed = encrypt_query_param or full_url
-                h = abs(hash(hash_seed)) % 100000
-                filename = f"{media_type}_{ts}_{h}{ext}"
-            safe_name = os.path.basename(filename)
+            safe_name = self._stored_media_filename(filename, f"{media_type}{ext}")
             file_path = media_dir / safe_name
             file_path.write_bytes(data)
             return str(file_path)

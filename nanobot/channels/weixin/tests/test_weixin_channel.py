@@ -1500,9 +1500,9 @@ class _DummyErrorDownloadResponse(_DummyDownloadResponse):
 
 
 @pytest.mark.asyncio
-async def test_download_media_item_uses_full_url_when_present(tmp_path) -> None:
+async def test_download_media_item_uses_full_url_when_present(monkeypatch, tmp_path) -> None:
     channel, _bus = _make_channel()
-    weixin_mod.get_media_dir = lambda _name: tmp_path
+    monkeypatch.setattr(weixin_mod, "get_media_dir", lambda _name: tmp_path)
 
     full_url = "https://cdn.example.test/download/full"
     channel._client = SimpleNamespace(
@@ -1523,9 +1523,9 @@ async def test_download_media_item_uses_full_url_when_present(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_download_media_item_falls_back_when_full_url_returns_retryable_error(tmp_path) -> None:
+async def test_download_media_item_falls_back_when_full_url_returns_retryable_error(monkeypatch, tmp_path) -> None:
     channel, _bus = _make_channel()
-    weixin_mod.get_media_dir = lambda _name: tmp_path
+    monkeypatch.setattr(weixin_mod, "get_media_dir", lambda _name: tmp_path)
 
     full_url = "https://cdn.example.test/download/full?taskid=123"
     channel._client = SimpleNamespace(
@@ -1554,9 +1554,9 @@ async def test_download_media_item_falls_back_when_full_url_returns_retryable_er
 
 
 @pytest.mark.asyncio
-async def test_download_media_item_falls_back_to_encrypt_query_param(tmp_path) -> None:
+async def test_download_media_item_falls_back_to_encrypt_query_param(monkeypatch, tmp_path) -> None:
     channel, _bus = _make_channel()
-    weixin_mod.get_media_dir = lambda _name: tmp_path
+    monkeypatch.setattr(weixin_mod, "get_media_dir", lambda _name: tmp_path)
 
     channel._client = SimpleNamespace(
         get=AsyncMock(return_value=_DummyDownloadResponse(content=b"fallback-bytes"))
@@ -1572,9 +1572,9 @@ async def test_download_media_item_falls_back_to_encrypt_query_param(tmp_path) -
 
 
 @pytest.mark.asyncio
-async def test_download_media_item_does_not_retry_when_full_url_fails_without_fallback(tmp_path) -> None:
+async def test_download_media_item_does_not_retry_when_full_url_fails_without_fallback(monkeypatch, tmp_path) -> None:
     channel, _bus = _make_channel()
-    weixin_mod.get_media_dir = lambda _name: tmp_path
+    monkeypatch.setattr(weixin_mod, "get_media_dir", lambda _name: tmp_path)
 
     full_url = "https://cdn.example.test/download/full"
     channel._client = SimpleNamespace(
@@ -1589,9 +1589,9 @@ async def test_download_media_item_does_not_retry_when_full_url_fails_without_fa
 
 
 @pytest.mark.asyncio
-async def test_download_media_item_non_image_requires_aes_key_even_with_full_url(tmp_path) -> None:
+async def test_download_media_item_non_image_requires_aes_key_even_with_full_url(monkeypatch, tmp_path) -> None:
     channel, _bus = _make_channel()
-    weixin_mod.get_media_dir = lambda _name: tmp_path
+    monkeypatch.setattr(weixin_mod, "get_media_dir", lambda _name: tmp_path)
 
     full_url = "https://cdn.example.test/download/voice"
     channel._client = SimpleNamespace(

@@ -798,8 +798,10 @@ async def test_download_and_save_media_returns_absolute_path_in_content(monkeypa
         "audio", {"file_key": "voice_key"}, "om_audio"
     )
 
-    assert file_path == str(tmp_path / "voice_key.ogg")
-    assert (tmp_path / "voice_key.ogg").read_bytes() == b"voice-bytes"
+    saved = Path(file_path)
+    assert saved.parent == tmp_path
+    assert saved.name.endswith("-voice_key.ogg")
+    assert saved.read_bytes() == b"voice-bytes"
     assert content_text == f"[audio: {file_path}]"
 
 

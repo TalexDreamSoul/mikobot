@@ -43,6 +43,7 @@ from nanobot.channels.feishu.instances import (
     runtime_channel_name,
     update_feishu_instance_preserving_shape,
     upsert_feishu_instance,
+    validate_instance_id,
 )
 from nanobot.channels.feishu.websocket import get_feishu_ws_runner
 from nanobot.command.router import normalize_command_text
@@ -1838,6 +1839,34 @@ class FeishuChannel(BaseChannel):
             return safe_filename(fallback) or uuid.uuid4().hex
         return candidate
 
+    @classmethod
+    def _stored_media_filename(cls, filename: str | None, fallback: str) -> str:
+        """Return the on-disk name for a downloaded Feishu attachment.
+
+        The basename is sender-supplied, so a random token is prefixed: two
+        senders must not be able to write the same path, and one instance
+        must not be able to guess where another stored an attachment.
+        """
+        return f"{uuid.uuid4().hex[:16]}-{cls._safe_media_filename(filename, fallback)}"
+
+    def _instance_media_dir(self) -> Path:
+        """Return the media directory owned by this Feishu instance.
+
+        Namespacing by the instance's runtime name keeps one tenant's upload
+        from overwriting another tenant's file of the same name. The default
+        instance keeps the historical ``media/feishu`` directory, so media
+        written before this namespacing stays where the agent already knows
+        to find it.
+        """
+        instance_id = self.config.instance_id or DEFAULT_INSTANCE_ID
+        try:
+            instance_id = validate_instance_id(instance_id)
+        except ValueError:
+            # The manager refuses to start an instance with an unusable id, so
+            # this only guards a hand-built channel from escaping the media root.
+            instance_id = DEFAULT_INSTANCE_ID
+        return get_media_dir(runtime_channel_name("feishu", instance_id))
+
     async def _download_and_save_media(
         self, msg_type: str, content_json: dict[str, Any], message_id: str | None = None
     ) -> tuple[str | None, str]:
@@ -1848,7 +1877,7 @@ class FeishuChannel(BaseChannel):
             (file_path, content_text) - file_path is None if download failed
         """
         loop = asyncio.get_running_loop()
-        media_dir = get_media_dir("feishu")
+        media_dir = self._instance_media_dir()
 
         data, filename = None, None
         fallback_filename = uuid.uuid4().hex
@@ -1891,7 +1920,7 @@ class FeishuChannel(BaseChannel):
                     filename = f"{filename}.ogg"
 
         if data and filename:
-            filename = self._safe_media_filename(filename, fallback_filename)
+            filename = self._stored_media_filename(filename, fallback_filename)
             file_path = media_dir / filename
             file_path.write_bytes(data)
             path_str = str(file_path)
