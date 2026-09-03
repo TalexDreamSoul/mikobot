@@ -82,6 +82,17 @@ Close the cross-tenant authorization gaps that the archived `09-01-bot-channel-m
 - The refusal must not be a bare `403`. Settings sections are rendered for every member (`webui/src/components/settings/SettingsPage.tsx` and `webui/src/lib/types.ts` contain no `isSystemAdmin`), so an error status breaks page rendering. Return the payload shape with an explicit restricted marker so the UI states that administration is required instead of claiming nothing is installed.
 - When a per-member visibility model exists, this requirement is what it replaces; until then, withholding is the honest answer.
 
+**Correction, recorded after archiving.** AC11 was verified against the direct read only,
+and the direct read was not the whole surface. Every response that ships a
+`nanobot_features` block — feature enable/disable, channel configure, and the connect
+pairing branch — rebuilt the full inventory from the registry with no caller argument, so
+a member elevated by `ws_http` for a channel instance they own still received it. The
+audience was narrower than before the task, not closed. `SettingsRequest` now carries
+`host_admin`, which the transport records before elevation overwrites `system_admin`, and
+the inventory is built in exactly one place that gates on it. Recording the miss rather
+than the corrected end state, because the lesson is that "verified" meant one entry point
+when the requirement covered a payload.
+
 ### R8 — One credential redaction implementation
 
 - Error text reaching an API payload passes through one shared redaction implementation. Two copies drift, and a drift means one surface masks while the other prints — with both surfaces' own tests still green.

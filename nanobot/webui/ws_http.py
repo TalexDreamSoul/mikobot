@@ -201,6 +201,10 @@ _WEBUI_MUTATION_REQUEST_ATTR = "_nanobot_webui_mutation_request"
 _SETTINGS_ACTOR_USER_ATTR = "_nanobot_settings_actor_user_id"
 _SETTINGS_ACTOR_ORG_ATTR = "_nanobot_settings_actor_organization_id"
 _SETTINGS_ADMIN_ATTR = "_nanobot_settings_system_admin"
+# Whether the caller administers the host. `_SETTINGS_ADMIN_ATTR` is raised to True for a
+# member acting on a channel instance they own, which authorizes that action but must not
+# widen what host state they may read.
+_SETTINGS_HOST_ADMIN_ATTR = "_nanobot_settings_host_admin"
 _NO_STORE_HEADERS = [("Cache-Control", "no-store")]
 
 _WEBUI_MUTATION_PATHS = {
@@ -962,7 +966,9 @@ class GatewayHTTPHandler:
                 user, _local_owner = identity
                 setattr(request, _SETTINGS_ACTOR_USER_ATTR, user.id)
                 setattr(request, _SETTINGS_ACTOR_ORG_ATTR, user.default_organization_id)
-                setattr(request, _SETTINGS_ADMIN_ATTR, await self._is_system_admin(request))
+                host_admin = await self._is_system_admin(request)
+                setattr(request, _SETTINGS_ADMIN_ATTR, host_admin)
+                setattr(request, _SETTINGS_HOST_ADMIN_ATTR, host_admin)
 
         channel_control_path = (
             got in {

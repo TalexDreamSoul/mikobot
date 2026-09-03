@@ -57,6 +57,7 @@ def _mutation_request(
     *,
     actor_user_id: str | None = None,
     system_admin: bool = False,
+    host_admin: bool | None = None,
 ) -> SimpleNamespace:
     request = SimpleNamespace(path=path, headers=Headers())
     request._nanobot_webui_mutation_request = True
@@ -64,6 +65,9 @@ def _mutation_request(
     request._nanobot_trusted_proxy_authenticated = True
     request._nanobot_settings_actor_user_id = actor_user_id
     request._nanobot_settings_system_admin = system_admin
+    request._nanobot_settings_host_admin = (
+        system_admin if host_admin is None else host_admin
+    )
     return request
 
 
@@ -72,10 +76,14 @@ def _read_request(
     *,
     actor_user_id: str | None = None,
     system_admin: bool = False,
+    host_admin: bool | None = None,
 ) -> SimpleNamespace:
     request = SimpleNamespace(path=path, headers=Headers())
     request._nanobot_settings_actor_user_id = actor_user_id
     request._nanobot_settings_system_admin = system_admin
+    request._nanobot_settings_host_admin = (
+        system_admin if host_admin is None else host_admin
+    )
     return request
 
 
@@ -377,7 +385,7 @@ async def test_nanobot_features_returns_the_host_inventory_to_an_administrator(
         ],
         "enabled_count": 1,
     }
-    monkeypatch.setattr(router._system, "_features_payload", lambda: inventory)
+    monkeypatch.setattr(router._system, "_features_payload", lambda *_args: inventory)
     request = _read_request(
         "/api/settings/nanobot-features",
         actor_user_id="operator",

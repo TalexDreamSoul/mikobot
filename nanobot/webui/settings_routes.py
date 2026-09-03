@@ -363,6 +363,7 @@ class WebUISettingsRouter:
                 request, "_nanobot_settings_actor_organization_id", None
             ),
             system_admin=bool(getattr(request, "_nanobot_settings_system_admin", False)),
+            host_admin=bool(getattr(request, "_nanobot_settings_host_admin", False)),
         )
 
     def _authorized(self, request: WsRequest) -> bool:

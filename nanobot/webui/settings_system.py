@@ -435,8 +435,19 @@ class SystemSettingsHandler:
         return registry
 
     def _features_payload(
-        self, last_action: Mapping[str, object] | None = None
+        self,
+        request: SettingsRequest,
+        last_action: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
+        """Build the host inventory only for a caller who administers the host.
+
+        The gate is `host_admin`, not `system_admin`: the latter is raised for a member
+        acting on a channel instance they own, which authorizes that action but must not
+        widen what host state the response carries. Every response that ships a
+        `nanobot_features` block goes through here so a new one cannot forget.
+        """
+        if not request.host_admin:
+            return restricted_nanobot_features_payload()
         registry = self._registry()
         return nanobot_features_payload(
             extension_snapshot=registry.snapshot(),
@@ -490,7 +501,7 @@ class SystemSettingsHandler:
         if not _is_server_derived_admin(request):
             return SettingsRouteResult.success(restricted_nanobot_features_payload())
         try:
-            return SettingsRouteResult.success(await asyncio.to_thread(self._features_payload))
+            return SettingsRouteResult.success(await asyncio.to_thread(self._features_payload, request))
         except OptionalFeatureError as exc:
             return SettingsRouteResult.failure(exc.status, exc.message)
         except Exception:
@@ -540,7 +551,7 @@ class SystemSettingsHandler:
                     "message": result.message,
                     "lifecycle": result.lifecycle.value if result.lifecycle else None,
                 })
-            payload = await asyncio.to_thread(self._features_payload, last_action)
+            payload = await asyncio.to_thread(self._features_payload, request, last_action)
             if result is not None and result.lifecycle is ExtensionLifecycle.RESTART_REQUIRED:
                 payload["requires_restart"] = True
         except OptionalFeatureError as exc:
@@ -605,7 +616,7 @@ class SystemSettingsHandler:
                 if enabled is not None
                 else None
             )
-            features = await asyncio.to_thread(self._features_payload, last_action)
+            features = await asyncio.to_thread(self._features_payload, request, last_action)
             if (
                 result.lifecycle is ExtensionLifecycle.RESTART_REQUIRED
                 or (
@@ -785,7 +796,7 @@ class SystemSettingsHandler:
                         ),
                     }
                     features = await asyncio.to_thread(
-                        self._features_payload, last_action
+                        self._features_payload, request, last_action
                     )
                     features["requires_restart"] = bool(
                         install_result is not None
@@ -810,7 +821,7 @@ class SystemSettingsHandler:
                 except Exception:
                     self.logger.exception("failed to start pairing listener")
                     payload["pairing_listener_error"] = "pairing listener could not be started"
-            payload["nanobot_features"] = await asyncio.to_thread(self._features_payload)
+            payload["nanobot_features"] = await asyncio.to_thread(self._features_payload, request)
             payload["nanobot_features"]["requires_restart"] = False
             return SettingsRouteResult.success(payload)
         try:
@@ -827,6 +838,7 @@ class SystemSettingsHandler:
             )
             features = await asyncio.to_thread(
                 self._features_payload,
+                request,
                 {
                     "ok": result.ok,
                     "action": "enable",

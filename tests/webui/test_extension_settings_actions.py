@@ -177,6 +177,7 @@ def _admin_request(**overrides: Any) -> SettingsRequest:
         "query": {},
         "actor_user_id": "server-operator",
         "system_admin": True,
+        "host_admin": True,
     }
     fields.update(overrides)
     return SettingsRequest(**fields)
@@ -689,6 +690,7 @@ async def test_channel_validate_still_runs_for_the_elevated_instance_owner(
             payload={"values": {"token": "owner-supplied"}},
             actor_user_id="instance-owner",
             system_admin=True,
+            host_admin=True,
         ),
         _system_operations(validate_channel_config=validate),
     )
@@ -736,6 +738,7 @@ async def test_settings_handler_maps_feature_routes_to_one_canonical_action(
             query=query,
             actor_user_id="server-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         _system_operations(),
@@ -775,6 +778,7 @@ async def test_channel_configure_enables_once_against_the_fresh_post_config_revi
             payload={"values": {"region": "eu", "secret": " "}},
             actor_user_id="server-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         _system_operations(),
@@ -851,6 +855,7 @@ async def test_channel_connector_completion_enables_the_resolved_instance_once(t
             },
             actor_user_id="connector-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         _system_operations(plugin=plugin),
@@ -903,6 +908,7 @@ async def test_pairing_connector_completion_starts_only_the_narrow_pairing_liste
             },
             actor_user_id="connector-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         _system_operations(plugin=plugin, channel_pairing_action=pairing_action),
@@ -935,6 +941,7 @@ async def test_connector_rejects_wrong_opaque_target_before_starting_the_connect
             },
             actor_user_id="connector-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         _system_operations(plugin=plugin),
@@ -1014,6 +1021,7 @@ async def test_api_start_updates_config_then_installs_the_exact_api_extension(tm
             },
             actor_user_id="api-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         _capability_operations(runtime, update_api=update_api),
@@ -1096,6 +1104,7 @@ async def test_enabled_optional_noop_rechecks_the_supplied_revision_before_retur
             },
             actor_user_id="operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         _system_operations(),
@@ -1153,6 +1162,7 @@ async def test_false_feature_result_returns_fresh_payload_with_restart_truth(tmp
             },
             actor_user_id="operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         _system_operations(),
@@ -1212,6 +1222,7 @@ async def test_pairing_install_acknowledgement_and_policy_gate_listener_effects(
             query=query,
             actor_user_id="connector-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=local_browser,
         ),
         _system_operations(
@@ -1261,6 +1272,7 @@ async def test_pairing_install_precedes_one_listener_effect_after_authorization(
             query={**query, "risk_acknowledged": ["true"]},
             actor_user_id="connector-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         operations,
@@ -1274,6 +1286,7 @@ async def test_pairing_install_precedes_one_listener_effect_after_authorization(
             query=query,
             actor_user_id="connector-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         operations,
@@ -1332,6 +1345,7 @@ async def test_api_start_requires_the_echoed_target_revision_and_install_acknowl
             query=query,
             actor_user_id="api-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         _capability_operations(runtime, update_api=update_api),
@@ -1400,6 +1414,7 @@ async def test_settings_sanitizes_connector_error_details_before_returning_them(
             },
             actor_user_id="connector-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         _system_operations(plugin=plugin),
@@ -1440,6 +1455,7 @@ async def test_settings_sanitizes_connector_payload_diagnostics_before_returning
             },
             actor_user_id="connector-operator",
             system_admin=True,
+            host_admin=True,
             local_browser=True,
         ),
         _system_operations(plugin=plugin),
@@ -1454,3 +1470,29 @@ async def test_settings_sanitizes_connector_payload_diagnostics_before_returning
         assert "<path>" in result.payload[field]
     assert len(connector.calls) == 1
     assert adapter.effects == 0
+
+
+@pytest.mark.asyncio
+async def test_action_responses_withhold_the_inventory_from_an_elevated_member(
+    tmp_path,
+) -> None:
+    """Owning one instance authorizes the action; it must not widen what may be read.
+
+    `ws_http` raises `system_admin` for a member acting on a channel instance they own,
+    so every response that ships a `nanobot_features` block would otherwise hand that
+    member the whole host inventory the direct read withholds. The block is built in one
+    place, so the gate is asserted there rather than through a route that would need a
+    full valid action payload to reach it.
+    """
+    package = _channel_package()
+    registry, _adapter = _registry(package)
+    handler = _system_handler(tmp_path, registry)
+
+    elevated = handler._features_payload(
+        SettingsRequest(query={}, actor_user_id="instance-owner", system_admin=True)
+    )
+    administrator = handler._features_payload(_admin_request())
+
+    assert elevated == {"features": [], "enabled_count": 0, "restricted": True}
+    assert administrator["features"], "a host administrator still receives the inventory"
+    assert "restricted" not in administrator
