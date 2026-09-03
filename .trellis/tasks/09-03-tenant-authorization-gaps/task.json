@@ -1,0 +1,28 @@
+{
+  "id": "tenant-authorization-gaps",
+  "name": "tenant-authorization-gaps",
+  "title": "Tenant authorization gaps",
+  "description": "Close the cross-tenant authorization gaps left unmet by the archived bot-channel-management task: unauthenticated pairing approval, ungated capability mutations, and shared per-channel media directories.",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P0",
+  "creator": "TalexDreamSoul",
+  "assignee": "TalexDreamSoul",
+  "createdAt": "2026-09-03",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "origin": "archive/2026-09/09-01-bot-channel-management"
+  }
+}

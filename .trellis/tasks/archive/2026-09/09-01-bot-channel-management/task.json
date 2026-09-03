@@ -21,6 +21,6 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "Archived as completed, but three tenant-authorization invariants were later found unenforced. Remediation is tracked in 09-03-tenant-authorization-gaps (P0).",
   "meta": {}
 }
