@@ -89,21 +89,59 @@ Give each installed CLI app exactly one canonical extension owner covering its e
 
 ## Acceptance Criteria
 
-- [ ] AC1: Every app in durable installed state appears exactly once as a `CLI_APP` package owning its executable component and, when present, its generated Skill component (parent AC1; runtime-adapters AC8).
-- [ ] AC2: An installed CLI app no longer produces a second `ext:agent_plugin:cli-app-*` package, while a `cli-app-*` directory without manager ownership metadata remains an ordinary Agent Plugin (parent AC1; runtime-adapters AC8).
-- [ ] AC3: Skill precedence, plugin enablement markers, filesystem plugin-Skill authorization, and prompt assembly are unchanged by the exclusion rule (parent AC12).
-- [ ] AC4: Catalog candidates, catalog cache state, and network refresh have no effect on the canonical installed inventory (runtime-adapters AC8).
-- [ ] AC5: CLI-app packages report operator-trusted, child-process, `isolated: false` with self-declared unenforced permissions, and their generated Skill components report data execution (parent AC7).
-- [ ] AC6: An installed app whose entry point is unresolvable reports unavailable or failed, never enabled (parent AC5).
-- [ ] AC7: No descriptor, revision, diagnostic, or action result contains `entry_point_path`, a resolved executable location, any absolute host path, argv, or a raw command line (parent AC10; runtime-adapters AC5).
-- [ ] AC8: Update, uninstall, and test dispatch only through the canonical adapter to `CliAppManager`, each existing owner is called at most once, and catalog install remains on its existing workflow (runtime-adapters AC9).
-- [ ] AC9: Non-admin actor, stale revision, missing acknowledgement, unknown target, and unsupported action each fail before any package-manager or executable invocation (parent AC5, AC9; runtime-adapters AC10).
-- [ ] AC10: A failing install, update, uninstall, or test returns a bounded safe reason with no raw package-manager output, and the full output is present only in server logs (parent AC10).
-- [ ] AC11: Uninstall that leaves the entry point resolvable reports a truthful partial outcome without interpolating a host path and without fabricating a rollback (parent AC6, AC10).
-- [ ] AC12: Test reports exit status with a bounded redacted excerpt or no excerpt, never unfiltered executable output (parent AC10).
-- [ ] AC13: One malformed installed entry yields a bounded diagnostic and suppresses no unrelated CLI-app package (parent AC3; runtime-adapters AC12).
-- [ ] AC14: Installed state format, generated Skill paths, `@name` mentions, chat attachments, `run_cli_app`, and Apps Settings catalog browsing are unchanged, and no app changed state as a side effect (parent AC12; runtime-adapters AC11).
-- [ ] AC15: Focused and full Python tests, Ruff, strict BasedPyright, WebUI tests, the production build, and Apps Settings smoke pass (parent AC12; runtime-adapters AC13).
+- [x] AC1: Every app in durable installed state appears exactly once as a `CLI_APP` package owning its executable component and, when present, its generated Skill component (parent AC1; runtime-adapters AC8).
+- [x] AC2: An installed CLI app no longer produces a second `ext:agent_plugin:cli-app-*` package, while a `cli-app-*` directory without manager ownership metadata remains an ordinary Agent Plugin (parent AC1; runtime-adapters AC8).
+- [x] AC3: Skill precedence, plugin enablement markers, filesystem plugin-Skill authorization, and prompt assembly are unchanged by the exclusion rule (parent AC12).
+- [x] AC4: Catalog candidates, catalog cache state, and network refresh have no effect on the canonical installed inventory (runtime-adapters AC8).
+- [x] AC5: CLI-app packages report operator-trusted, child-process, `isolated: false` with self-declared unenforced permissions, and their generated Skill components report data execution (parent AC7).
+- [x] AC6: An installed app whose entry point is unresolvable reports unavailable or failed, never enabled (parent AC5).
+- [x] AC7: No descriptor, revision, diagnostic, or action result contains `entry_point_path`, a resolved executable location, any absolute host path, argv, or a raw command line (parent AC10; runtime-adapters AC5).
+- [x] AC8: Update, uninstall, and test dispatch only through the canonical adapter to `CliAppManager`, each existing owner is called at most once, and catalog install remains on its existing workflow (runtime-adapters AC9).
+- [x] AC9: Non-admin actor, stale revision, missing acknowledgement, unknown target, and unsupported action each fail before any package-manager or executable invocation (parent AC5, AC9; runtime-adapters AC10).
+- [x] AC10: A failing install, update, uninstall, or test returns a bounded safe reason with no raw package-manager output, and the full output is present only in server logs (parent AC10).
+- [x] AC11: Uninstall that leaves the entry point resolvable reports a truthful partial outcome without interpolating a host path and without fabricating a rollback (parent AC6, AC10).
+- [x] AC12: Test reports exit status with a bounded redacted excerpt or no excerpt, never unfiltered executable output (parent AC10).
+- [x] AC13: One malformed installed entry yields a bounded diagnostic and suppresses no unrelated CLI-app package (parent AC3; runtime-adapters AC12).
+- [x] AC14: Installed state format, generated Skill paths, `@name` mentions, chat attachments, `run_cli_app`, and Apps Settings catalog browsing are unchanged, and no app changed state as a side effect (parent AC12; runtime-adapters AC11).
+- [x] AC15: Focused and full Python tests, Ruff, strict BasedPyright, WebUI tests, the production build, and Apps Settings smoke pass (parent AC12; runtime-adapters AC13).
+
+## Verification status (2026-09-04)
+
+All fifteen met. Checked independently of the implementer:
+
+- The three previously unused enum members now each have exactly one producer. The
+  contract's dead vocabulary drops from five to two, and both survivors are transient
+  lifecycles no adapter emits — recorded for deletion in the cutover task.
+- **AC14 is met by inheritance, and the inheritance was verified rather than assumed.**
+  The claim is that mention, attachment, and `run_cli_app` paths still work because they
+  were not touched; a diff of the commit over `nanobot/apps/cli/service.py` matches
+  nothing in those paths. The changes there are display-name bounding, the entry-point
+  pattern, and package-manager failure messages.
+- **AC15** was reported partial because the implementer was told not to run the full
+  suite. It was run here: 7513 Python, 1219 WebUI, ruff, strict BasedPyright, and the
+  production build all pass.
+
+### Two deviations, both deliberate
+
+**R2's mechanism is unmet by design.** It asked for exclusion based on durable ownership
+metadata in the generated manifest, explicitly not a name-prefix match. The exclusion is
+neither: it reads the manager's durable inventory. Writing the metadata was rejected
+because `plugin.json` is inside the enablement fingerprint
+(`nanobot/agent/plugins.py:165-177` rglobs and hashes every file), so recording ownership
+there perturbs a value whose failure mode is a Skill that silently stops loading. The
+implementer showed the end-to-end path happens to survive today —
+`_record_installed` re-enables immediately after `install_skill` — which makes the write
+harmless *and* pointless, since the inventory already answers the question. AC2's
+observable outcome is fully met, and a test asserts the fingerprint is unperturbed.
+
+**The test action does not require acknowledgement.** The adapter originally demanded it
+for `RELOAD`. That is stricter than the contract — `registry.py` gates only `ENABLE` and
+`INSTALL`, and parent AC8 scopes acknowledgement to enabling or installing executable
+code. A test probes an entry point that is already installed and that the agent already
+runs unprompted through `run_cli_app`. It was also inert: the control plane prompts for
+`ENABLE` and `INSTALL` only, so every test an operator could press would have been
+refused. Replaced with a positive test that records the reasoning, so it is not
+re-added by someone reading the gate as missing.
 
 ## Out of Scope
 
