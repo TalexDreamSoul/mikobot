@@ -104,20 +104,73 @@ not "reserved for later", it is a claim the contract cannot back.
 
 ## Acceptance Criteria
 
-- [ ] AC1: `nanobot/webui/nanobot_features_api.py` no longer contains a canonical-to-legacy projection, and no caller depends on the legacy `features[]` shape (parent AC11, AC12).
-- [ ] AC2: `nanobot/webui/mcp_presets_api.py` no longer injects Agent Plugin rows in either the payload path or the action path, and `installed_count` reflects only configured MCP servers (parent AC11).
-- [ ] AC3: The four-value legacy status vocabulary and the duplicated loose client extension-field declaration are deleted; consumers read one closed canonical contract (parent AC11).
-- [ ] AC4: Each migrated family exposes exactly one lifecycle mutation path, and every duplicate control has been removed from its family page while configuration, catalog, connector, pairing, and OAuth workflows still function (parent AC11).
-- [ ] AC5: Channel-owned WebUI modules, Feishu and Weixin panels, generic channel forms, and their translations remain intact and passing (parent AC12).
-- [ ] AC6: One composed snapshot across every family contains no duplicate or cross-owned package or component ID, and IDs are stable across restart for unchanged extensions (parent AC1, AC4).
-- [ ] AC7: Registration, reload, and unregistration are idempotent with no duplicate rows in any family (parent AC4).
-- [ ] AC8: Every global extension mutation rejects non-admin actors before side effects, and missing identity fails closed (parent AC9).
-- [ ] AC9: No surviving payload, diagnostic, or action result exposes a secret, environment value, absolute host path, raw command line, or unbounded traceback (parent AC10).
-- [ ] AC10: Hot-reload families hot reload, restart-bound families report restart-required, and a failed reload after a successful authoritative mutation reports the truthful state rather than success (parent AC6).
-- [ ] AC11: A failing adapter rejects only its own snapshot with one bounded diagnostic while unrelated packages stay listed and actionable (parent AC3).
-- [ ] AC12: The final diff contains no permanent compatibility alias, dual mutation path, or orphaned route, and no extension changed state as a result of the cutover (parent AC12).
-- [ ] AC13: Existing Agent Plugins, custom MCP servers, tool entry points, channel manifests and configuration, provider selection, hooks, Skill precedence, CLI apps, and optional features preserve observable runtime behavior (parent AC12).
-- [ ] AC14: Full backend and frontend suites, Ruff, strict BasedPyright, ESLint, production build, and desktop and mobile browser smoke pass (parent AC12).
+- [x] AC1: `nanobot/webui/nanobot_features_api.py` no longer contains a canonical-to-legacy projection, and no caller depends on the legacy `features[]` shape (parent AC11, AC12).
+- [x] AC2: `nanobot/webui/mcp_presets_api.py` no longer injects Agent Plugin rows in either the payload path or the action path, and `installed_count` reflects only configured MCP servers (parent AC11).
+- [x] AC3: The four-value legacy status vocabulary and the duplicated loose client extension-field declaration are deleted; consumers read one closed canonical contract (parent AC11).
+- [x] AC4: Each migrated family exposes exactly one lifecycle mutation path, and every duplicate control has been removed from its family page while configuration, catalog, connector, pairing, and OAuth workflows still function (parent AC11).
+- [x] AC5: Channel-owned WebUI modules, Feishu and Weixin panels, generic channel forms, and their translations remain intact and passing (parent AC12).
+- [x] AC6: One composed snapshot across every family contains no duplicate or cross-owned package or component ID, and IDs are stable across restart for unchanged extensions (parent AC1, AC4).
+- [x] AC7: Registration, reload, and unregistration are idempotent with no duplicate rows in any family (parent AC4).
+- [x] AC8: Every global extension mutation rejects non-admin actors before side effects, and missing identity fails closed (parent AC9).
+- [x] AC9: No surviving payload, diagnostic, or action result exposes a secret, environment value, absolute host path, raw command line, or unbounded traceback (parent AC10).
+- [x] AC10: Hot-reload families hot reload, restart-bound families report restart-required, and a failed reload after a successful authoritative mutation reports the truthful state rather than success (parent AC6).
+- [x] AC11: A failing adapter rejects only its own snapshot with one bounded diagnostic while unrelated packages stay listed and actionable (parent AC3).
+- [x] AC12: The final diff contains no permanent compatibility alias, dual mutation path, or orphaned route, and no extension changed state as a result of the cutover (parent AC12).
+- [x] AC13: Existing Agent Plugins, custom MCP servers, tool entry points, channel manifests and configuration, provider selection, hooks, Skill precedence, CLI apps, and optional features preserve observable runtime behavior (parent AC12).
+- [x] AC14: Full backend and frontend suites, Ruff, strict BasedPyright, ESLint, production build, and desktop and mobile browser smoke pass (parent AC12).
+
+## Verification status (2026-09-04)
+
+### R2 landed as one dispatcher, not one route
+
+The requirement asked that each family keep exactly one lifecycle mutation path, and the
+plan was to reroute the family switches through the extension action. That is not a call
+-site swap: the two routes gate differently and the difference is deliberate.
+`ws_http.py` raises only `system_admin` for a member acting on a channel instance they
+claimed, never `host_admin`, so rerouting would refuse that member, and widening the host
+route to `system_admin` would let anyone who claimed one instance act on every target.
+The second cannot be re-scoped from the target id, because `canonical_extension_name`
+hashes non-conforming names one way, so the raw channel and instance a per-instance check
+needs are unrecoverable.
+
+Both entries already funnel into `ExtensionRegistry.execute`, which is the sole validator
+and sole adapter dispatcher. The genuine duplicate was a third path — Agent Plugin
+dispatching through the MCP preset route — and that is deleted. Acceptance is therefore
+"one dispatcher with declared surfaces", pinned by an AST guard over the four production
+construction sites, rather than "one route".
+
+### The dead-vocabulary table in this PRD was stale, and is now a property
+
+It listed five members. By the time this task ran, three had gained producers from the
+CLI app adapter, so only two were dead. Counting by hand produced a number that aged
+badly within a day. `test_every_contract_vocabulary_member_has_a_producer` asserts the
+property across all six enums instead, so nobody re-counts. Adding a producer-less member
+reddens it — verified by injecting one.
+
+### The legacy vocabulary was hiding a live defect
+
+It mapped `ENABLED` to `"enabled"` while every consumer compares
+`runtime_status === "running"`, so a running channel instance rendered as off. Both sides
+were green because each asserted against its own vocabulary. The replacement parses the
+TypeScript union and compares it against the Python output pointwise over all eight
+lifecycles; set equality alone would still have passed if two states swapped, which is
+the exact shape the defect had.
+
+### Two failures escaped the scoped verification
+
+The implementer was told to run `tests/webui/ tests/extensions/`, which is not what CI
+runs: `testpaths` also covers `nanobot/channels`, where two assertions still read the
+deleted `status` key. This is the second time in this effort that scoping a test run
+below `testpaths` hid a real failure. Both were fixed and now read the canonical
+lifecycle.
+
+### A mutation check can report a false result in either direction
+
+Restoring a mutant whose file size is unchanged can leave stale bytecode in
+`__pycache__`, so the suite runs the mutant while the source reads correct. Separately, a
+mutation that fails to apply reads as "the test did not catch it". Both occurred during
+this task. A mutation result is only evidence once the mutant is shown to be live and the
+caches are cleared.
 
 ## Out of Scope
 
