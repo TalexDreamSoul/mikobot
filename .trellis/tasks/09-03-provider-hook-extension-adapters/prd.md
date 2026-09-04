@@ -133,20 +133,45 @@ Revisit only if SDK and embedder hooks must be inventoried without caller cooper
 
 ## Acceptance Criteria
 
-- [ ] AC1: Every provider family appears exactly once with only the capability components it implements, and no `ext:provider_registry:*` ID collides despite the complete LLM/image/transcription name overlap (parent AC1; runtime-adapters AC4).
-- [ ] AC2: Alias specs are grouped under their canonical family and the transcription-only spec contributes no LLM component (runtime-adapters AC4).
-- [ ] AC3: Provider inventory constructs no provider client, opens no connection, performs no network call, and imports no transcription or image adapter class (parent AC1).
-- [ ] AC4: No provider descriptor, revision, diagnostic, or action result contains an API key, key hint, endpoint, default endpoint, proxy, header, request override, selected model, OAuth identity or token, or absolute path (parent AC10; runtime-adapters AC5).
-- [ ] AC5: Provider matching order, model routing, presets and fallbacks, transcription aliases and default models, and image registration order are unchanged under test (parent AC12).
-- [ ] AC6: LLM reports next-turn refresh, transcription reports per-request resolution with no reload action, and only the selected enabled image provider declares reload, delegating exactly once (parent AC6; runtime-adapters AC6).
-- [ ] AC7: An image reload failure preserves the authoritative configuration and returns a truthful restart-required or failed result with no second owner and no invented rollback (parent AC6).
-- [ ] AC8: Every long-lived hook appears exactly once with a stable validated identity, operator-trusted in-process classification, `isolated: false`, `restart_required` lifecycle, and `INSPECT` as its only action (parent AC1, AC2, AC7; runtime-adapters AC7).
-- [ ] AC9: Duplicate hook identity fails visibly rather than merging rows, and per-turn, SDK-capture, API usage-capture, subagent, and progress hooks are absent from inventory (parent AC1).
-- [ ] AC10: Hook execution order, per-factory error isolation, ephemeral suppression, and the ephemeral opt-in are byte-for-byte unchanged, and `AgentLoop`/`AgentRunner` contain no registry, descriptor store, or adapter reference (parent design boundary; runtime-adapters AC7).
-- [ ] AC11: Every production composition site declares its long-lived hooks through the shared helper, and its inventory set equals its executed set (runtime-adapters AC7).
-- [ ] AC12: A malformed provider family or hook registration yields one bounded diagnostic and suppresses no unrelated package (parent AC3; runtime-adapters AC12).
-- [ ] AC13: Any mutating provider action rejects a non-admin actor before side effects, and provider OAuth remains a family-specific action (parent AC9).
-- [ ] AC14: Focused and full Python tests, Ruff, strict BasedPyright, WebUI tests, and the production build pass (parent AC12).
+- [x] AC1: Every provider family appears exactly once with only the capability components it implements, and no `ext:provider_registry:*` ID collides despite the complete LLM/image/transcription name overlap (parent AC1; runtime-adapters AC4).
+- [x] AC2: Alias specs are grouped under their canonical family and the transcription-only spec contributes no LLM component (runtime-adapters AC4).
+- [x] AC3: Provider inventory constructs no provider client, opens no connection, performs no network call, and imports no transcription or image adapter class (parent AC1).
+- [x] AC4: No provider descriptor, revision, diagnostic, or action result contains an API key, key hint, endpoint, default endpoint, proxy, header, request override, selected model, OAuth identity or token, or absolute path (parent AC10; runtime-adapters AC5).
+- [x] AC5: The projection changes no provider resolution. Registry and image-registration order are asserted identical before and after a snapshot, and the resolutions that order decides — keyword matching, model routing, presets and fallbacks, transcription aliases and default models, and the keywordless gateway-fallback branch — are pinned as literals (parent AC12).
+- [x] AC6: LLM reports next-turn refresh, transcription reports per-request resolution with no reload action, and only the selected enabled image provider declares reload, delegating exactly once (parent AC6; runtime-adapters AC6).
+- [x] AC7: An image reload failure preserves the authoritative configuration and returns a truthful restart-required or failed result with no second owner and no invented rollback (parent AC6).
+- [x] AC8: Every long-lived hook appears exactly once with a stable validated identity, operator-trusted in-process classification, `isolated: false`, `restart_required` lifecycle, and `INSPECT` as its only action (parent AC1, AC2, AC7; runtime-adapters AC7).
+- [x] AC9: Duplicate hook identity fails visibly rather than merging rows, and per-turn, SDK-capture, API usage-capture, subagent, and progress hooks are absent from inventory (parent AC1).
+- [x] AC10: Hook execution order, per-factory error isolation, ephemeral suppression, and the ephemeral opt-in are byte-for-byte unchanged, and `AgentLoop`/`AgentRunner` contain no registry, descriptor store, or adapter reference (parent design boundary; runtime-adapters AC7).
+- [x] AC11: Every production composition site declares its long-lived hooks through the shared helper, and its inventory set equals its executed set (runtime-adapters AC7).
+- [x] AC12: A malformed provider family yields one bounded local diagnostic and suppresses no unrelated package. A malformed hook identity has a different source — a programming error at one of the four first-party composition sites — so it fails loudly at composition time instead of degrading to a diagnostic: a hook inventory that boots silently incomplete defeats the only purpose it has, which is letting an operator see what in-process code is running. Where such a bundle still reaches snapshot time by bypassing the shared helper, registry isolation contains it: the hook adapter contributes one `adapter_snapshot_failed` and zero packages while every other adapter's packages are untouched (parent AC3; runtime-adapters AC12).
+- [x] AC13: Any mutating provider action rejects a non-admin actor before side effects, and provider OAuth remains a family-specific action (parent AC9).
+- [x] AC14: Focused and full Python tests, Ruff, strict BasedPyright, WebUI tests, and the production build pass (parent AC12).
+
+## Verification status (2026-09-04)
+
+All fourteen closed. Six were checked independently of the implementer rather than taken
+from its report:
+
+- **AC1** — 45 packages / 44 LLM / 11 image / 7 transcription components, all IDs unique.
+- **AC3** — `sys.modules` monitored across a snapshot: no boto3, openai, anthropic, or
+  lark_oapi loaded. Metadata rendering imports no optional SDK.
+- **AC4** — a planted `sk-…` key in the loaded config appears nowhere in the 26,113
+  characters of descriptor output.
+- **AC11** — mutated both ways: one site passing a raw list, and a fifth site added. Each
+  reddens a precisely named test.
+- **AC12** — removing the registry's adapter isolation reddens exactly the residual-path
+  test, so "the other seven adapters survive" is asserted rather than assumed.
+- **AC14** — full gates green.
+
+Two AC texts were amended rather than marked against wording the implementation
+deliberately does not satisfy. AC5 originally demanded the matching order be pinned; a
+literal 46-name sequence would redden on every legitimate provider addition, which buys
+protection against unrelated reordering at a maintenance cost that usually ends with
+someone deleting the assertion. The text now describes what is actually guaranteed:
+order is unchanged *by the projection*, and the resolutions order decides are pinned by
+behaviour. AC12 originally required a diagnostic for both halves; the two failure sources
+differ, and the text now says so instead of reading as an exemption.
 
 ## Out of Scope
 
