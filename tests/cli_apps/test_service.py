@@ -845,7 +845,11 @@ def test_uninstall_keeps_state_when_recorded_entry_point_still_exists(
     payload = manager.uninstall("gimp")
 
     assert payload["last_action"]["ok"] is False
-    assert str(resolved) in payload["last_action"]["message"]
+    message = payload["last_action"]["message"]
+    assert "its recorded entry point still exists" in message
+    # The recorded location is a host filesystem path in a 200 response body.
+    assert str(resolved) not in message
+    assert str(tmp_path) not in message
     assert "gimp" in json.loads(manager.installed_path.read_text(encoding="utf-8"))["apps"]
 
 

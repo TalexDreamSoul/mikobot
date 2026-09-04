@@ -23,6 +23,7 @@ from loguru import logger
 from nanobot.agent.skills import parse_skill_metadata, valid_skill_metadata
 from nanobot.apps.protocol import app_manifest, compact_dict
 from nanobot.config.paths import get_runtime_subdir
+from nanobot.extensions.contracts import safe_extension_message
 from nanobot.security.workspace_policy import is_path_within
 
 CLI_ANYTHING_REGISTRY_URL = "https://hkuds.github.io/CLI-Anything/registry.json"
@@ -38,13 +39,22 @@ _CATALOG_SOURCES = (
 )
 
 _MAX_TOOL_OUTPUT_CHARS = 12_000
+_MAX_DISPLAY_NAME_CHARS = 120
 _MAX_ARTIFACT_SCAN_PATHS = 4_000
 _MAX_ARTIFACT_REPORT = 12
 _SAFE_NAME_RE = re.compile(r"[^a-z0-9_-]+")
 _SAFE_NPM_DIR_RE = re.compile(r"^[a-z0-9._-]+$", re.IGNORECASE)
+# A real entry point is a bare command name resolved through PATH. Anything else --
+# most importantly an absolute path -- is never echoed back to an operator surface.
+_ENTRY_POINT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 _MENTION_RE = re.compile(r"(^|[\s([{])@([a-z0-9_-]+)\b", re.IGNORECASE)
 _SHELL_META_CHARS = ("|", "&&", "||", ";", "$(", "`", ">", "<")
 _ENDORSEMENT_WORD_RE = re.compile(r"\bofficial\s+", re.IGNORECASE)
+_PACKAGE_MANAGER_ACTIONS = {
+    "install": "Installing",
+    "update": "Updating",
+    "uninstall": "Uninstalling",
+}
 _ARTIFACT_EXTENSIONS = frozenset({
     ".csv",
     ".drawio",
@@ -408,6 +418,22 @@ def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT_CHARS) -> str:
     return text[:limit] + f"\n\n... truncated {omitted} characters ..."
 
 
+def _entry_point_label(value: str) -> str:
+    """Render an entry point for an operator only when it is a bare command name.
+
+    Catalog and durable-state values are not trusted to be command names, and an
+    entry point that resolved to an absolute location would otherwise be echoed
+    into a response body by every message that names it.
+    """
+    return value if _ENTRY_POINT_RE.fullmatch(value) else "the recorded entry point"
+
+
+def _display_label(app: dict[str, Any]) -> str:
+    """Return a bounded display name for messages built from catalog-supplied text."""
+    label = str(app.get("display_name") or app.get("name") or "this CLI app").strip()
+    return (label or "this CLI app")[:_MAX_DISPLAY_NAME_CHARS]
+
+
 def _catalog_description(app: dict[str, Any]) -> str:
     """Return catalog copy without implying vendor endorsement."""
     description = str(app.get("description") or "")
@@ -459,6 +485,37 @@ class CliAppManager:
     def installed_names(self) -> list[str]:
         """Return registry names explicitly installed through CLI Apps."""
         return sorted(str(name) for name in self._load_installed())
+
+    def installed_entries(self) -> dict[str, Any]:
+        """Return durable installed state without consulting the catalog or the network.
+
+        This is the inventory source for the canonical extension projection: a cold
+        catalog cache or an offline host must not make an installed app disappear.
+        Entries are returned as recorded, so a malformed one stays visible to its
+        reader instead of being silently dropped here.
+        """
+        return dict(self._load_installed())
+
+    def generated_skill_name(self, name: str) -> str:
+        """Return the Skill identity generated for one installed app."""
+        return _skill_name(name)
+
+    def skill_installed(self, name: str) -> bool:
+        """Report whether an app's generated Skill file exists, without reading it."""
+        return (self.workspace / cli_app_skill_relative_path(self.workspace, name)).is_file()
+
+    def managed_plugin_names(self) -> frozenset[str]:
+        """Return the Agent Plugin roots this manager owns.
+
+        Durable installed state names exactly one generated root per installed app,
+        which is the rule that covers installations created before manifests carried
+        an ownership marker: no operator migration step is needed, and a directory
+        whose name merely looks generated is not adopted unless an app of that name
+        is actually installed.
+        """
+        return frozenset(
+            _skill_name(str(name)) for name in self._load_installed() if str(name).strip()
+        )
 
     def installed_skill_aliases(self) -> dict[str, str]:
         """Map pre-plugin CLI App skill names to their portable identities."""
@@ -702,7 +759,7 @@ class CliAppManager:
             "status": status,
             "logo_url": logo_url,
             "brand_color": brand_color,
-            "skill_installed": (self.workspace / cli_app_skill_relative_path(self.workspace, name)).is_file(),
+            "skill_installed": self.skill_installed(name),
             "manifest": self._manifest_payload(app, logo_url=logo_url, brand_color=brand_color),
         }
 
@@ -1037,6 +1094,35 @@ class CliAppManager:
             logger.info("CLI Apps command output:\n{}", _truncate(output, 4000))
         return result
 
+    def _package_manager_failure(
+        self,
+        app: dict[str, Any],
+        action: str,
+        result: subprocess.CompletedProcess[str],
+    ) -> CliAppError:
+        """Log the package manager's own output and return a bounded, safe reason.
+
+        The raw output is the operator's real diagnostic, but it is also where a
+        package manager echoes absolute install prefixes and index URLs carrying
+        credentials (``https://user:token@pypi.internal/simple``). It stays in the
+        server log, where the existing logging policy already keeps it, and never
+        reaches a response body.
+        """
+        output = (result.stderr or result.stdout or "").strip()
+        logger.error(
+            "CLI Apps: {} failed for '{}' with exit code {}:\n{}",
+            action,
+            app.get("name"),
+            result.returncode,
+            _truncate(output) or "<no output>",
+        )
+        return CliAppError(
+            f"{_PACKAGE_MANAGER_ACTIONS[action]} {_display_label(app)} failed: the "
+            f"{self._strategy(app)} package manager exited {result.returncode}. "
+            "The command output is in the nanobot server log.",
+            status=500,
+        )
+
     def _installed_entry(self, app: dict[str, Any]) -> dict[str, Any]:
         entry_point = str(app.get("entry_point") or "")
         strategy = self._strategy(app)
@@ -1142,6 +1228,10 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
         content = self._with_nanobot_skill_note(content, app)
         path.write_text(content, encoding="utf-8")
         plugin_root = path.parents[2]
+        # These bytes are inside the package fingerprint that binds Agent Plugin
+        # enablement, so nothing that is not already part of the plugin belongs
+        # here. Ownership of this root is published from durable installed state
+        # instead: see ``managed_plugin_names``.
         manifest = compact_dict({
             "$schema": AGENT_PLUGIN_SCHEMA,
             "name": _skill_name(str(app["name"])),
@@ -1184,7 +1274,7 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
             return self.payload() | {
                 "last_action": {
                     "ok": True,
-                    "message": f"CLI for {app['display_name']} is already available.",
+                    "message": f"CLI for {_display_label(app)} is already available.",
                     "installed": True,
                     "verification": ["entry_point_available", "state_recorded", "managed_paths_present"],
                 }
@@ -1196,7 +1286,7 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
                 return self.payload() | {
                     "last_action": {
                         "ok": True,
-                        "message": f"CLI for {app['display_name']} is available.",
+                        "message": f"CLI for {_display_label(app)} is available.",
                         "installed": True,
                         "verification": ["entry_point_available", "state_recorded"],
                     }
@@ -1209,12 +1299,12 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
         if strategy == "npm" and result.returncode != 0:
             result = self._retry_stale_npm_install(app, argv, result)
         if result.returncode != 0:
-            raise CliAppError(_truncate(result.stderr or result.stdout or "install failed"), status=500)
+            raise self._package_manager_failure(app, "install", result)
         self._record_installed(app)
         return self.payload() | {
             "last_action": {
                 "ok": True,
-                "message": f"Installed CLI for {app['display_name']}.",
+                "message": f"Installed CLI for {_display_label(app)}.",
                 "installed": True,
                 "verification": ["package_manager_ok", "state_recorded", "managed_paths_present"],
             }
@@ -1229,7 +1319,7 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
             return self.payload() | {
                 "last_action": {
                     "ok": True,
-                    "message": f"Checked {app['display_name']}.",
+                    "message": f"Checked {_display_label(app)}.",
                     "installed": True,
                     "verification": ["state_recorded"],
                 }
@@ -1238,12 +1328,12 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
         assert argv is not None
         result = self._run_argv(argv, timeout=self.runtime.install_timeout)
         if result.returncode != 0:
-            raise CliAppError(_truncate(result.stderr or result.stdout or "update failed"), status=500)
+            raise self._package_manager_failure(app, "update", result)
         self._record_installed(app)
         return self.payload() | {
             "last_action": {
                 "ok": True,
-                "message": f"Updated CLI for {app['display_name']}.",
+                "message": f"Updated CLI for {_display_label(app)}.",
                 "installed": True,
                 "verification": ["package_manager_ok", "state_recorded", "managed_paths_present"],
             }
@@ -1266,17 +1356,20 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
             assert argv is not None
             result = self._run_argv(argv, timeout=self.runtime.install_timeout)
             if result.returncode != 0:
-                raise CliAppError(_truncate(result.stderr or result.stdout or "uninstall failed"), status=500)
+                raise self._package_manager_failure(app, "uninstall", result)
             still_managed = bool(managed_entry_path and Path(managed_entry_path).exists())
             still_available = bool(entry_point and shutil.which(entry_point))
             if still_managed or (not managed_entry_path and still_available):
+                # The recorded location is deliberately not interpolated: this
+                # message is a 200 response body, and the path it would carry is a
+                # host filesystem location the browser has no reason to learn.
                 reason = (
-                    f"the recorded entry point at {managed_entry_path} still exists"
+                    "its recorded entry point still exists"
                     if still_managed
-                    else f"{entry_point} is still available on PATH"
+                    else f"{_entry_point_label(entry_point)} is still available on PATH"
                 )
                 message = (
-                    f"Uninstall for {app['display_name']} completed, but {reason}, "
+                    f"Uninstall for {_display_label(app)} completed, but {reason}, "
                     "so nanobot kept it installed."
                 )
                 return self.payload() | {
@@ -1295,16 +1388,17 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
         self.remove_skill(str(app["name"]))
         if strategy == "bundled" and still_available:
             message = (
-                f"Removed {app['display_name']} from nanobot. {entry_point} "
-                "is still available because it is managed outside nanobot."
+                f"Removed {_display_label(app)} from nanobot. "
+                f"{_entry_point_label(entry_point)} is still available because it is "
+                "managed outside nanobot."
             )
         elif still_available:
             message = (
-                f"Uninstalled CLI for {app['display_name']}, but another {entry_point} "
-                "is still available on PATH."
+                f"Uninstalled CLI for {_display_label(app)}, but another "
+                f"{_entry_point_label(entry_point)} is still available on PATH."
             )
         else:
-            message = f"Uninstalled CLI for {app['display_name']}."
+            message = f"Uninstalled CLI for {_display_label(app)}."
         return self.payload() | {
             "last_action": {
                 "ok": True,
@@ -1322,15 +1416,21 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
         entry = str(app.get("entry_point") or "")
         resolved = shutil.which(entry)
         if not entry or not resolved:
-            raise CliAppError(f"{entry or name} is not available on PATH")
+            raise CliAppError(f"{_entry_point_label(entry) if entry else name} is not available on PATH")
         result = self._run_argv([resolved, "--help"], timeout=min(self.runtime.run_timeout, 30))
         ok = result.returncode == 0
-        output = _truncate((result.stdout or result.stderr or "").strip(), 3000)
+        # The app is third-party executable code, so its own output is untrusted text
+        # on its way to a browser. ``safe_extension_message`` is the one canonical
+        # sanitizer in this codebase: it redacts credentials before it cuts, so a
+        # secret straddling the bound cannot be half-printed, and it strips host
+        # paths. The cost is that ``--help`` layout collapses to a single line.
+        raw_output = (result.stdout or result.stderr or "").strip()
         return self.payload() | {
             "last_action": {
                 "ok": ok,
-                "message": f"{entry} --help exited {result.returncode}",
-                "output": output,
+                "message": f"{_entry_point_label(entry)} --help exited {result.returncode}",
+                "exit_code": result.returncode,
+                "output": safe_extension_message(raw_output) if raw_output else "",
             }
         }
 

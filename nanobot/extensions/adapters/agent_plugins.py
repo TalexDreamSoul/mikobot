@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from nanobot.agent.plugins import AgentPlugin, discover_agent_plugins, set_agent_plugin_enabled
@@ -29,18 +30,52 @@ class AgentPluginExtensionAdapter:
 
     name = "agent-plugins"
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        owned_plugin_names: Callable[[], frozenset[str]] | None = None,
+    ) -> None:
         self._workspace = workspace
+        self._owned_plugin_names = owned_plugin_names
 
     def snapshot(self) -> ExtensionAdapterSnapshot:
         """Return every plugin's independent, marker-validated projection."""
         packages: list[ExtensionPackageDescriptor] = []
+        owned = self._owned_names()
         for plugin in discover_agent_plugins(self._workspace):
+            if self._managed_elsewhere(plugin, owned):
+                continue
             try:
                 packages.append(self._package(plugin))
             except Exception:
                 packages.append(self._failed_package(plugin))
         return ExtensionAdapterSnapshot(adapter_name=self.name, packages=tuple(packages))
+
+    def _owned_names(self) -> frozenset[str]:
+        if self._owned_plugin_names is None:
+            return frozenset()
+        try:
+            return frozenset(self._owned_plugin_names())
+        except Exception:
+            return frozenset()
+
+    @staticmethod
+    def _managed_elsewhere(plugin: AgentPlugin, owned: frozenset[str]) -> bool:
+        """Skip roots another manager generated; that manager publishes them itself.
+
+        A generated root is a real Agent Plugin, but it is not an independently
+        installed one, and listing it here would give one extension two packages an
+        operator could act on from unrelated pages.
+
+        Ownership comes from the generating manager's own durable inventory, which
+        names exactly one root per installed item. It is deliberately not a marker
+        inside the manifest: those bytes are part of the package fingerprint that
+        binds plugin enablement, so writing one would perturb a value whose failure
+        mode is a Skill that silently stops loading. It is equally not a name
+        prefix, which any operator can choose.
+        """
+        return plugin.name in owned
 
     async def execute(self, request: ExtensionActionRequest) -> ExtensionActionResult:
         """Mutate only the package's existing fingerprint-bound activation marker."""

@@ -132,6 +132,7 @@ def test_core_runtime_composes_exact_adapters_from_live_dependencies(
         "channels",
         "optional-features",
         "provider-registry",
+        "cli-apps",
     ]
     assert [component.name for component in packages[ExtensionSource.BUILTIN, "nanobot-tools"].components] == [
         "runtime_live",

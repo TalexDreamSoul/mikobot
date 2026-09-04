@@ -126,6 +126,7 @@ def test_runtime_registry_registers_core_adapters_and_keeps_config_only_channel_
         "channels",
         "optional-features",
         "provider-registry",
+        "cli-apps",
     ]
     assert [component.name for component in core_package.components] == ["composition-live"]
     assert _channel_component(snapshot).lifecycle is ExtensionLifecycle.DISABLED

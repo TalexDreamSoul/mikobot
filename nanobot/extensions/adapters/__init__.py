@@ -9,6 +9,7 @@ from nanobot.extensions.adapters.channels import (
     ChannelExtensionAdapter,
     ChannelExtensionServices,
 )
+from nanobot.extensions.adapters.cli_apps import CliAppExtensionAdapter, CliAppOwner
 from nanobot.extensions.adapters.common import canonical_extension_name, safe_extension_label
 from nanobot.extensions.adapters.hooks import (
     HookDeclaration,
@@ -36,6 +37,8 @@ __all__ = [
     "AgentPluginExtensionAdapter",
     "ChannelExtensionAdapter",
     "ChannelExtensionServices",
+    "CliAppExtensionAdapter",
+    "CliAppOwner",
     "ConfiguredMcpExtensionAdapter",
     "CoreToolsExtensionAdapter",
     "EffectiveSkillsExtensionAdapter",

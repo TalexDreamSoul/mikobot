@@ -11,6 +11,8 @@ from nanobot.extensions.adapters import (
     AgentPluginExtensionAdapter,
     ChannelExtensionAdapter,
     ChannelExtensionServices,
+    CliAppExtensionAdapter,
+    CliAppOwner,
     ConfiguredMcpExtensionAdapter,
     CoreToolsExtensionAdapter,
     EffectiveSkillsExtensionAdapter,
@@ -32,6 +34,25 @@ def runtime_skills_loader(runtime: object) -> SkillsLoader | None:
     return loader if isinstance(loader, SkillsLoader) else None
 
 
+def _default_cli_app_owner(config: Config) -> CliAppOwner:
+    """Build the CLI app manager lazily, at the first snapshot rather than at wiring.
+
+    Constructing one creates its runtime data directory, so deferring it keeps
+    building a registry free of filesystem side effects.
+    """
+    from nanobot.apps.cli import CliAppManager, CliAppsRuntimeConfig
+
+    cli_config = config.tools.cli_apps
+    return CliAppManager(
+        workspace=config.workspace_path,
+        runtime=CliAppsRuntimeConfig(
+            install_timeout=cli_config.install_timeout,
+            run_timeout=cli_config.run_timeout,
+            catalog_ttl_seconds=cli_config.catalog_ttl_seconds,
+        ),
+    )
+
+
 def build_core_extension_registry(
     config: Config,
     tools: ToolRegistry,
@@ -44,6 +65,7 @@ def build_core_extension_registry(
     optional_feature_services: OptionalFeatureExtensionServices | None = None,
     provider_oauth_status: OAuthStatusReader | None = None,
     provider_services: ProviderExtensionServices | None = None,
+    cli_app_owner: Callable[[], CliAppOwner] | None = None,
     hooks: LongLivedHooks | None = None,
 ) -> ExtensionRegistry:
     """Compose the current runtime's core extension inventory without global state."""
@@ -57,10 +79,25 @@ def build_core_extension_registry(
             return config
 
         config_loader = current_config_loader
+    if cli_app_owner is None:
+        def default_cli_app_owner() -> CliAppOwner:
+            return _default_cli_app_owner(config)
+
+        cli_app_owner = default_cli_app_owner
+
+    # One installed CLI app is one extension. The CLI app adapter owns its executable
+    # and its generated Skill, and tells the Agent Plugin adapter which generated
+    # roots it already publishes so that one app never becomes two packages.
+    cli_apps = CliAppExtensionAdapter(cli_app_owner)
 
     registry = ExtensionRegistry()
     registry.register(CoreToolsExtensionAdapter(tools))
-    registry.register(AgentPluginExtensionAdapter(config.workspace_path))
+    registry.register(
+        AgentPluginExtensionAdapter(
+            config.workspace_path,
+            owned_plugin_names=cli_apps.owned_plugin_names,
+        )
+    )
     registry.register(EffectiveSkillsExtensionAdapter(skills_loader))
     registry.register(
         ConfiguredMcpExtensionAdapter(
@@ -83,6 +120,7 @@ def build_core_extension_registry(
             services=provider_services,
         )
     )
+    registry.register(cli_apps)
     if hooks is not None:
         registry.register(HookExtensionAdapter(hooks))
     return registry

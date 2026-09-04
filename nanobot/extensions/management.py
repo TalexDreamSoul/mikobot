@@ -13,6 +13,8 @@ from nanobot.config.loader import load_config, save_config, set_config_path
 from nanobot.extensions.adapters import (
     ChannelExtensionAdapter,
     ChannelExtensionServices,
+    CliAppExtensionAdapter,
+    CliAppOwner,
     OptionalFeatureExtensionAdapter,
     OptionalFeatureExtensionServices,
 )
@@ -59,6 +61,26 @@ def build_management_extension_registry(config_path: Path) -> ExtensionRegistry:
         except Exception:
             logger.warning("Channel metadata refresh failed after enablement")
 
+    def load_current_cli_app_owner() -> CliAppOwner:
+        """Bind the CLI app manager to this config file, built at first use.
+
+        Unlike a channel runtime, a CLI app's state is entirely on disk and every
+        reader re-reads it per invocation, so a local action here needs no running
+        process and truthfully requires no restart.
+        """
+        from nanobot.apps.cli import CliAppManager, CliAppsRuntimeConfig
+
+        current = load_config(path)
+        cli_config = current.tools.cli_apps
+        return CliAppManager(
+            workspace=current.workspace_path,
+            runtime=CliAppsRuntimeConfig(
+                install_timeout=cli_config.install_timeout,
+                run_timeout=cli_config.run_timeout,
+                catalog_ttl_seconds=cli_config.catalog_ttl_seconds,
+            ),
+        )
+
     registry = ExtensionRegistry()
     registry.register(
         ChannelExtensionAdapter(
@@ -71,6 +93,7 @@ def build_management_extension_registry(config_path: Path) -> ExtensionRegistry:
         )
     )
     registry.register(OptionalFeatureExtensionAdapter(services=OptionalFeatureExtensionServices()))
+    registry.register(CliAppExtensionAdapter(load_current_cli_app_owner))
     return registry
 
 
