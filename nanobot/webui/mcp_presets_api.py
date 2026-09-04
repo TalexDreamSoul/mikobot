@@ -26,14 +26,6 @@ from nanobot.config.loader import load_config, resolve_config_env_vars, save_con
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.config.schema import MCPServerConfig
 from nanobot.extensions import (
-    ExtensionAction,
-    ExtensionActionContext,
-    ExtensionActionRequest,
-    ExtensionPackageDescriptor,
-    ExtensionRegistry,
-    ExtensionSnapshot,
-    ExtensionSource,
-    requires_risk_acknowledgement,
     safe_extension_message,
 )
 from nanobot.utils.helpers import ensure_dir
@@ -917,78 +909,12 @@ def _custom_payload(
     }
 
 
-def _agent_plugin_payload(package: ExtensionPackageDescriptor) -> dict[str, Any]:
-    """Project one canonical Agent Plugin package into the legacy MCP row shape."""
-    lifecycle = package.lifecycle.value
-    enabled = lifecycle == "enabled"
-    return {
-        "name": package.id,
-        "display_name": package.display_name,
-        "category": "agent-plugin",
-        "description": package.description or "Agent Plugin",
-        "docs_url": "",
-        "transport": "stdio",
-        "requires": ", ".join(package.permissions),
-        "note": "",
-        "install_supported": False,
-        "installed": True,
-        "configured": True,
-        "enabled": enabled,
-        "available": enabled,
-        "status": "enabled" if enabled else "disabled",
-        "logo_url": None,
-        "brand_color": "#64748B",
-        "required_fields": [],
-        "connection_summary": ", ".join(
-            component.display_name
-            for component in package.components
-            if component.kind.value == "mcp_server"
-        ),
-        "source": "agent-plugin",
-        "extension_id": package.id,
-        "extension_revision": package.revision,
-        "extension_lifecycle": lifecycle,
-        "extension_trust": package.trust.value,
-        "extension_execution": package.execution.value,
-        "risk_acknowledgement_required": requires_risk_acknowledgement(package),
-        "permissions_enforced": package.permissions_enforced,
-    }
-
-def _with_agent_plugin_rows(
-    payload: dict[str, Any],
-    snapshot: ExtensionSnapshot | None,
-) -> dict[str, Any]:
-    if snapshot is None:
-        return payload
-    raw_rows = payload.get("presets")
-    rows = cast(list[dict[str, Any]], raw_rows) if isinstance(raw_rows, list) else []
-    existing_plugin_rows = [row for row in rows if row.get("source") == "agent-plugin"]
-    plugin_rows = [
-        _agent_plugin_payload(package)
-        for package in snapshot.packages
-        if package.source is ExtensionSource.AGENT_PLUGIN
-    ]
-    result = dict(payload)
-    result["presets"] = [
-        *(row for row in rows if row.get("source") != "agent-plugin"),
-        *plugin_rows,
-    ]
-    installed_count = payload.get("installed_count", 0)
-    base_count = installed_count if isinstance(installed_count, int) else 0
-    base_count -= sum(int(bool(row.get("enabled"))) for row in existing_plugin_rows)
-    result["installed_count"] = max(0, base_count) + sum(
-        int(bool(row.get("enabled"))) for row in plugin_rows
-    )
-    return result
-
-
 def mcp_presets_payload(
     *,
     last_action: dict[str, Any] | None = None,
     tool_preview: Mapping[str, list[str]] | None = None,
     runtime_status: Mapping[str, str] | None = None,
     config_path: Path | None = None,
-    extension_snapshot: ExtensionSnapshot | None = None,
 ) -> dict[str, Any]:
     config = load_config(config_path) if config_path is not None else load_config()
     known = _known_preset_names()
@@ -1002,15 +928,9 @@ def mcp_presets_payload(
         for name, cfg in sorted(config.tools.mcp_servers.items())
         if name not in known
     ]
-    plugin_rows = [
-        _agent_plugin_payload(package)
-        for package in (extension_snapshot.packages if extension_snapshot is not None else ())
-        if package.source is ExtensionSource.AGENT_PLUGIN
-    ]
     payload: dict[str, Any] = {
-        "presets": [*preset_rows, *custom_rows, *plugin_rows],
-        "installed_count": len(config.tools.mcp_servers)
-        + sum(int(row["enabled"]) for row in plugin_rows),
+        "presets": [*preset_rows, *custom_rows],
+        "installed_count": len(config.tools.mcp_servers),
     }
     if last_action is not None:
         payload["last_action"] = last_action
@@ -1713,72 +1633,23 @@ async def mcp_presets_settings_action(
     reload_mcp: McpReload | None = None,
     mcp_runtime_status: McpRuntimeStatus | None = None,
     config: WebUISettingsConfig | None = None,
-    extension_snapshot: ExtensionSnapshot | None = None,
-    extension_registry: ExtensionRegistry | None = None,
-    actor_user_id: str | None = None,
-    system_admin: bool = False,
 ) -> dict[str, Any]:
-    """Run a WebUI MCP preset action and hot-reload the agent when config changes."""
+    """Run a WebUI MCP preset action and hot-reload the agent when config changes.
+
+    Agent Plugin packages are not addressable here. They own Skills and stdio MCP
+    servers together, so their lifecycle belongs to the Agent Plugin adapter behind
+    `settings.extension.action`; routing them through the MCP catalog made this a
+    second owner of the same enable/disable.
+    """
     config_path = config.path if config is not None else None
     if action is None:
         return mcp_presets_payload(
             runtime_status=mcp_runtime_status() if mcp_runtime_status is not None else None,
             config_path=config_path,
-            extension_snapshot=extension_snapshot,
-        )
-
-    extension_id = (_query_first(query, "extension_id") or "").strip()
-    if extension_id:
-        if action not in {"enable", "disable"}:
-            raise McpPresetError("Agent Plugins support enable and disable actions only")
-        if extension_registry is None:
-            raise McpPresetError("extension registry is unavailable", status=503)
-        expected_revision = (_query_first(query, "expected_revision") or "").strip() or None
-        risk_acknowledged = (
-            (_query_first(query, "risk_acknowledged") or "").strip().lower() == "true"
-        )
-        result = await extension_registry.execute(
-            ExtensionActionRequest(
-                context=ExtensionActionContext(
-                    actor_id=actor_user_id or "",
-                    is_system_admin=system_admin,
-                ),
-                target_id=extension_id,
-                action=ExtensionAction(action),
-                expected_revision=expected_revision,
-                risk_acknowledged=risk_acknowledged,
-            )
-        )
-        extension_snapshot = extension_registry.snapshot()
-        package = next(
-            (item for item in extension_snapshot.packages if item.id == result.package_id),
-            None,
-        )
-        verb = "enabled" if action == "enable" else "disabled"
-        payload = mcp_presets_payload(
-            last_action={
-                "ok": result.ok,
-                "message": result.message
-                or f"{package.display_name if package is not None else 'Agent Plugin'} {verb}.",
-            },
-            config_path=config_path,
-            extension_snapshot=extension_snapshot,
-        )
-        if result.ok and reload_mcp is not None:
-            payload = attach_mcp_hot_reload_result(payload, await reload_mcp())
-        return attach_mcp_runtime_status(
-            payload,
-            mcp_runtime_status() if mcp_runtime_status is not None else None,
         )
 
     if action == "test":
         payload = await mcp_presets_test_action(query, config_path=config_path)
-        snapshot = (
-            extension_registry.snapshot()
-            if extension_registry is not None
-            else extension_snapshot
-        )
-        payload = _with_agent_plugin_rows(payload, snapshot)
         return attach_mcp_runtime_status(
             payload,
             mcp_runtime_status() if mcp_runtime_status is not None else None,
@@ -1801,12 +1672,6 @@ async def mcp_presets_settings_action(
         payload = await asyncio.to_thread(mcp_presets_action, action, query)
     if reload_mcp is not None:
         payload = attach_mcp_hot_reload_result(payload, await reload_mcp())
-    snapshot = (
-        extension_registry.snapshot()
-        if extension_registry is not None
-        else extension_snapshot
-    )
-    payload = _with_agent_plugin_rows(payload, snapshot)
     return attach_mcp_runtime_status(
         payload,
         mcp_runtime_status() if mcp_runtime_status is not None else None,

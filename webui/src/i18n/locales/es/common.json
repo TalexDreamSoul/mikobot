@@ -646,7 +646,6 @@
       "channelLabel": "Canal",
       "featureLabel": "Función",
       "filterAll": "Listo",
-      "filterPlugins": "Complementos",
       "filterCli": "Aplicaciones",
       "filterMcp": "MCP",
       "enabledSummary": "{{count}} listos",

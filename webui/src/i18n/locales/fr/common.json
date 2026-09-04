@@ -645,7 +645,6 @@
       "channelLabel": "Canal",
       "featureLabel": "Fonction",
       "filterAll": "Prêts",
-      "filterPlugins": "Extensions",
       "filterCli": "Applications",
       "filterMcp": "MCP",
       "enabledSummary": "{{count}} prêts",

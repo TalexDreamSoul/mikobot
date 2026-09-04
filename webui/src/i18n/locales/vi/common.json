@@ -645,7 +645,6 @@
       "channelLabel": "Kênh",
       "featureLabel": "Tính năng",
       "filterAll": "Sẵn sàng",
-      "filterPlugins": "Plugin",
       "filterCli": "Ứng dụng",
       "filterMcp": "MCP",
       "enabledSummary": "{{count}} sẵn sàng",

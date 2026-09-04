@@ -15,13 +15,18 @@ from nanobot.agent.tools.registry import ToolRegistrationMetadata, ToolRegistry
 from nanobot.channels.websocket.runtime import WebSocketConfig
 from nanobot.config.schema import Config, MCPServerConfig
 from nanobot.extensions.adapters import LongLivedHooks
+from nanobot.extensions.adapters.hooks import RegisteredHook
 from nanobot.extensions.contracts import (
     ExtensionAdapter,
+    ExtensionAdapterSnapshot,
+    ExtensionExecution,
     ExtensionLifecycle,
+    ExtensionPackageDescriptor,
     ExtensionSource,
+    ExtensionTrust,
     extension_package_id,
 )
-from nanobot.extensions.registry import ExtensionRegistry
+from nanobot.extensions.registry import ExtensionRegistry, ExtensionRegistryError
 from nanobot.extensions.runtime import build_core_extension_registry
 from nanobot.nanobot import Nanobot
 from nanobot.webui.gateway_services import build_gateway_services
@@ -243,3 +248,166 @@ def test_sdk_exposes_registry_built_after_default_tool_registration(
     assert hook_package.lifecycle is ExtensionLifecycle.RESTART_REQUIRED
     executed = [*bot._loop._extra_hooks, *bot._loop._hook_factories]
     assert len(executed) == len(hook_package.components)
+
+
+class _StartupHook:
+    """A startup-bound hook value; the adapter only needs a stable identity for it."""
+
+
+class _CountingAdapter:
+    """A minimal extra adapter used to observe registration/disposal idempotency."""
+
+    name = "extra-family"
+    package_id = extension_package_id(ExtensionSource.BUILTIN, "extra-family")
+
+    def snapshot(self) -> ExtensionAdapterSnapshot:
+        return ExtensionAdapterSnapshot(
+            adapter_name=self.name,
+            packages=(
+                ExtensionPackageDescriptor(
+                    id=self.package_id,
+                    name="extra-family",
+                    display_name="Extra Family",
+                    source=ExtensionSource.BUILTIN,
+                    trust=ExtensionTrust.FIRST_PARTY,
+                    execution=ExtensionExecution.IN_PROCESS,
+                    lifecycle=ExtensionLifecycle.ENABLED,
+                ),
+            ),
+        )
+
+    async def execute(self, request: object) -> object:
+        raise AssertionError("this adapter is never dispatched")
+
+
+def _populated_workspace(workspace: Path) -> None:
+    """Give every file-backed family at least one real member to own."""
+    plugin_root = workspace / "plugins" / "desktop"
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    (plugin_root / "plugin.json").write_text(
+        json.dumps({
+            "name": "desktop",
+            "description": "Control the desktop.",
+            "extensions": {"dev.nanobot": {"displayName": "Desktop Control"}},
+        }),
+        encoding="utf-8",
+    )
+    (plugin_root / "mcp.json").write_text(
+        json.dumps({
+            "mcpServers": {"desktop": {"type": "stdio", "command": "desktop-mcp"}}
+        }),
+        encoding="utf-8",
+    )
+    skill = workspace / "skills" / "meeting-notes" / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_text("meeting notes", encoding="utf-8")
+
+
+def _composed_registry(workspace: Path, tools: ToolRegistry) -> ExtensionRegistry:
+    config = _config(workspace)
+    configured = _config(workspace)
+    configured.tools.mcp_servers["runtime-mcp"] = MCPServerConfig(
+        type="stdio", command="runtime-mcp"
+    )
+    skill = workspace / "skills" / "meeting-notes" / "SKILL.md"
+    skills = _Skills([
+        {"name": "meeting-notes", "source": "workspace", "path": str(skill)},
+    ])
+    return build_core_extension_registry(
+        config,
+        tools,
+        skills_loader=skills,  # type: ignore[arg-type]
+        config_loader=lambda: configured,
+        hooks=LongLivedHooks(
+            composition="gateway",
+            declarations=(RegisteredHook(name="restart-bound", hook=_StartupHook()),),
+        ),
+    )
+
+
+def test_the_composed_snapshot_carries_no_duplicate_or_cross_owned_identity(
+    tmp_path: Path,
+) -> None:
+    """AC6: every family composed together still yields one owner per identity."""
+    _populated_workspace(tmp_path)
+    snapshot = _composed_registry(tmp_path, ToolRegistry()).snapshot()
+
+    package_ids = [package.id for package in snapshot.packages]
+    component_ids = [
+        component.id for package in snapshot.packages for component in package.components
+    ]
+    cross_owned = [
+        component.id
+        for package in snapshot.packages
+        for component in package.components
+        if component.package_id != package.id
+        or not component.id.startswith(f"{package.id}/")
+    ]
+
+    # A collision makes the registry drop the offending adapter into a diagnostic
+    # instead of raising, so an empty diagnostic list is part of the assertion.
+    assert [
+        diagnostic.code
+        for diagnostic in snapshot.diagnostics
+        if diagnostic.code == "adapter_snapshot_failed"
+    ] == []
+    assert len(package_ids) == len(set(package_ids))
+    assert len(component_ids) == len(set(component_ids))
+    assert cross_owned == []
+    # The composition is only meaningful if it actually spans families.
+    assert len({package.source for package in snapshot.packages}) >= 4
+
+
+def test_identities_are_stable_across_a_process_restart(tmp_path: Path) -> None:
+    """AC6: unchanged installed extensions keep their IDs and revisions across restarts."""
+    _populated_workspace(tmp_path)
+
+    def compose() -> dict[str, str | None]:
+        snapshot = _composed_registry(tmp_path, ToolRegistry()).snapshot()
+        rows: dict[str, str | None] = {}
+        for package in snapshot.packages:
+            rows[package.id] = package.revision
+            for component in package.components:
+                rows[component.id] = component.revision
+        return rows
+
+    first = compose()
+    second = compose()
+
+    assert first
+    assert first == second
+
+
+def test_repeated_registration_and_disposal_leaves_no_duplicate_rows(
+    tmp_path: Path,
+) -> None:
+    """AC7: register, re-snapshot, and unregister leave no duplicate row behind."""
+    _populated_workspace(tmp_path)
+    registry = _composed_registry(tmp_path, ToolRegistry())
+
+    def identities() -> list[str]:
+        snapshot = registry.snapshot()
+        return sorted(
+            [package.id for package in snapshot.packages]
+            + [
+                component.id
+                for package in snapshot.packages
+                for component in package.components
+            ]
+        )
+
+    baseline = identities()
+    assert identities() == baseline, "a second snapshot must not duplicate rows"
+
+    extra = _CountingAdapter()
+    dispose = registry.register(extra)
+    with_extra = identities()
+    with pytest.raises(ExtensionRegistryError):
+        registry.register(extra)
+
+    assert with_extra == sorted([*baseline, extra.package_id])
+    dispose()
+    assert identities() == baseline
+    # A second disposal of the same registration is a no-op, not a second removal.
+    dispose()
+    assert identities() == baseline

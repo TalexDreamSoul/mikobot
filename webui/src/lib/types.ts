@@ -1282,9 +1282,7 @@ export type NanobotExtensionLifecycle =
   | "enabling"
   | "enabled"
   | "reloading"
-  | "disabling"
   | "failed"
-  | "changed"
   | "restart_required";
 
 export type NanobotExtensionTrust =
@@ -1426,7 +1424,6 @@ export interface NanobotFeatureInfo extends NanobotExtensionDescriptor {
   instances?: NanobotChannelInstanceInfo[];
   installed: boolean;
   ready: boolean;
-  status: "enabled" | "missing_dependency" | "not_enabled" | string;
   install_supported: boolean;
   requires_restart: boolean;
 }
@@ -1460,7 +1457,14 @@ export interface NanobotChannelInstanceInfo extends NanobotExtensionDescriptor {
   configured_fields: string[];
 }
 
-export type ChannelRuntimeStatus = "running" | "starting" | "failed" | "stopped" | string;
+/**
+ * The channel runtime vocabulary, closed on purpose.
+ *
+ * It is produced by `channel_runtime_status` in `nanobot/webui/nanobot_features_api.py`
+ * and bound to that producer by a backend test, so a value can no longer be emitted
+ * that nothing here compares against.
+ */
+export type ChannelRuntimeStatus = "running" | "starting" | "failed" | "stopped";
 
 export interface NanobotFeaturesPayload {
   features: NanobotFeatureInfo[];
@@ -1575,13 +1579,6 @@ export interface McpPresetInfo {
   enabled_tools?: string[];
   source?: "preset" | "custom" | string;
   manifest?: AppManifest;
-  extension_id?: string;
-  extension_revision?: string | null;
-  extension_lifecycle?: string;
-  extension_trust?: string;
-  extension_execution?: string;
-  risk_acknowledgement_required?: boolean;
-  permissions_enforced?: boolean;
 }
 
 type McpOAuthFlowStatus =

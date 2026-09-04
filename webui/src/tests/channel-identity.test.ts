@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   channelIsRunning,
+  channelSearchText,
   channelSetup,
   channelStatusLabel,
   channelToggleChecked,
@@ -16,7 +17,6 @@ function feature(overrides: Partial<NanobotFeatureInfo>): NanobotFeatureInfo {
     enabled: false,
     installed: true,
     ready: false,
-    status: "not_enabled",
     install_supported: true,
     requires_restart: true,
     ...overrides,
@@ -142,5 +142,24 @@ describe("channel runtime state", () => {
     expect(channelIsRunning(unknown)).toBe(false);
     expect(channelToggleChecked(unknown)).toBe(false);
     expect(channelStatusLabel(unknown, tx)).toBe("Not running");
+  });
+});
+
+
+describe("channelSearchText", () => {
+  it("matches on the canonical lifecycle rather than a legacy status string", () => {
+    // The four-value legacy `status` was deleted at cutover. Search must find a row by
+    // the state the registry actually reported, including the states the old
+    // vocabulary could not express at all.
+    const restartBound = feature({
+      display_name: "Plugin Chat",
+      extension_lifecycle: "restart_required",
+    });
+
+    expect(channelSearchText(restartBound)).toContain("restart_required");
+    expect(channelSearchText(restartBound)).not.toContain("not_enabled");
+    expect(channelSearchText(feature({ extension_lifecycle: "disabled" }))).toContain(
+      "disabled",
+    );
   });
 });

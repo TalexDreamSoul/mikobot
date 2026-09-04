@@ -26,9 +26,7 @@ const LIFECYCLE_FALLBACKS: Record<NanobotExtensionLifecycle, string> = {
   enabling: "Enabling",
   enabled: "Enabled",
   reloading: "Reloading",
-  disabling: "Disabling",
   failed: "Failed",
-  changed: "Changed",
   restart_required: "Restart required",
 };
 

@@ -430,9 +430,7 @@
         "enabling": "Enabling",
         "enabled": "Enabled",
         "reloading": "Reloading",
-        "disabling": "Disabling",
         "failed": "Failed",
-        "changed": "Changed",
         "restart_required": "Restart required"
       },
       "trust": {
@@ -1052,10 +1050,6 @@
       "channelLabel": "Channel",
       "featureLabel": "Feature",
       "filterAll": "Ready",
-      "filterPlugins": "Plugins",
-      "agentPluginEnableTitle": "Enable {{name}}?",
-      "agentPluginEnableWarning": "This Agent Plugin is operator-trusted, unisolated executable code. It may access files, credentials, network, and other resources visible to the nanobot process. nanobot does not verify this plugin or make it safe.",
-      "agentPluginEnableConfirm": "Enable plugin",
       "filterCli": "Apps",
       "filterMcp": "MCP",
       "enabledSummary": "{{count}} ready",

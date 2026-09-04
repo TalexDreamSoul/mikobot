@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -301,7 +303,7 @@ def test_nanobot_features_payload_projects_canonical_truth_without_runtime_impor
             "running",
             "ready",
             "installed",
-            "status",
+            "runtime_status",
         )
     } == {
         "extension_id": relay_id,
@@ -318,7 +320,7 @@ def test_nanobot_features_payload_projects_canonical_truth_without_runtime_impor
         "running": True,
         "ready": True,
         "installed": True,
-        "status": "enabled",
+        "runtime_status": "running",
     }
     assert relay["instances"] == [
         {
@@ -329,7 +331,7 @@ def test_nanobot_features_payload_projects_canonical_truth_without_runtime_impor
             "extension_revision": "default-revision",
             "extension_actions": ["configure", "disable"],
             "extension_lifecycle": "enabled",
-            "runtime_status": "enabled",
+            "runtime_status": "running",
             "running": True,
         },
         {
@@ -362,7 +364,6 @@ def test_nanobot_features_payload_projects_canonical_truth_without_runtime_impor
         "ready": True,
         "running": True,
         "installed": True,
-        "status": "enabled",
     }
     assert rows["broken"] == {
         "name": "broken",
@@ -380,7 +381,6 @@ def test_nanobot_features_payload_projects_canonical_truth_without_runtime_impor
         "running": False,
         "ready": False,
         "runtime_status": "stopped",
-        "status": "missing_dependency",
         "enabled": False,
         "configured": False,
         "error": "Channel metadata could not be projected.",
@@ -397,4 +397,60 @@ def test_nanobot_features_payload_projects_canonical_truth_without_runtime_impor
     assert payload["last_action"] == {
         "target_id": office_id,
         "nested": {"result": "reconnect queued", "diagnostic": "<path>"},
+    }
+
+
+def _client_union_members(type_name: str) -> set[str]:
+    """Read one closed string union out of the client contract."""
+    source = (
+        Path(__file__).resolve().parents[2] / "webui" / "src" / "lib" / "types.ts"
+    ).read_text(encoding="utf-8")
+    match = re.search(
+        rf"^export type {type_name} =(.*?);$",
+        source,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"{type_name} is not declared in webui/src/lib/types.ts"
+    body = match.group(1)
+    assert "string" not in re.sub(r'"[^"]*"', "", body), (
+        f"{type_name} must stay closed; an open `| string` lets an unmatched value "
+        "through the way `runtime_status` did"
+    )
+    return set(re.findall(r'"([^"]+)"', body))
+
+
+def test_channel_runtime_status_matches_the_closed_client_vocabulary() -> None:
+    """AC3: one vocabulary on the wire, bound to the consumer that reads it.
+
+    The cutover replaced the ChannelManager states with the package lifecycle, so an
+    enabled channel reported `enabled` while every consumer compared `running`. Nothing
+    failed, because each side was tested against its own vocabulary. This binds them.
+    """
+    produced = {
+        feature_api.channel_runtime_status(lifecycle)
+        for lifecycle in ExtensionLifecycle
+    }
+
+    assert produced == set(feature_api.CHANNEL_RUNTIME_STATUSES)
+    assert produced == _client_union_members("ChannelRuntimeStatus")
+
+
+def test_an_enabled_channel_reports_running_to_the_surfaces_that_read_it() -> None:
+    """The regression itself: `enabled` is a lifecycle, `running` is the runtime state."""
+    # Exhaustive on purpose. Set equality alone would still pass if two lifecycles
+    # swapped their runtime states, which is exactly the shape of the bug this replaces.
+    assert {
+        lifecycle.name: feature_api.channel_runtime_status(lifecycle)
+        for lifecycle in ExtensionLifecycle
+    } == {
+        "DISCOVERED": "stopped",
+        "UNAVAILABLE": "stopped",
+        "DISABLED": "stopped",
+        "ENABLING": "starting",
+        "ENABLED": "running",
+        "RELOADING": "starting",
+        "FAILED": "failed",
+        # A restart-bound channel is genuinely not running. The canonical state travels
+        # beside it as `extension_lifecycle`, so nothing is lost by saying "stopped".
+        "RESTART_REQUIRED": "stopped",
     }

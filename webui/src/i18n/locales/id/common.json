@@ -645,7 +645,6 @@
       "channelLabel": "Kanal",
       "featureLabel": "Fitur",
       "filterAll": "Siap",
-      "filterPlugins": "Plugin",
       "filterCli": "Aplikasi",
       "filterMcp": "MCP",
       "enabledSummary": "{{count}} siap",

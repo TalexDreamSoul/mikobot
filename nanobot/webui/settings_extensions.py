@@ -8,7 +8,7 @@ builds a second registry, or imports a family runtime.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from nanobot.extensions.contracts import (
@@ -17,11 +17,13 @@ from nanobot.extensions.contracts import (
     ExtensionActionRequest,
     ExtensionActionResult,
     ExtensionComponentDescriptor,
+    ExtensionComponentKind,
     ExtensionConfigurationTarget,
     ExtensionDiagnostic,
     ExtensionPackageDescriptor,
     ExtensionSnapshot,
     requires_risk_acknowledgement,
+    safe_extension_message,
 )
 from nanobot.extensions.registry import ExtensionRegistry, ExtensionRegistryError
 from nanobot.webui.settings_contracts import SettingsRequest, SettingsRouteResult
@@ -36,6 +38,44 @@ _ACTIONS_BY_VALUE = {action.value: action for action in ExtensionAction}
 _ACKNOWLEDGEMENT_REQUIRED_STATUS = 428
 _ACTION_NOT_SUPPORTED_STATUS = 422
 _MAX_ACTION_VALUE_KEYS = 64
+# The actions after which a package's MCP servers can differ from the running set.
+# `inspect` and `configure` are excluded: neither changes what is mounted.
+_MCP_RECONCILING_ACTIONS = frozenset({
+    ExtensionAction.ENABLE,
+    ExtensionAction.DISABLE,
+    ExtensionAction.RELOAD,
+    ExtensionAction.RECONNECT,
+    ExtensionAction.INSTALL,
+    ExtensionAction.UNINSTALL,
+})
+
+McpReload = Callable[[], Awaitable[Mapping[str, object]]]
+
+
+def _with_mcp_reload_result(
+    payload: dict[str, Any],
+    result: Mapping[str, object],
+) -> dict[str, Any]:
+    """Attach a bounded reload outcome and let it own `requires_restart`.
+
+    The reload owner is the only thing that knows whether the running tools now match
+    the marker, so its verdict is reported verbatim rather than inferred from the
+    action having succeeded.
+    """
+    reload_payload: dict[str, Any] = {
+        "ok": bool(result.get("ok", False)),
+        "requires_restart": bool(result.get("requires_restart", False)),
+    }
+    message = safe_extension_message(result.get("message", ""))
+    if message != "Extension operation failed.":
+        reload_payload["message"] = message
+    updated = dict(payload)
+    updated["hot_reload"] = reload_payload
+    if reload_payload["requires_restart"]:
+        updated["requires_restart"] = True
+    if not reload_payload["ok"]:
+        updated["ok"] = False
+    return updated
 
 
 def _is_host_administrator(request: SettingsRequest) -> bool:
@@ -249,9 +289,15 @@ def action_result_payload(
 class ExtensionSettingsHandler:
     """Serve the canonical extension inventory and dispatch validated actions."""
 
-    def __init__(self, settings: WebUISettingsServices, logger: Any) -> None:
+    def __init__(
+        self,
+        settings: WebUISettingsServices,
+        logger: Any,
+        reload_mcp: McpReload | None = None,
+    ) -> None:
         self.settings = settings
         self.logger = logger
+        self._reload_mcp = reload_mcp
 
     async def handle(
         self,
@@ -319,16 +365,51 @@ class ExtensionSettingsHandler:
             self.logger.exception("failed to refresh the extension inventory")
             refreshed = None
         located = _locate(refreshed, result.package_id) if refreshed is not None else None
-        payload = action_result_payload(
-            result,
-            actor_id=actor_id,
-            package=located[0] if located is not None else None,
-        )
+        package = located[0] if located is not None else None
+        payload = action_result_payload(result, actor_id=actor_id, package=package)
+        payload = await self._reconcile_mcp_runtime(payload, result, package)
         return SettingsRouteResult.success(
             payload,
             decorate_restart=True,
-            restart_section="runtime" if result.lifecycle is not None else None,
+            restart_section=(
+                "runtime"
+                if result.lifecycle is not None or payload.get("requires_restart")
+                else None
+            ),
         )
+
+    async def _reconcile_mcp_runtime(
+        self,
+        payload: dict[str, Any],
+        result: ExtensionActionResult,
+        package: ExtensionPackageDescriptor | None,
+    ) -> dict[str, Any]:
+        """Hot reload MCP when the acted-on package publishes MCP servers.
+
+        An Agent Plugin owns Skills and stdio MCP servers together, and its adapter
+        only moves the activation marker; the running MCP tools are reconciled by the
+        existing hot-reload owner. Reporting the reload outcome here is what keeps a
+        marker write whose reload failed from being displayed as a live success.
+        """
+        if not result.ok or self._reload_mcp is None or package is None:
+            return payload
+        if not any(
+            component.kind is ExtensionComponentKind.MCP_SERVER
+            for component in package.components
+        ):
+            return payload
+        if result.action not in _MCP_RECONCILING_ACTIONS:
+            return payload
+        try:
+            reload_result = await self._reload_mcp()
+        except Exception:
+            self.logger.exception("failed to reconcile MCP after an extension action")
+            reload_result = {
+                "ok": False,
+                "message": "MCP hot reload failed. Restart nanobot to pick up changes.",
+                "requires_restart": True,
+            }
+        return _with_mcp_reload_result(payload, reload_result)
 
     @staticmethod
     def _reject_before_dispatch(

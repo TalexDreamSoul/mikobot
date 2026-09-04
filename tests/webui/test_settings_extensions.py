@@ -732,3 +732,266 @@ async def test_an_adapter_failure_during_dispatch_is_bounded_not_raw(
 
     assert status == 502
     assert "/Users/operator" not in body["error"]
+
+
+def _plugin_with_mcp_server(
+    *,
+    lifecycle: ExtensionLifecycle = ExtensionLifecycle.DISABLED,
+) -> ExtensionPackageDescriptor:
+    """An Agent Plugin that publishes an MCP server, so enabling it moves live tools."""
+    mcp_component_id = extension_component_id(
+        _PLUGIN_ID, ExtensionComponentKind.MCP_SERVER, "desktop"
+    )
+    return ExtensionPackageDescriptor(
+        id=_PLUGIN_ID,
+        name="desktop",
+        display_name="Desktop Automation",
+        source=ExtensionSource.AGENT_PLUGIN,
+        trust=ExtensionTrust.OPERATOR_TRUSTED,
+        execution=ExtensionExecution.CHILD_PROCESS,
+        lifecycle=lifecycle,
+        revision="plugin-r1",
+        isolated=False,
+        actions=frozenset({ExtensionAction.ENABLE, ExtensionAction.DISABLE}),
+        components=(
+            ExtensionComponentDescriptor(
+                id=mcp_component_id,
+                package_id=_PLUGIN_ID,
+                kind=ExtensionComponentKind.MCP_SERVER,
+                name="desktop",
+                display_name="Desktop MCP",
+                execution=ExtensionExecution.CHILD_PROCESS,
+                lifecycle=lifecycle,
+                revision="component-r1",
+            ),
+        ),
+    )
+
+
+def _reload_router(
+    tmp_path: Path,
+    adapter: object,
+    reload_mcp: Any,
+) -> WebUISettingsRouter:
+    return WebUISettingsRouter(
+        settings=WebUISettingsServices.create(
+            tmp_path / "config.json",
+            extension_registry=_registry(adapter),
+        ),
+        bus=SimpleNamespace(),
+        logger=SimpleNamespace(exception=lambda *_args: None),
+        check_api_token=lambda _request: True,
+        parse_query=lambda path: parse_qs(urlsplit(path).query),
+        json_response=http_json_response,
+        error_response=lambda status, message: http_json_response(
+            {"error": message},
+            status=status,
+        ),
+        runtime_surface="browser",
+        runtime_capabilities={},
+        mcp_reload=reload_mcp,
+    )
+
+
+def _enable_request() -> SimpleNamespace:
+    return _request(
+        _ACTION_PATH,
+        {
+            "target_id": _PLUGIN_ID,
+            "action": "enable",
+            "expected_revision": "plugin-r1",
+            "risk_acknowledged": True,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_enabling_a_plugin_that_publishes_mcp_servers_hot_reloads_once(
+    tmp_path: Path,
+) -> None:
+    """AC10: the Agent Plugin family still hot reloads now that the MCP route is gone.
+
+    The Agent Plugin adapter only moves the activation marker, so without this the
+    cutover would have quietly turned a hot-reloading family into a restart-required
+    one while still reporting success.
+    """
+    adapter = _RecordingAdapter("agent-plugins", _plugin_with_mcp_server())
+    reload_calls = 0
+
+    async def reload_mcp() -> dict[str, Any]:
+        nonlocal reload_calls
+        reload_calls += 1
+        return {"ok": True, "message": "MCP reloaded.", "requires_restart": False}
+
+    router = _reload_router(tmp_path, adapter, reload_mcp)
+
+    status, body = await _dispatch(router, _enable_request())
+
+    assert status == 200
+    assert reload_calls == 1
+    assert body["ok"] is True
+    assert body["hot_reload"] == {
+        "ok": True,
+        "requires_restart": False,
+        "message": "MCP reloaded.",
+    }
+    assert body.get("requires_restart") is not True
+
+
+@pytest.mark.asyncio
+async def test_a_failed_reload_after_a_successful_marker_write_is_reported_truthfully(
+    tmp_path: Path,
+) -> None:
+    """AC10: an authoritative mutation whose reload failed never reads as live success."""
+    adapter = _RecordingAdapter("agent-plugins", _plugin_with_mcp_server())
+
+    async def reload_mcp() -> dict[str, Any]:
+        return {
+            "ok": False,
+            "message": "MCP reload failed reading /Users/operator/.nanobot/mcp.log.",
+            "requires_restart": True,
+        }
+
+    router = _reload_router(tmp_path, adapter, reload_mcp)
+
+    status, body = await _dispatch(router, _enable_request())
+
+    assert status == 200
+    # The adapter succeeded, so the marker stands and the lifecycle is real; only the
+    # running toolset is behind, which is what `requires_restart` has to say.
+    assert body["lifecycle"] == "enabled"
+    assert body["ok"] is False
+    assert body["hot_reload"]["ok"] is False
+    assert body["requires_restart"] is True
+    assert "/Users/operator" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_a_raising_reload_owner_still_reports_restart_rather_than_success(
+    tmp_path: Path,
+) -> None:
+    """A reload owner that throws is the same truth as one that reports failure."""
+    adapter = _RecordingAdapter("agent-plugins", _plugin_with_mcp_server())
+
+    async def reload_mcp() -> dict[str, Any]:
+        raise RuntimeError("/Users/operator/.nanobot/mcp.sock is gone")
+
+    router = _reload_router(tmp_path, adapter, reload_mcp)
+
+    status, body = await _dispatch(router, _enable_request())
+
+    assert status == 200
+    assert body["ok"] is False
+    assert body["requires_restart"] is True
+    assert "/Users/operator" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_a_package_without_mcp_components_is_not_reloaded(
+    tmp_path: Path,
+) -> None:
+    """Only a package that publishes MCP servers may cost an MCP reload."""
+    adapter = _RecordingAdapter("agent-plugins", _executable_plugin())
+    reload_calls = 0
+
+    async def reload_mcp() -> dict[str, Any]:
+        nonlocal reload_calls
+        reload_calls += 1
+        return {"ok": True, "requires_restart": False}
+
+    router = _reload_router(tmp_path, adapter, reload_mcp)
+
+    status, body = await _dispatch(router, _enable_request())
+
+    assert status == 200
+    assert reload_calls == 0
+    assert "hot_reload" not in body
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_action_never_reaches_the_reload_owner(
+    tmp_path: Path,
+) -> None:
+    """A refusal costs no reload, so a stale revision cannot churn the MCP runtime."""
+    adapter = _RecordingAdapter("agent-plugins", _plugin_with_mcp_server())
+    reload_calls = 0
+
+    async def reload_mcp() -> dict[str, Any]:
+        nonlocal reload_calls
+        reload_calls += 1
+        return {"ok": True, "requires_restart": False}
+
+    router = _reload_router(tmp_path, adapter, reload_mcp)
+
+    status, _body = await _dispatch(
+        router,
+        _request(
+            _ACTION_PATH,
+            {
+                "target_id": _PLUGIN_ID,
+                "action": "enable",
+                "expected_revision": "plugin-r0",
+                "risk_acknowledged": True,
+            },
+        ),
+    )
+
+    assert status == 409
+    assert reload_calls == 0
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_reload_result_is_whitelisted_not_forwarded(tmp_path: Path) -> None:
+    """AC9: the reload owner's dict is a dynamic boundary, so only known keys survive.
+
+    The reload owner reports whatever it likes, including upstream error text and host
+    paths. `hot_reload` is a payload this cutover introduced, so its redaction is this
+    task's to prove rather than the reload owner's.
+    """
+    adapter = _RecordingAdapter("agent-plugins", _plugin_with_mcp_server())
+
+    async def reload_mcp() -> dict[str, Any]:
+        return {
+            "ok": True,
+            "requires_restart": False,
+            "message": "Reloaded.",
+            "error": "/Users/operator/.nanobot/mcp.log: token sk-live-secret",
+            "command": ["/usr/local/bin/desktop-mcp", "--token", "sk-live-secret"],
+            "env": {"PLUGIN_TOKEN": "sk-live-secret"},
+        }
+
+    router = _reload_router(tmp_path, adapter, reload_mcp)
+
+    status, body = await _dispatch(router, _enable_request())
+    serialized = json.dumps(body)
+
+    assert status == 200
+    assert set(body["hot_reload"]) == {"ok", "requires_restart", "message"}
+    for leaked in ("sk-live-secret", "/Users/operator", "/usr/local/bin", "PLUGIN_TOKEN"):
+        assert leaked not in serialized
+
+
+@pytest.mark.asyncio
+async def test_a_broken_adapter_leaves_an_unrelated_package_actionable_not_merely_listed(
+    tmp_path: Path,
+) -> None:
+    """AC11: isolation means the surviving row can still be acted on, not just rendered."""
+    healthy = _RecordingAdapter("agent-plugins", _executable_plugin())
+    router = _router(
+        config_path=tmp_path / "config.json",
+        registry=_registry(healthy, _BrokenAdapter()),
+    )
+
+    list_status, listing = await _dispatch(router, _request(_SNAPSHOT_PATH))
+    action_status, action = await _dispatch(router, _enable_request())
+
+    assert list_status == 200
+    assert [package["id"] for package in listing["packages"]] == [_PLUGIN_ID]
+    assert [diagnostic["owner_id"] for diagnostic in listing["diagnostics"]] == [
+        "broken-family"
+    ]
+    # The surviving package is still dispatchable while its neighbour is broken.
+    assert action_status == 200
+    assert action["ok"] is True
+    assert [request.target_id for request in healthy.calls] == [_PLUGIN_ID]

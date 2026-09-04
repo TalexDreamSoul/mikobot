@@ -645,7 +645,6 @@
       "channelLabel": "通訊管道",
       "featureLabel": "功能",
       "filterAll": "就緒",
-      "filterPlugins": "外掛程式",
       "filterCli": "應用程式",
       "filterMcp": "MCP",
       "enabledSummary": "{{count}} 個就緒",

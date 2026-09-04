@@ -236,7 +236,9 @@ export function channelSearchText(
     channelDisplayName(feature),
     feature.display_name,
     feature.name,
-    feature.status,
+    // The canonical lifecycle, not the deleted legacy status string. Searching for
+    // "disabled" or "restart_required" now matches the value the registry reported.
+    feature.extension_lifecycle,
     t ? channelDescription(feature, t) : undefined,
     t ? channelRequirements(feature, t) : undefined,
   ]

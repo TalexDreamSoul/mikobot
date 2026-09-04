@@ -659,7 +659,6 @@
       "channelLabel": "Canal",
       "featureLabel": "Recurso",
       "filterAll": "Prontos",
-      "filterPlugins": "Complementos",
       "filterCli": "Aplicativos",
       "filterMcp": "MCP",
       "enabledSummary": "{{count}} prontos",

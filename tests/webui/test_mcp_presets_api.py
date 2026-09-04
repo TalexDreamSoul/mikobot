@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from nanobot.agent.tools.mcp_oauth import MCPOAuthStorage, mcp_oauth_has_credent
 from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import Config
 from nanobot.extensions.adapters.agent_plugins import AgentPluginExtensionAdapter
-from nanobot.extensions.registry import ExtensionRegistry, ExtensionRegistryError
+from nanobot.extensions.registry import ExtensionRegistry
 from nanobot.webui.mcp_presets_api import (
     McpPresetError,
     _scrub_test_error,
@@ -116,60 +117,60 @@ def test_mcp_presets_payload_lists_supported_cards(tmp_path, monkeypatch: pytest
     assert manifest["trust"]["review_status"] == "builtin_preset"
 
 
-def test_agent_plugin_rows_are_registry_derived_and_redact_executable_metadata(
+@pytest.mark.asyncio
+async def test_the_mcp_catalog_no_longer_owns_agent_plugin_rows_or_their_lifecycle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The MCP catalog was a second Agent Plugin owner; it is now only an MCP catalog.
+
+    A configured server whose name merely begins with `plugin-` is ordinary custom MCP
+    and must keep working, which is what separates "the projection is gone" from "the
+    name is being filtered".
+    """
     _use_config(tmp_path, monkeypatch)
     workspace = load_config().workspace_path
     _write_agent_plugin(workspace)
     registry = _plugin_registry(workspace)
-
-    assert not any(
-        item["source"] == "agent-plugin"
-        for item in mcp_presets_payload()["presets"]
+    [package] = registry.snapshot().packages
+    custom_mcp_action(
+        "custom",
+        {"name": ["plugin-desktop"], "transport": ["stdio"], "command": ["echo"]},
     )
 
-    payload = mcp_presets_payload(extension_snapshot=registry.snapshot())
-    row = next(item for item in payload["presets"] if item["source"] == "agent-plugin")
+    catalog = mcp_presets_payload()
+    rows = {row["name"]: row for row in catalog["presets"]}
 
-    assert {
-        "name": row["name"],
-        "display_name": row["display_name"],
-        "extension_id": row["extension_id"],
-        "extension_lifecycle": row["extension_lifecycle"],
-        "extension_trust": row["extension_trust"],
-        "extension_execution": row["extension_execution"],
-        "risk_acknowledgement_required": row["risk_acknowledgement_required"],
-        "permissions_enforced": row["permissions_enforced"],
-    } == {
-        "name": "ext:agent_plugin:desktop",
-        "display_name": "Desktop Control",
-        "extension_id": "ext:agent_plugin:desktop",
-        "extension_lifecycle": "disabled",
-        "extension_trust": "operator_trusted",
-        "extension_execution": "child_process",
-        "risk_acknowledgement_required": True,
-        "permissions_enforced": False,
-    }
-    assert row["extension_revision"]
-    public_row = str(row)
-    for private_value in (
-        str(workspace),
-        "echo-private-command",
-        "--private-argument",
-        "PLUGIN_PRIVATE_TOKEN",
-        "plugin-secret",
-        "${PLUGIN_ROOT}",
-    ):
-        assert private_value not in public_row
+    assert rows["plugin-desktop"]["source"] == "custom"
+    assert package.id not in rows
+    assert not any(row.get("source") == "agent-plugin" for row in catalog["presets"])
+    # `installed_count` used to add enabled plugin rows on top of the configured servers.
+    assert catalog["installed_count"] == len(load_config().tools.mcp_servers) == 1
+    assert not any(
+        key.startswith("extension_") or key == "risk_acknowledgement_required"
+        for row in catalog["presets"]
+        for key in row
+    )
+
+    payload = await mcp_presets_settings_action(
+        "remove",
+        {"name": ["plugin-desktop"]},
+    )
+
+    assert "plugin-desktop" not in load_config().tools.mcp_servers
+    assert not any(row.get("source") == "agent-plugin" for row in payload["presets"])
 
 
 @pytest.mark.asyncio
-async def test_agent_plugin_enable_rejects_missing_acknowledgement_and_stale_revision_without_reload(
+async def test_an_extension_id_is_not_addressable_through_the_mcp_action_route(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The one lifecycle path for an Agent Plugin is `settings.extension.action`.
+
+    `extension_id` is passed the way the removed client used to pass it. Nothing here
+    may interpret it, so the plugin's lifecycle cannot be moved from this route.
+    """
     _use_config(tmp_path, monkeypatch)
     workspace = load_config().workspace_path
     _write_agent_plugin(workspace)
@@ -182,22 +183,7 @@ async def test_agent_plugin_enable_rejects_missing_acknowledgement_and_stale_rev
         reload_calls += 1
         return {"ok": True, "requires_restart": False}
 
-    with pytest.raises(ExtensionRegistryError) as unacknowledged:
-        await mcp_presets_settings_action(
-            "enable",
-            {"extension_id": [package.id], "expected_revision": [package.revision or ""]},
-            extension_registry=registry,
-            actor_user_id="operator",
-            system_admin=True,
-            reload_mcp=reload_mcp,
-        )
-    assert unacknowledged.value.code == "risk_acknowledgement_required"
-    assert reload_calls == 0
-    assert registry.snapshot().packages[0].lifecycle.value == "disabled"
-
-    plugin_mcp = workspace / "plugins" / "desktop" / "mcp.json"
-    plugin_mcp.write_text(plugin_mcp.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-    with pytest.raises(ExtensionRegistryError) as stale:
+    with pytest.raises(McpPresetError):
         await mcp_presets_settings_action(
             "enable",
             {
@@ -205,151 +191,16 @@ async def test_agent_plugin_enable_rejects_missing_acknowledgement_and_stale_rev
                 "expected_revision": [package.revision or ""],
                 "risk_acknowledged": ["true"],
             },
-            extension_registry=registry,
-            actor_user_id="operator",
-            system_admin=True,
             reload_mcp=reload_mcp,
         )
-    assert stale.value.code == "stale_revision"
-    assert reload_calls == 0
+
     assert registry.snapshot().packages[0].lifecycle.value == "disabled"
+    assert reload_calls == 0
+    assert not inspect.signature(mcp_presets_settings_action).parameters.keys() & {
+        "extension_snapshot",
+        "extension_registry",
+    }
 
-
-@pytest.mark.asyncio
-async def test_agent_plugin_settings_actions_use_canonical_target_and_reload_once_per_success(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _use_config(tmp_path, monkeypatch)
-    workspace = load_config().workspace_path
-    _write_agent_plugin(workspace)
-    registry = _plugin_registry(workspace)
-    [package] = registry.snapshot().packages
-    reload_calls = 0
-
-    async def reload_mcp() -> dict[str, object]:
-        nonlocal reload_calls
-        reload_calls += 1
-        return {"ok": True, "message": "MCP reloaded.", "requires_restart": False}
-
-    enabled = await mcp_presets_settings_action(
-        "enable",
-        {
-            "name": ["plugin-not-desktop"],
-            "extension_id": [package.id],
-            "expected_revision": [package.revision or ""],
-            "risk_acknowledged": ["true"],
-        },
-        extension_registry=registry,
-        actor_user_id="operator",
-        system_admin=True,
-        reload_mcp=reload_mcp,
-    )
-    enabled_row = next(
-        item for item in enabled["presets"] if item["name"] == package.id
-    )
-    assert (enabled_row["enabled"], enabled_row["status"], enabled["requires_restart"]) == (
-        True,
-        "enabled",
-        False,
-    )
-    assert reload_calls == 1
-
-    disabled = await mcp_presets_settings_action(
-        "disable",
-        {"extension_id": [package.id]},
-        extension_registry=registry,
-        actor_user_id="operator",
-        system_admin=True,
-        reload_mcp=reload_mcp,
-    )
-    disabled_row = next(
-        item for item in disabled["presets"] if item["name"] == package.id
-    )
-    assert (disabled_row["installed"], disabled_row["enabled"], disabled_row["status"]) == (
-        True,
-        False,
-        "disabled",
-    )
-    assert reload_calls == 2
-
-
-@pytest.mark.asyncio
-async def test_agent_plugin_reload_failure_preserves_marker_and_requires_restart(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _use_config(tmp_path, monkeypatch)
-    workspace = load_config().workspace_path
-    _write_agent_plugin(workspace)
-    registry = _plugin_registry(workspace)
-    [package] = registry.snapshot().packages
-    reload_calls = 0
-
-    async def reload_mcp() -> dict[str, object]:
-        nonlocal reload_calls
-        reload_calls += 1
-        return {
-            "ok": False,
-            "message": "MCP reload failed. Restart nanobot to pick up changes.",
-            "requires_restart": True,
-            "error": "/private/mcp/reload-secret",
-        }
-
-    payload = await mcp_presets_settings_action(
-        "enable",
-        {
-            "extension_id": [package.id],
-            "expected_revision": [package.revision or ""],
-            "risk_acknowledged": ["true"],
-        },
-        extension_registry=registry,
-        actor_user_id="operator",
-        system_admin=True,
-        reload_mcp=reload_mcp,
-    )
-    row = next(item for item in payload["presets"] if item["name"] == package.id)
-    assert row["enabled"] is True
-    assert payload["requires_restart"] is True
-    assert payload["hot_reload"]["ok"] is False
-    assert "/private/mcp/reload-secret" not in str(payload)
-    assert reload_calls == 1
-
-
-@pytest.mark.asyncio
-async def test_configured_plugin_prefix_stays_outside_extension_dispatch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _use_config(tmp_path, monkeypatch)
-    workspace = load_config().workspace_path
-    _write_agent_plugin(workspace)
-    registry = _plugin_registry(workspace)
-    custom_mcp_action(
-        "custom",
-        {
-            "name": ["plugin-desktop"],
-            "transport": ["stdio"],
-            "command": ["echo"],
-        },
-    )
-
-    catalog = mcp_presets_payload(extension_snapshot=registry.snapshot())
-    rows = {row["name"]: row for row in catalog["presets"]}
-    assert rows["plugin-desktop"]["source"] == "custom"
-    assert rows["ext:agent_plugin:desktop"]["source"] == "agent-plugin"
-
-    payload = await mcp_presets_settings_action(
-        "remove",
-        {"name": ["plugin-desktop"]},
-        extension_registry=registry,
-    )
-
-    assert "plugin-desktop" not in load_config().tools.mcp_servers
-    remaining = next(
-        row for row in payload["presets"] if row["name"] == "ext:agent_plugin:desktop"
-    )
-    assert remaining["source"] == "agent-plugin"
 
 @pytest.mark.asyncio
 async def test_oauth_preset_is_one_click_configured_after_token_storage(

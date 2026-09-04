@@ -134,7 +134,15 @@ class ExtensionExecution(StrEnum):
 
 
 class ExtensionLifecycle(StrEnum):
-    """The closed lifecycle vocabulary used in registry snapshots."""
+    """The closed lifecycle vocabulary used in registry snapshots.
+
+    Every member here has a producer. ``disabling`` and ``changed`` were removed at
+    cutover because no adapter ever reported them: every family disables
+    synchronously, and a package whose fingerprint moved is reported as ``disabled``
+    by the owner that invalidated it. A vocabulary member without a producer reads as
+    a supported state the contract cannot actually back, so a future transient state
+    is added together with the adapter that emits it.
+    """
 
     DISCOVERED = "discovered"
     UNAVAILABLE = "unavailable"
@@ -142,9 +150,7 @@ class ExtensionLifecycle(StrEnum):
     ENABLING = "enabling"
     ENABLED = "enabled"
     RELOADING = "reloading"
-    DISABLING = "disabling"
     FAILED = "failed"
-    CHANGED = "changed"
     RESTART_REQUIRED = "restart_required"
 
 

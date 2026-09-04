@@ -1202,7 +1202,7 @@ async def test_nanobot_feature_routes_require_token_and_enable(
         assert catalog.status_code == 200
         features = {feature["name"]: feature for feature in catalog.json()["features"]}
         matrix = features["matrix"]
-        assert matrix["status"] == "not_enabled"
+        assert matrix["extension_lifecycle"] == "disabled"
         assert matrix["runtime_status"] == "stopped"
         assert matrix["action_target_id"] == "ext:channel_package:matrix/channel:default"
         assert isinstance(matrix["action_target_revision"], str)
@@ -1315,7 +1315,7 @@ async def test_nanobot_feature_route_reports_live_channel_failure(
         assert matrix["running"] is False
         assert matrix["ready"] is False
         assert matrix["runtime_status"] == "failed"
-        assert matrix["status"] == "failed"
+        assert matrix["extension_lifecycle"] == "failed"
         assert matrix["runtime_error"] == "Channel runtime failed. Check gateway logs."
         assert body["enabled_count"] == sum(
             feature["type"] == "channel" and feature["running"]

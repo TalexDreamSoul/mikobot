@@ -929,21 +929,13 @@ class SystemSettingsHandler:
                 403,
                 "system administrator access is required",
             )
-        extension_registry = getattr(self.settings, "extensions", None)
         try:
-            extension_snapshot = (
-                extension_registry.snapshot() if extension_registry is not None else None
-            )
             payload = await operations.mcp_presets_action(
                 action,
                 request.query,
                 reload_mcp=operations.reload_mcp,
                 mcp_runtime_status=operations.mcp_runtime_status,
                 config=self.settings.config,
-                extension_snapshot=extension_snapshot,
-                extension_registry=extension_registry,
-                actor_user_id=request.actor_user_id,
-                system_admin=request.system_admin,
             )
         except Exception as exc:
             status = getattr(exc, "status", 500)

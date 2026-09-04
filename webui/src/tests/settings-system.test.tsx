@@ -69,202 +69,77 @@ const configuredPluginPrefixMcp = {
   source: "custom",
 };
 
-const dataOnlyAgentPlugin = {
-  ...agentPlugin,
-  name: "ext:agent_plugin:data-only",
-  display_name: "Data Only Plugin",
-  extension_id: "ext:agent_plugin:data-only",
-  extension_revision: "revision-data-only-1",
-  extension_execution: "data",
-  risk_acknowledgement_required: false,
-};
-
 describe("Settings system domains", () => {
   installSettingsViewTestHooks();
 
-  it("keeps enabled Agent Plugins out of MCP composer attachments", () => {
-    const enabled = { ...agentPlugin, enabled: true, available: true, status: "enabled" };
-    expect(installedMcpPresetsFromPayload({ presets: [enabled], installed_count: 1 })).toEqual([]);
-  });
-
-  it("requires explicit plugin risk confirmation while preserving canonical and configured MCP payloads", async () => {
+  it("no longer renders an Agent Plugin row or its lifecycle control on the Apps page", async () => {
+    // The gateway no longer injects these rows. This feeds one anyway, the exact shape
+    // the removed projection produced, so the assertion proves the page stopped owning
+    // Agent Plugin lifecycle rather than merely that the payload changed.
     await act(() => i18n.changeLanguage("en"));
-    try {
-      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url === "/api/settings") return jsonResponse(settingsPayload());
-        if (url === "/api/settings/cli-apps") return jsonResponse({ apps: [], installed_count: 0 });
-        if (url === "/api/settings/mcp-presets") {
-          return jsonResponse({ presets: [agentPlugin, dataOnlyAgentPlugin, configuredPluginPrefixMcp], installed_count: 1 });
-        }
-        return jsonResponse({});
-      }));
-      requestMutationMock.mockImplementation(async (action: string, values: Record<string, string>) => {
-        const pluginEnabled = action === "settings.mcp.enable" && values.name === agentPlugin.name;
-        const pluginDisabled = action === "settings.mcp.disable" && values.name === agentPlugin.name;
-        const enabled = pluginEnabled ? true : pluginDisabled ? false : agentPlugin.enabled;
-        return {
-          presets: [{
-            ...agentPlugin,
-            enabled,
-            available: enabled,
-            status: enabled ? "enabled" : "disabled",
-          }, dataOnlyAgentPlugin, configuredPluginPrefixMcp],
-          installed_count: Number(enabled),
-        };
-      });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/settings") return jsonResponse(settingsPayload());
+      if (url === "/api/settings/cli-apps") return jsonResponse({ apps: [], installed_count: 0 });
+      if (url === "/api/settings/mcp-presets") {
+        return jsonResponse({
+          presets: [agentPlugin, configuredPluginPrefixMcp],
+          installed_count: 1,
+        });
+      }
+      return jsonResponse({});
+    }));
+    // Echo the catalog back unchanged so both rows survive the first action and the
+    // second click is asserted against a real row rather than an emptied list.
+    requestMutationMock.mockImplementation(async () => ({
+      presets: [agentPlugin, configuredPluginPrefixMcp],
+      installed_count: 1,
+    }));
 
-      renderSettingsView();
+    renderSettingsView();
 
-      const pluginHeading = await screen.findByRole("heading", { name: "Demo Plugin" });
-      const pluginRow = pluginHeading.closest("article");
-      expect(pluginRow).not.toBeNull();
-      const enablePlugin = within(pluginRow as HTMLElement).getByRole("button", { name: "Demo Plugin: Enable" });
-      fireEvent.click(enablePlugin);
+    fireEvent.click(await screen.findByRole("button", { name: "MCP" }));
 
-      const warning = await screen.findByRole("alertdialog", { name: "Enable Demo Plugin?" });
-      expect(within(warning).getByText(/operator-trusted, unisolated executable code/)).toBeInTheDocument();
-      await act(() => i18n.changeLanguage("zh-CN"));
-      const chineseWarning = screen.getByRole("alertdialog", { name: "启用 Demo Plugin？" });
-      expect(within(chineseWarning).getByText(
-        "此 Agent Plugin 是由操作员信任、未隔离的可执行代码。它可能访问 nanobot 进程可见的文件、凭据、网络及其他资源。nanobot 不会验证此插件，也不会使其变得安全。",
-      )).toBeInTheDocument();
-      fireEvent.click(within(chineseWarning).getByRole("button", { name: "取消" }));
-      expect(requestMutationMock).not.toHaveBeenCalled();
+    // A configured MCP server whose name merely begins with "plugin-" is ordinary MCP
+    // and must still be enableable from here.
+    const configuredHeading = await screen.findByRole("heading", { name: "Configured MCP" });
+    fireEvent.click(
+      within(configuredHeading.closest("article") as HTMLElement).getByRole("button", {
+        name: "Configured MCP: Enable",
+      }),
+    );
+    await waitFor(() => expect(requestMutationMock).toHaveBeenLastCalledWith(
+      "settings.mcp.enable",
+      { name: "plugin-configured-mcp" },
+      20_000,
+    ));
 
-      await act(() => i18n.changeLanguage("en"));
-      fireEvent.click(enablePlugin);
-      const confirmation = await screen.findByRole("alertdialog", { name: "Enable Demo Plugin?" });
-      fireEvent.click(within(confirmation).getByRole("button", { name: "Enable plugin" }));
-      await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith(
-        "settings.mcp.enable",
-        {
-          name: "ext:agent_plugin:demo-plugin",
-          extension_id: "ext:agent_plugin:demo-plugin",
-          expected_revision: "revision-demo-plugin-1",
-          risk_acknowledged: "true",
-        },
-        20_000,
-      ));
-      expect(requestMutationMock).toHaveBeenCalledTimes(1);
-
-      const enabledButton = await screen.findByRole("button", { name: "Demo Plugin: Enabled" });
-      fireEvent.pointerDown(enabledButton, { button: 0, ctrlKey: false });
-      fireEvent.click(await screen.findByRole("menuitem", { name: "Disable" }));
-      await waitFor(() => expect(requestMutationMock).toHaveBeenLastCalledWith(
-        "settings.mcp.disable",
-        {
-          name: "ext:agent_plugin:demo-plugin",
-          extension_id: "ext:agent_plugin:demo-plugin",
-          expected_revision: "revision-demo-plugin-1",
-        },
-        20_000,
-      ));
-      expect(requestMutationMock).toHaveBeenCalledTimes(2);
-      const dataOnlyHeading = await screen.findByRole("heading", { name: "Data Only Plugin" });
-      const dataOnlyRow = dataOnlyHeading.closest("article");
-      expect(dataOnlyRow).not.toBeNull();
-      fireEvent.click(within(dataOnlyRow as HTMLElement).getByRole("button", { name: "Data Only Plugin: Enable" }));
-      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
-      await waitFor(() => expect(requestMutationMock).toHaveBeenLastCalledWith(
-        "settings.mcp.enable",
-        {
-          name: "ext:agent_plugin:data-only",
-          extension_id: "ext:agent_plugin:data-only",
-          expected_revision: "revision-data-only-1",
-        },
-        20_000,
-      ));
-      expect(requestMutationMock).toHaveBeenCalledTimes(3);
-
-      fireEvent.click(screen.getByRole("button", { name: "MCP" }));
-      const configuredHeading = await screen.findByRole("heading", { name: "Configured MCP" });
-      const configuredRow = configuredHeading.closest("article");
-      expect(configuredRow).not.toBeNull();
-      fireEvent.click(within(configuredRow as HTMLElement).getByRole("button", { name: "Configured MCP: Enable" }));
-      await waitFor(() => expect(requestMutationMock).toHaveBeenLastCalledWith(
-        "settings.mcp.enable",
-        { name: "plugin-configured-mcp" },
-        20_000,
-      ));
-      expect(requestMutationMock).toHaveBeenCalledTimes(4);
-    } finally {
-      await act(() => i18n.changeLanguage("en"));
+    // The plugin row is now an ordinary, inert catalog entry: acting on it opens no
+    // acknowledgement dialog and sends no canonical extension identity through this
+    // route, which is what makes `settings.extension.action` its only lifecycle path.
+    const pluginHeading = screen.getByRole("heading", { name: "Demo Plugin" });
+    fireEvent.click(
+      within(pluginHeading.closest("article") as HTMLElement).getByRole("button", {
+        name: "Demo Plugin: Enable",
+      }),
+    );
+    await waitFor(() => expect(requestMutationMock).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    for (const [, values] of requestMutationMock.mock.calls) {
+      expect(values).not.toHaveProperty("extension_id");
+      expect(values).not.toHaveProperty("expected_revision");
+      expect(values).not.toHaveProperty("risk_acknowledged");
     }
   });
 
-  it("binds plugin confirmation to the opened revision and restores focus on cancel", async () => {
-    await act(() => i18n.changeLanguage("en"));
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    const listedPlugin = { ...agentPlugin };
-    const replacementPlugin = {
-      ...agentPlugin,
-      display_name: "Replacement Plugin",
-      extension_revision: "revision-demo-plugin-2",
-    };
-    const refreshingMcp = {
-      ...configuredPluginPrefixMcp,
-      name: "refreshing-mcp",
-      display_name: "Refreshing MCP",
-      enabled: undefined,
-      runtime_status: "connecting",
-    };
-    let catalogPass = 0;
-    try {
-      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url === "/api/settings") return jsonResponse(settingsPayload());
-        if (url === "/api/settings/cli-apps") return jsonResponse({ apps: [], installed_count: 0 });
-        if (url === "/api/settings/mcp-presets") {
-          const plugin = catalogPass++ === 0 ? listedPlugin : replacementPlugin;
-          return jsonResponse({ presets: [plugin, refreshingMcp], installed_count: 1 });
-        }
-        return jsonResponse({});
-      }));
-      requestMutationMock.mockResolvedValue({
-        presets: [replacementPlugin, refreshingMcp],
-        installed_count: 1,
-      });
-
-      renderSettingsView();
-
-      const pluginHeading = await screen.findByRole("heading", { name: "Demo Plugin" });
-      const enablePlugin = within(pluginHeading.closest("article") as HTMLElement).getByRole(
-        "button",
-        { name: "Demo Plugin: Enable" },
-      );
-      fireEvent.click(enablePlugin);
-      const warning = await screen.findByRole("alertdialog", { name: "Enable Demo Plugin?" });
-      const cancel = within(warning).getByRole("button", { name: "Cancel" });
-      await waitFor(() => expect(cancel).toHaveFocus());
-      fireEvent.keyDown(document, { key: "Escape" });
-      await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
-      await waitFor(() => expect(enablePlugin).toHaveFocus());
-
-      fireEvent.click(enablePlugin);
-      await screen.findByRole("alertdialog", { name: "Enable Demo Plugin?" });
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_000);
-      });
-      await screen.findByText("Replacement Plugin", { selector: "h3" });
-      expect(screen.getByRole("alertdialog", { name: "Enable Demo Plugin?" })).toBeInTheDocument();
-      fireEvent.click(within(screen.getByRole("alertdialog", { name: "Enable Demo Plugin?" })).getByRole("button", { name: "Enable plugin" }));
-      await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith(
-        "settings.mcp.enable",
-        {
-          name: "ext:agent_plugin:demo-plugin",
-          extension_id: "ext:agent_plugin:demo-plugin",
-          expected_revision: "revision-demo-plugin-1",
-          risk_acknowledged: "true",
-        },
-        20_000,
-      ));
-    } finally {
-      vi.useRealTimers();
-      await act(() => i18n.changeLanguage("en"));
-    }
+  it("keeps the MCP composer attachment list to configured servers", () => {
+    const configured = { ...configuredPluginPrefixMcp, enabled: true, available: true };
+    expect(
+      installedMcpPresetsFromPayload({ presets: [configured], installed_count: 1 }).map(
+        (preset) => preset.name,
+      ),
+    ).toEqual(["plugin-configured-mcp"]);
   });
-
 
   it("does not show the Settings kicker on the standalone Automations surface", async () => {
     const onBackToChat = vi.fn();

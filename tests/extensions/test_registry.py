@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ast
+import re
 from collections.abc import Iterator
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from typing import Callable
 
 import pytest
@@ -210,9 +213,7 @@ def test_public_enums_are_closed_json_stable_vocabularies() -> None:
         "enabling",
         "enabled",
         "reloading",
-        "disabling",
         "failed",
-        "changed",
         "restart_required",
     }
     assert {member.value for member in ExtensionAction} == {
@@ -227,6 +228,54 @@ def test_public_enums_are_closed_json_stable_vocabularies() -> None:
         "restart_required",
     }
     assert isinstance(_BUILTIN, str)
+
+
+def _extension_vocabulary_producers() -> dict[str, set[str]]:
+    """Count where each contract enum member is named outside its own definition.
+
+    The definition file is excluded on purpose: a member is only "supported" when some
+    adapter, presenter, or transport actually names it. Reading the definition back
+    would make every member look produced.
+    """
+    root = Path(__file__).resolve().parents[2] / "nanobot"
+    contracts = root / "extensions" / "contracts.py"
+    sources = [
+        path.read_text(encoding="utf-8")
+        for path in sorted(root.rglob("*.py"))
+        if path != contracts
+    ]
+    producers: dict[str, set[str]] = {}
+    for enum_type in (
+        ExtensionSource,
+        ExtensionComponentKind,
+        ExtensionTrust,
+        ExtensionExecution,
+        ExtensionLifecycle,
+        ExtensionAction,
+    ):
+        for member in enum_type:
+            pattern = re.compile(rf"\b{enum_type.__name__}\.{member.name}\b")
+            producers[f"{enum_type.__name__}.{member.name}"] = {
+                text for text in sources if pattern.search(text)
+            }
+    return producers
+
+
+def test_every_contract_vocabulary_member_has_a_producer() -> None:
+    """A member no code path can emit is a claim the contract cannot back.
+
+    `ExtensionLifecycle.DISABLING` and `.CHANGED` were deleted at cutover for exactly
+    this reason. This asserts the property rather than the list, so the next member
+    added without a producer fails here instead of shipping as fictional vocabulary.
+    """
+    unproduced = sorted(
+        name for name, texts in _extension_vocabulary_producers().items() if not texts
+    )
+
+    assert unproduced == [], (
+        "these extension contract enum members are named nowhere in nanobot/, so no "
+        f"adapter can ever report them: {unproduced}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -813,3 +862,101 @@ def test_safe_diagnostics_redact_full_quoted_paths_but_preserve_urls() -> None:
     assert "~alice/tilde" not in message
     assert "https://example.test/extensions?source=workspace" in message
     assert "<path>" in message
+
+
+# The surfaces allowed to dispatch a lifecycle action, and how many times each does.
+# `ExtensionRegistry.execute` is the one authoritative validator and the one place an
+# owning adapter is invoked, so "one dispatcher per family" is enforced by keeping this
+# list short and explicit rather than by counting routes: a family page and the
+# Extensions page may both be entry points, but neither may reach an adapter except
+# through the registry. A new entry here is a new mutation surface and needs review.
+_DISPATCH_SURFACES = {
+    "nanobot/cli/commands.py": 2,
+    "nanobot/webui/nanobot_features_api.py": 1,
+    "nanobot/webui/settings_extensions.py": 1,
+}
+# The registry re-validates the request it was handed; that is not a surface.
+_REQUEST_REVALIDATION = "nanobot/extensions/registry.py"
+
+
+def _production_modules(root: Path) -> list[Path]:
+    """Every shipped module under `nanobot/`, excluding the channel-owned test suites.
+
+    `pyproject.toml` puts channel tests inside the package (`testpaths` includes
+    `nanobot/channels`), so a path filter is what separates production dispatchers from
+    tests that legitimately build a request to exercise an adapter.
+    """
+    return [
+        path
+        for path in (root / "nanobot").rglob("*.py")
+        if "tests" not in path.parts and not path.name.startswith("test_")
+    ]
+
+
+def _action_request_construction_sites() -> dict[str, int]:
+    """Count where an `ExtensionActionRequest` is built, which is what `execute` needs.
+
+    Counting constructions rather than `.execute(` calls is what makes this robust: a
+    new dispatcher cannot avoid building a request, whatever it names its registry.
+    """
+    root = Path(__file__).resolve().parents[2]
+    sites: dict[str, int] = {}
+    for path in sorted(_production_modules(root)):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover - a broken file is a different failure
+            continue
+        count = sum(
+            1
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ExtensionActionRequest"
+        )
+        if count:
+            sites[path.relative_to(root).as_posix()] = count
+    return sites
+
+
+def test_only_declared_surfaces_dispatch_a_lifecycle_action() -> None:
+    """R2: two entry points may exist, but only one dispatcher reaches an adapter.
+
+    The family pages and the Extensions page are deliberately separate entry points
+    because they carry different authorization scopes, so the cutover's invariant is
+    that every one of them funnels into `ExtensionRegistry.execute`.
+    """
+    sites = _action_request_construction_sites()
+    surfaces = {path: count for path, count in sites.items() if path != _REQUEST_REVALIDATION}
+
+    assert surfaces == _DISPATCH_SURFACES, (
+        "the set of extension lifecycle dispatch surfaces changed; a new one is a new "
+        f"mutation path and must be reviewed: {surfaces}"
+    )
+    # No family owner dispatches for itself: adapters receive actions, never send them.
+    assert not [
+        path
+        for path in surfaces
+        if path.startswith(("nanobot/extensions/adapters/", "nanobot/channels/", "nanobot/agent/", "nanobot/providers/"))
+    ]
+
+
+def test_the_registry_is_the_only_caller_of_an_owning_adapter() -> None:
+    """R2: no surface may reach `adapter.execute` around the registry's validation."""
+    root = Path(__file__).resolve().parents[2]
+    callers: set[str] = set()
+    for path in sorted(_production_modules(root)):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover
+            continue
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "execute"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "adapter"
+            ):
+                callers.add(path.relative_to(root).as_posix())
+
+    assert callers == {_REQUEST_REVALIDATION}

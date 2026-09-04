@@ -645,7 +645,6 @@
       "channelLabel": "チャンネル",
       "featureLabel": "機能",
       "filterAll": "使用可能",
-      "filterPlugins": "プラグイン",
       "filterCli": "アプリ",
       "filterMcp": "MCP",
       "enabledSummary": "{{count}} 件使用可能",

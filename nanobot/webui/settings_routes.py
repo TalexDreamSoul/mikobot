@@ -251,7 +251,9 @@ class WebUISettingsRouter:
             logger,
         )
         self._system = system_domain.SystemSettingsHandler(settings, logger)
-        self._extensions = extension_domain.ExtensionSettingsHandler(settings, logger)
+        self._extensions = extension_domain.ExtensionSettingsHandler(
+            settings, logger, reload_mcp=self._reload_mcp_runtime
+        )
 
     async def dispatch(
         self,

@@ -2,7 +2,6 @@ import {
   forwardRef,
   useId,
   useMemo,
-  useRef,
   useState,
   type ComponentPropsWithoutRef,
   type Dispatch,
@@ -23,7 +22,6 @@ import {
   RotateCcw,
   Search,
   Server,
-  ShieldAlert,
   SlidersHorizontal,
   TriangleAlert,
   Trash2,
@@ -40,16 +38,6 @@ import {
   McpManagementDialog,
   type McpManagementTab,
 } from "@/components/settings/system/McpManagementDialog";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -210,10 +198,8 @@ export function AppsCatalogSettings({
     .filter((item) => {
       if (normalizedQuery) return appsSearchText(item).includes(normalizedQuery);
       if (filter === "ready") return appsReady(item);
-      if (filter === "cli") {
-        return item.kind === "cli" || item.preset.source === "agent-plugin";
-      }
-      return item.kind === "mcp" && item.preset.source !== "agent-plugin";
+      if (filter === "cli") return item.kind === "cli";
+      return item.kind === "mcp";
     })
     .sort((left, right) => {
       const rank = Number(!appsReady(left)) - Number(!appsReady(right));
@@ -537,13 +523,6 @@ function McpAppsCatalogRow({
   const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
   const [managementOpen, setManagementOpen] = useState(false);
   const [managementTab, setManagementTab] = useState<McpManagementTab>("overview");
-  const [agentPluginWarningOpen, setAgentPluginWarningOpen] = useState(false);
-  const [agentPluginEnableTarget, setAgentPluginEnableTarget] = useState<{
-    id: string;
-    revision: string;
-    displayName: string;
-  } | null>(null);
-  const enableButtonRef = useRef<HTMLButtonElement>(null);
   const enableBusy = actionKey === `enable:${preset.name}`;
   const disableBusy = actionKey === `disable:${preset.name}`;
   const removeBusy = actionKey === `remove:${preset.name}`;
@@ -553,8 +532,6 @@ function McpAppsCatalogRow({
   const oauthBusy = actionKey === `oauth:${preset.name}`;
   const anotherOAuthBusy = Boolean(actionKey?.startsWith("oauth:")) && !oauthBusy;
   const busy = enableBusy || disableBusy || removeBusy || testBusy || reconnectBusy || toolsBusy || oauthBusy;
-  const agentPlugin = preset.source === "agent-plugin";
-  const agentPluginExecutable = agentPlugin && preset.risk_acknowledgement_required === true;
   const toggleable = preset.enabled !== undefined;
   const isOAuth = preset.auth === "oauth";
   const missingFields = preset.required_fields.filter((field) => field.required && !field.configured);
@@ -576,9 +553,7 @@ function McpAppsCatalogRow({
     `settings.mcp.presetDescriptions.${preset.name}`,
     preset.description || preset.note || preset.name,
   );
-  const detail = agentPlugin && preset.requires
-    ? `${description} · ${preset.requires}`
-    : description || preset.requires;
+  const detail = description || preset.requires;
   const manualCallback =
     oauthFlow?.completion_input === "callback_url" && Boolean(oauthFlow.authorization_url);
   const callbackInputId = `mcp-oauth-callback-${preset.name}`;
@@ -586,46 +561,10 @@ function McpAppsCatalogRow({
   const callbackErrorId = `${callbackInputId}-error`;
 
   const requestEnable = () => {
-    if (!agentPlugin) {
-      onAction("enable", preset.name, values);
-      return;
-    }
-    if (!preset.extension_id || !preset.extension_revision) return;
-    if (agentPluginExecutable) {
-      setAgentPluginEnableTarget({
-        id: preset.extension_id,
-        revision: preset.extension_revision,
-        displayName: preset.display_name,
-      });
-      setAgentPluginWarningOpen(true);
-      return;
-    }
-    onAction("enable", preset.name, {
-      extension_id: preset.extension_id,
-      expected_revision: preset.extension_revision,
-    });
-  };
-  const confirmAgentPluginEnable = () => {
-    if (!agentPluginEnableTarget) return;
-    onAction("enable", preset.name, {
-      extension_id: agentPluginEnableTarget.id,
-      expected_revision: agentPluginEnableTarget.revision,
-      risk_acknowledged: "true",
-    });
+    onAction("enable", preset.name, values);
   };
   const disablePreset = () => {
-    if (!agentPlugin) {
-      onAction("disable", preset.name);
-      return;
-    }
-    if (!preset.extension_id) return;
-    const actionValues: Record<string, string> = {
-      extension_id: preset.extension_id,
-    };
-    if (preset.extension_revision) {
-      actionValues.expected_revision = preset.extension_revision;
-    }
-    onAction("disable", preset.name, actionValues);
+    onAction("disable", preset.name);
   };
   const enableOrOpenSetup = () => {
     if (isOAuth) {
@@ -652,11 +591,7 @@ function McpAppsCatalogRow({
           <div className="flex min-w-0 items-baseline gap-2">
             <h3 className="truncate text-[14px] font-semibold leading-5 text-foreground">{preset.display_name}</h3>
             {showTypeBadge ? (
-              <AppsTypeBadge>
-                {agentPlugin
-                  ? tx("settings.apps.filterPlugins", "Plugins")
-                  : tx("settings.apps.mcpLabel", "MCP")}
-              </AppsTypeBadge>
+              <AppsTypeBadge>{tx("settings.apps.mcpLabel", "MCP")}</AppsTypeBadge>
             ) : null}
           </div>
           <p
@@ -761,7 +696,6 @@ function McpAppsCatalogRow({
             )
           ) : preset.enabled === false ? (
             <AppsActionButton
-              ref={agentPlugin ? enableButtonRef : undefined}
               ariaLabel={`${preset.display_name}: ${tx("settings.nanobotFeatures.enable", "Enable")}`}
               visibleLabel={tx("settings.nanobotFeatures.enable", "Enable")}
               busy={enableBusy}
@@ -931,49 +865,6 @@ function McpAppsCatalogRow({
           onToolsChange={onToolsChange}
         />
       ) : null}
-
-      <AlertDialog
-        open={agentPluginWarningOpen}
-        onOpenChange={(open) => {
-          setAgentPluginWarningOpen(open);
-          if (!open) {
-            setAgentPluginEnableTarget(null);
-            setTimeout(() => enableButtonRef.current?.focus(), 0);
-          }
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-control bg-muted text-foreground">
-              <ShieldAlert className="h-5 w-5" aria-hidden />
-            </div>
-            <AlertDialogTitle>
-              {t("settings.apps.agentPluginEnableTitle", {
-                name: agentPluginEnableTarget?.displayName ?? preset.display_name,
-                defaultValue: "Enable {{name}}?",
-              })}
-            </AlertDialogTitle>
-            <AlertDialogDescription className="leading-6">
-              {tx(
-                "settings.apps.agentPluginEnableWarning",
-                "This Agent Plugin is operator-trusted, unisolated executable code. It may access files, credentials, network, and other resources visible to the nanobot process. nanobot does not verify this plugin or make it safe.",
-              )}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel className="w-full sm:w-auto">
-              {t("common.cancel", { defaultValue: "Cancel" })}
-            </AlertDialogCancel>
-            <AlertDialogAction
-              disabled={!agentPluginEnableTarget || enableBusy}
-              onClick={confirmAgentPluginEnable}
-              className="w-full sm:w-auto"
-            >
-              {tx("settings.apps.agentPluginEnableConfirm", "Enable plugin")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </article>
   );
 }

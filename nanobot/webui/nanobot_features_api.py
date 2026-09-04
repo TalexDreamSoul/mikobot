@@ -234,7 +234,8 @@ def _optional_feature(package: ExtensionPackageDescriptor) -> dict[str, Any]:
         "ready": enabled,
         "running": enabled,
         "installed": enabled,
-        "status": "enabled" if enabled else _legacy_status(package.lifecycle),
+        # No second status vocabulary: the row already carries `extension_lifecycle`,
+        # and the booleans above are what the surfaces branch on.
     })
     return feature
 
@@ -266,13 +267,11 @@ def _channel_lifecycle_fields(
     package: ExtensionPackageDescriptor,
     lifecycle: ExtensionLifecycle,
 ) -> dict[str, object]:
-    runtime_status = _legacy_status(lifecycle)
     fields: dict[str, object] = {
         "installed": ExtensionAction.INSTALL not in package.actions,
         "running": lifecycle is ExtensionLifecycle.ENABLED,
         "ready": lifecycle is ExtensionLifecycle.ENABLED,
-        "runtime_status": runtime_status,
-        "status": _channel_status(package, lifecycle),
+        "runtime_status": channel_runtime_status(lifecycle),
     }
     if lifecycle is ExtensionLifecycle.RELOADING:
         fields["pairing_only"] = True
@@ -281,24 +280,24 @@ def _channel_lifecycle_fields(
     return fields
 
 
-def _channel_status(
-    package: ExtensionPackageDescriptor,
-    lifecycle: ExtensionLifecycle,
-) -> str:
-    if lifecycle is ExtensionLifecycle.ENABLED:
-        return "enabled"
-    if lifecycle in {ExtensionLifecycle.ENABLING, ExtensionLifecycle.RELOADING}:
-        return "starting"
-    if lifecycle is ExtensionLifecycle.FAILED:
-        return "failed"
-    if ExtensionAction.INSTALL in package.actions:
-        return "missing_dependency"
-    return "not_enabled"
+# The runtime vocabulary the channel surfaces compare against, declared once so the
+# Python producer and the TypeScript consumers cannot drift apart again. It is kept
+# separate from `ExtensionLifecycle` because it is a channel *runtime* state, not the
+# package lifecycle: `CHANNEL_RUNTIME_STATUSES` is asserted against the client union by
+# `tests/webui/test_extension_feature_compatibility.py`.
+CHANNEL_RUNTIME_STATUSES = ("running", "starting", "failed", "stopped")
 
 
-def _legacy_status(lifecycle: ExtensionLifecycle) -> str:
+def channel_runtime_status(lifecycle: ExtensionLifecycle) -> str:
+    """Report the channel runtime state the Channels surfaces render.
+
+    Before the extension cutover this came from `ChannelManager` as `running`, and every
+    consumer still compares against that word, so an enabled channel reports `running`
+    rather than the package lifecycle's `enabled`. Emitting the lifecycle value here
+    instead silently turned every `runtime_status === "running"` check false.
+    """
     if lifecycle is ExtensionLifecycle.ENABLED:
-        return "enabled"
+        return "running"
     if lifecycle in {ExtensionLifecycle.ENABLING, ExtensionLifecycle.RELOADING}:
         return "starting"
     if lifecycle is ExtensionLifecycle.FAILED:
@@ -342,7 +341,7 @@ def _decorate_channel_instances(
             "extension_revision": component.revision,
             "extension_actions": sorted(action.value for action in component.actions),
             "extension_lifecycle": component.lifecycle.value,
-            "runtime_status": _legacy_status(component.lifecycle),
+            "runtime_status": channel_runtime_status(component.lifecycle),
             "running": component.lifecycle is ExtensionLifecycle.ENABLED,
         })
         if component.lifecycle is ExtensionLifecycle.RELOADING:

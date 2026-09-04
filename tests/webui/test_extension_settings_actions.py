@@ -37,6 +37,7 @@ from nanobot.webui.settings_capabilities import (
     CapabilitySettingsOperations,
 )
 from nanobot.webui.settings_contracts import SettingsRequest
+from nanobot.webui.settings_extensions import ExtensionSettingsHandler
 from nanobot.webui.settings_services import WebUISettingsServices
 from nanobot.webui.settings_system import SystemSettingsHandler, SystemSettingsOperations
 
@@ -559,7 +560,6 @@ async def test_settings_handler_lists_only_the_registry_snapshot_without_legacy_
             "ready": False,
             "running": False,
             "installed": False,
-            "status": "stopped",
         }
     ]
     assert "last_action" not in result.payload
@@ -1139,8 +1139,8 @@ async def test_channel_feature_runtime_fields_use_aggregate_package_lifecycle(tm
         feature["extension_lifecycle"],
         feature["running"],
         feature["ready"],
-        feature["status"],
-    ) == ("enabled", True, True, "enabled")
+        feature["runtime_status"],
+    ) == ("enabled", True, True, "running")
 
 
 @pytest.mark.asyncio
@@ -1496,3 +1496,63 @@ async def test_action_responses_withhold_the_inventory_from_an_elevated_member(
     assert elevated == {"features": [], "enabled_count": 0, "restricted": True}
     assert administrator["features"], "a host administrator still receives the inventory"
     assert "restricted" not in administrator
+
+
+@pytest.mark.asyncio
+async def test_the_family_route_serves_an_elevated_instance_owner_the_host_route_refuses(
+    tmp_path,
+) -> None:
+    """Why `settings.feature.*` survives beside `settings.extension.action`.
+
+    `ws_http` raises `system_admin` — and only `system_admin` — for a member who has
+    claimed one channel instance, so that member may toggle that instance and nothing
+    else. `settings.extension.action` reads `host_admin` and refuses them by design.
+    Folding the family toggle onto the host route would therefore either remove a real
+    capability or force the host route to widen to a member, so the two entry points
+    are kept and share `ExtensionRegistry.execute` as their one dispatcher instead.
+    """
+    registry, adapter = _registry(_channel_package())
+    elevated_owner = SettingsRequest(
+        query={
+            "name": ["relay"],
+            "instance_id": ["office"],
+            "extension_id": ["ext:channel_package:relay/channel:office"],
+            "expected_revision": ["relay-package-r1"],
+        },
+        actor_user_id="claimed-instance-owner",
+        system_admin=True,
+        host_admin=False,
+    )
+
+    family = await _system_handler(tmp_path, registry).handle(
+        "features-enable", elevated_owner, _system_operations()
+    )
+
+    assert family.status == 200
+    assert [request.action for request in adapter.requests] == [ExtensionAction.ENABLE]
+    assert adapter.requests[0].target_id == "ext:channel_package:relay/channel:office"
+    # The response still withholds the host inventory from the elevated member.
+    assert family.payload is not None
+    assert family.payload["restricted"] is True
+    assert family.payload["features"] == []
+
+    host = await ExtensionSettingsHandler(
+        _system_handler(tmp_path, registry).settings,
+        logger=type("Logger", (), {"exception": staticmethod(lambda *_args: None)})(),
+    ).handle(
+        "extensions-action",
+        SettingsRequest(
+            query={},
+            payload={
+                "target_id": "ext:channel_package:relay/channel:office",
+                "action": "enable",
+                "expected_revision": "relay-package-r1",
+            },
+            actor_user_id="claimed-instance-owner",
+            system_admin=True,
+            host_admin=False,
+        ),
+    )
+
+    assert host.status == 403
+    assert len(adapter.requests) == 1
