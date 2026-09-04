@@ -1,0 +1,6 @@
+[Unit]
+Description=Miko rollback on crash loop
+
+[Service]
+Type=oneshot
+ExecStart=/root/miko-guard/rollback.sh

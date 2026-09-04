@@ -1,0 +1,23 @@
+[Unit]
+Description=Miko (nanobot gateway)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/root/.nanobot
+# 5 分钟内失败 5 次即判定为崩溃循环, 触发回滚
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=miko-rollback.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=/root/miko-guard/precheck.sh
+ExecStart=/root/.local/bin/nanobot gateway
+# always: 覆盖"agent 自己 kill 自己"这种优雅退出
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Miko known-good snapshot
+
+[Service]
+Type=oneshot
+ExecStart=/root/miko-guard/snapshot.sh
