@@ -12,6 +12,7 @@ from nanobot.collaboration.models import (
     BotProjectAssignment,
     BotProjectChannel,
     BotState,
+    ChannelProvision,
     ContextSource,
     ContextSourceKind,
     ConversationBinding,
@@ -125,6 +126,16 @@ def decode_bot_channel_assignment_row(row: Row) -> BotChannelAssignment:
         channel_type=_string(row, "channel_type"),
         instance_id=_string(row, "instance_id"),
         claimed_by_user_id=_string(row, "claimed_by_user_id"),
+        created_at_ms=_integer(row, "created_at_ms"),
+    )
+
+
+def decode_channel_provision_row(row: Row) -> ChannelProvision:
+    return ChannelProvision(
+        channel_type=_string(row, "channel_type"),
+        instance_id=_string(row, "instance_id"),
+        organization_id=_string(row, "organization_id"),
+        created_by_user_id=_string(row, "created_by_user_id"),
         created_at_ms=_integer(row, "created_at_ms"),
     )
 

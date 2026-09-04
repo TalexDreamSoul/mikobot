@@ -16,6 +16,7 @@ from .models import (
     BotProjectAssignment,
     BotProjectChannel,
     BotState,
+    ChannelProvision,
     ContextSource,
     ContextSourceKind,
     ConversationBinding,
@@ -230,6 +231,15 @@ class CollaborationRepository(Protocol):
     async def list_bot_project_channels(
         self, actor_user_id: str, bot_id: str, project_id: str
     ) -> list[BotProjectChannel]: ...
+
+    async def record_channel_provision(
+        self, actor_user_id: str, *, channel_type: str, instance_id: str,
+        organization_id: str,
+    ) -> ChannelProvision: ...
+
+    async def list_claimable_channels(
+        self, actor_user_id: str
+    ) -> list[ChannelProvision]: ...
 
     async def get_bot_capability_profile(
         self, actor_user_id: str, bot_id: str, *, project_id: str | None = None

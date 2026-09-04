@@ -18,6 +18,7 @@ from nanobot.collaboration.models import (
     BotProjectAssignment,
     BotProjectChannel,
     BotState,
+    ChannelProvision,
     PairingChallenge,
     PairingPurpose,
     Project,
@@ -38,6 +39,7 @@ from nanobot.collaboration.postgres.rows import (
     decode_bot_project_assignment_row,
     decode_bot_project_channel_row,
     decode_bot_row,
+    decode_channel_provision_row,
     decode_identity_row,
     decode_pairing_challenge_row,
     decode_user_row,
@@ -64,6 +66,9 @@ _PAIRING_COLUMNS: LiteralString = (
     "id, code_digest, requested_by_user_id, purpose, organization_id, bot_id, project_id, "
     "channel_type, instance_id, channel_revision, expires_at_ms, verified_at_ms, "
     "verified_sender_id, consumed_at_ms, created_at_ms"
+)
+_PROVISION_COLUMNS: LiteralString = (
+    "channel_type, instance_id, organization_id, created_by_user_id, created_at_ms"
 )
 
 
@@ -504,6 +509,77 @@ class PostgresBotsMixin(PostgresIdentityMixin):
             )
         return [decode_bot_project_channel_row(row) for row in rows]
 
+    async def record_channel_provision(
+        self,
+        actor_user_id: str,
+        *,
+        channel_type: str,
+        instance_id: str,
+        organization_id: str,
+    ) -> ChannelProvision:
+        actor_user_id = _identifier(actor_user_id, "actor_user_id")
+        channel_type = _string(channel_type, "channel_type", limit=128)
+        instance_id = _string(instance_id, "instance_id", limit=128)
+        organization_id = _identifier(organization_id, "organization_id")
+        async with self._actor_transaction(actor_user_id) as connection:
+            await self._require_organization_member(
+                connection, organization_id, actor_user_id
+            )
+            existing = await self._fetch_one(
+                connection,
+                f"""
+                SELECT {_PROVISION_COLUMNS}
+                FROM nanobot_collaboration.collaboration_channel_provisions
+                WHERE channel_type = %s AND instance_id = %s
+                """,
+                (channel_type, instance_id),
+            )
+            if existing is not None:
+                return decode_channel_provision_row(existing)
+            try:
+                row = await self._fetch_one(
+                    connection,
+                    f"""
+                    INSERT INTO nanobot_collaboration.collaboration_channel_provisions
+                        (channel_type, instance_id, organization_id, created_by_user_id,
+                         created_at_ms)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING {_PROVISION_COLUMNS}
+                    """,
+                    (
+                        channel_type, instance_id, organization_id, actor_user_id,
+                        self._now_ms(),
+                    ),
+                )
+            except UniqueViolation as exc:
+                raise CollaborationConflictError(
+                    "channel instance was provisioned by another user"
+                ) from exc
+        if row is None:
+            raise CollaborationStoreFormatError("failed to record channel provision")
+        return decode_channel_provision_row(row)
+
+    async def list_claimable_channels(self, actor_user_id: str) -> list[ChannelProvision]:
+        actor_user_id = _identifier(actor_user_id, "actor_user_id")
+        async with self._actor_transaction(actor_user_id) as connection:
+            rows = await self._fetch_all(
+                connection,
+                f"""
+                SELECT {_PROVISION_COLUMNS}
+                FROM nanobot_collaboration.collaboration_channel_provisions AS provision
+                WHERE provision.created_by_user_id = %s
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM nanobot_collaboration.collaboration_channel_claim_registry AS claim
+                      WHERE claim.channel_type = provision.channel_type
+                        AND claim.instance_id = provision.instance_id
+                  )
+                ORDER BY provision.channel_type, provision.instance_id
+                """,
+                (actor_user_id,),
+            )
+        return [decode_channel_provision_row(row) for row in rows]
+
     async def get_bot_capability_profile(
         self, actor_user_id: str, bot_id: str, *, project_id: str | None = None
     ) -> BotCapabilityProfile:
@@ -940,6 +1016,17 @@ class PostgresBotsMixin(PostgresIdentityMixin):
         )
         if row is None or _row_string(row, "role") not in {"owner", "admin"}:
             raise CollaborationPermissionError("organization admin role is required")
+
+    async def _require_organization_member(
+        self, connection: PostgresConnection, organization_id: str, actor_user_id: str
+    ) -> None:
+        row = await self._fetch_one(
+            connection,
+            "SELECT role FROM nanobot_collaboration.collaboration_organization_memberships WHERE organization_id = %s AND user_id = %s",
+            (organization_id, actor_user_id),
+        )
+        if row is None or _row_string(row, "role") not in {"owner", "admin", "member"}:
+            raise CollaborationPermissionError("organization membership is required")
 
     async def _require_project_owner(
         self, connection: PostgresConnection, actor_user_id: str, project_id: str

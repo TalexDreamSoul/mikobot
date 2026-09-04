@@ -10,6 +10,7 @@ import type {
   CollaborationBot,
   CollaborationBotCapabilityProfile,
   CollaborationBotPayload,
+  CollaborationClaimableChannelsPayload,
   CollaborationPairingPayload,
   CollaborationPairingPurpose,
   CollaborationContextSource,
@@ -620,6 +621,18 @@ export async function fetchCollaborationPairing(
 ): Promise<CollaborationPairingPayload> {
   return request<CollaborationPairingPayload>(
     `${base}/api/collaboration/pairing/${encodeURIComponent(challengeId)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchCollaborationClaimableChannels(
+  token: string,
+  base: string = "",
+): Promise<CollaborationClaimableChannelsPayload> {
+  return request<CollaborationClaimableChannelsPayload>(
+    `${base}/api/collaboration/claimable-channels`,
     token,
     undefined,
     API_READ_TIMEOUT_MS,

@@ -181,6 +181,21 @@ class BotChannelAssignment:
 
 
 @dataclass(frozen=True, slots=True)
+class ChannelProvision:
+    """The member who provisioned one channel instance through self-service connect.
+
+    Ownership is recorded when the instance is created, never inferred afterwards.
+    An instance with no record predates this provenance and stays administrator-only.
+    """
+
+    channel_type: str
+    instance_id: str
+    organization_id: str
+    created_by_user_id: str
+    created_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class BotProjectChannel:
     bot_id: str
     project_id: str

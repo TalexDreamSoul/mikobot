@@ -7,14 +7,24 @@ import i18n from "@/i18n";
 import type { CollaborationBot, CollaborationOrganization, CollaborationProject } from "@/lib/types";
 import { ClientProvider } from "@/providers/ClientProvider";
 
-vi.mock("@/lib/api", () => ({
-  fetchCollaborationPairing: vi.fn(),
-  fetchNanobotFeatures: vi.fn(),
-  fetchSkillDetail: vi.fn(),
-  fetchSkills: vi.fn(),
-}));
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ApiError: actual.ApiError,
+    fetchCollaborationClaimableChannels: vi.fn(),
+    fetchCollaborationPairing: vi.fn(),
+    fetchSkillDetail: vi.fn(),
+    fetchSkills: vi.fn(),
+  };
+});
 
-import { fetchCollaborationPairing, fetchNanobotFeatures, fetchSkillDetail, fetchSkills } from "@/lib/api";
+import {
+  ApiError,
+  fetchCollaborationClaimableChannels,
+  fetchCollaborationPairing,
+  fetchSkillDetail,
+  fetchSkills,
+} from "@/lib/api";
 
 const timestamp = 1_735_689_600_000;
 const studio: CollaborationOrganization = {
@@ -130,24 +140,15 @@ describe("bot and organization controls", () => {
 
   it("shows the purpose-bound Pair Code for the selected channel instance", async () => {
     await i18n.changeLanguage("zh-CN");
-    vi.mocked(fetchNanobotFeatures).mockResolvedValue({
-      features: [{
-        name: "weixin",
-        display_name: "微信",
-        type: "channel",
-        enabled: true,
-        configured: true,
-        instances: [{
-          id: "support",
-          name: "Support",
-          enabled: true,
-          configured: true,
-          config_values: {},
-          configured_fields: [],
-          runtime_status: "running",
-        }],
+    vi.mocked(fetchCollaborationClaimableChannels).mockResolvedValue({
+      channels: [{
+        channel_type: "weixin",
+        channel_display_name: "微信",
+        instance_id: "support",
+        display_name: "Support",
+        status: "running",
       }],
-    } as never);
+    });
     vi.mocked(fetchSkills).mockResolvedValue({
       skills: [{
         name: "release-notes",
@@ -221,13 +222,11 @@ describe("bot and organization controls", () => {
 
   it("says an administrator is required instead of showing an empty claim list", async () => {
     await i18n.changeLanguage("zh-CN");
-    // The gateway withholds the host inventory from a member, so an empty option list
-    // here means "not disclosed", not "this host has no channels".
-    vi.mocked(fetchNanobotFeatures).mockResolvedValue({
-      features: [],
-      enabled_count: 0,
-      restricted: true,
-    } as never);
+    // A refusal means "you may not ask". An empty array means "you asked and there is
+    // nothing". Collapsing both into a blank dropdown is what hid the broken flow before.
+    vi.mocked(fetchCollaborationClaimableChannels).mockRejectedValue(
+      new ApiError(403, "forbidden"),
+    );
     vi.mocked(fetchSkills).mockResolvedValue({ skills: [] } as never);
     const projects = {
       summary: { bots: [releaseBot], projects: [project] },
@@ -252,32 +251,78 @@ describe("bot and organization controls", () => {
     const channel = await screen.findByLabelText("渠道实例");
     expect(channel).toBeDisabled();
     expect(
-      screen.getByText("只有系统管理员可以列出此主机上的 channel 实例。请让管理员为此 bot 分配 channel。"),
+      screen.getByText("当前账号无权列出 channel 实例。请让管理员为此 bot 分配 channel。"),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/没有待认领的 channel 实例/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      name: "nothing to claim",
+      language: "zh-CN",
+      result: () => Promise.resolve({ channels: [] }),
+      shown: "没有待认领的 channel 实例。请先在设置中连接一个，它会出现在这里。",
+      hidden: "当前账号无权列出 channel 实例。请让管理员为此 bot 分配 channel。",
+      selectable: true,
+    },
+    {
+      name: "request failed",
+      language: "en",
+      result: () => Promise.reject(new Error("gateway is unreachable")),
+      shown: "Could not load channel instances: gateway is unreachable",
+      hidden: "No channel instances are waiting to be claimed. Connect one from Settings, then it appears here.",
+      selectable: false,
+    },
+  ])("distinguishes $name from the other empty claim states", async ({
+    language, result, shown, hidden, selectable,
+  }) => {
+    await i18n.changeLanguage(language);
+    vi.mocked(fetchCollaborationClaimableChannels).mockImplementation(
+      result as typeof fetchCollaborationClaimableChannels,
+    );
+    vi.mocked(fetchSkills).mockResolvedValue({ skills: [] } as never);
+    const projects = {
+      summary: { bots: [releaseBot], projects: [project] },
+      organizationId: studio.id,
+      botId: releaseBot.id,
+      projectId: project.id,
+      botDetail: { channels: [], projects: [], capability_profiles: [] },
+      botDetailLoading: false,
+      busyKey: null,
+      selectBot: vi.fn(),
+      createBot: vi.fn(),
+      beginPairing: vi.fn(),
+      finishPairing: vi.fn(),
+    };
+
+    render(
+      <ClientProvider client={{ requestMutation: vi.fn() } as never} token="token">
+        <BotManagementPanel projects={projects as never} />
+      </ClientProvider>,
+    );
+
+    expect(await screen.findByText(shown)).toBeInTheDocument();
+    expect(screen.queryByText(hidden)).not.toBeInTheDocument();
+    const channel = screen.getByLabelText(
+      language === "zh-CN" ? "渠道实例" : "Channel instance",
+    );
+    if (selectable) expect(channel).not.toBeDisabled();
+    else expect(channel).toBeDisabled();
   });
 
   it("waits for pairing consumption before replacing the visible code with completion", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-01T12:00:00Z"));
     const now = Date.now();
-    vi.mocked(fetchNanobotFeatures).mockResolvedValue({
-      features: [{
-        name: "weixin",
-        display_name: "WeChat",
-        type: "channel",
-        enabled: true,
-        configured: true,
-        instances: [{
-          id: "support",
-          name: "Support",
-          enabled: true,
-          configured: true,
-          config_values: {},
-          configured_fields: [],
-          runtime_status: "running",
-        }],
+    vi.mocked(fetchCollaborationClaimableChannels).mockResolvedValue({
+      channels: [{
+        channel_type: "weixin",
+        channel_display_name: "WeChat",
+        instance_id: "support",
+        display_name: "Support",
+        status: "running",
       }],
-    } as never);
+    });
     vi.mocked(fetchSkills).mockResolvedValue({ skills: [] } as never);
     const initialPairing = {
       id: "challenge-support",
@@ -333,7 +378,7 @@ describe("bot and organization controls", () => {
   });
 
   it("uses the explicitly selected claimed channel for project assignment", async () => {
-    vi.mocked(fetchNanobotFeatures).mockResolvedValue({ features: [] } as never);
+    vi.mocked(fetchCollaborationClaimableChannels).mockResolvedValue({ channels: [] });
     vi.mocked(fetchSkills).mockResolvedValue({ skills: [] } as never);
     const beginPairing = vi.fn().mockResolvedValue({
       pairing: {
@@ -393,7 +438,7 @@ describe("bot and organization controls", () => {
   });
 
   it("saves the remaining sorted Skills while retaining unrelated capability settings", async () => {
-    vi.mocked(fetchNanobotFeatures).mockResolvedValue({ features: [] } as never);
+    vi.mocked(fetchCollaborationClaimableChannels).mockResolvedValue({ channels: [] });
     vi.mocked(fetchSkills).mockResolvedValue({
       skills: [
         { name: "alpha", description: "Alpha", source: "workspace", enabled: true },
@@ -442,7 +487,7 @@ describe("bot and organization controls", () => {
     { state: "active" as const, label: "Disable", expectedState: "disabled" as const },
     { state: "disabled" as const, label: "Enable", expectedState: "active" as const },
   ])("requests $expectedState when toggling a $state bot", async ({ state, label, expectedState }) => {
-    vi.mocked(fetchNanobotFeatures).mockResolvedValue({ features: [] } as never);
+    vi.mocked(fetchCollaborationClaimableChannels).mockResolvedValue({ channels: [] });
     vi.mocked(fetchSkills).mockResolvedValue({ skills: [] } as never);
     const bot = { ...releaseBot, state };
     const updateBotState = vi.fn().mockResolvedValue(undefined);

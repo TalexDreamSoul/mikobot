@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -12,7 +13,11 @@ from websockets.http11 import Request as WsRequest
 
 from nanobot.channels.websocket.runtime import TrustedProxyAuthConfig, WebSocketConfig
 from nanobot.collaboration import AsyncLocalCollaborationRepository, CollaborationStore
-from nanobot.collaboration.models import COLLABORATION_USER_METADATA_KEY, PairingPurpose
+from nanobot.collaboration.models import (
+    COLLABORATION_USER_METADATA_KEY,
+    OrganizationRole,
+    PairingPurpose,
+)
 from nanobot.cron.types import CronJob, CronPayload, CronSchedule
 from nanobot.session.manager import SessionManager
 from nanobot.webui.forking import handle_webui_fork_chat
@@ -69,6 +74,7 @@ async def _handler(tmp_path) -> GatewayHTTPHandler:
     handler._collaboration_init_lock = asyncio.Lock()
     handler._collaboration_initialized = False
     handler._collaboration_closed = False
+    handler._member_connect_sessions = {}
     handler.session_manager = sessions
     handler.tokens = SimpleNamespace(
         check_api_token=lambda request: request.headers.get("Authorization") == "Bearer local-token"
@@ -923,3 +929,319 @@ async def test_pairing_consume_activates_exact_current_target_once(
         package_install_allowed=False,
         channel_pairing_completed=True,
     )
+
+
+def _channel_instances_snapshot(
+    channel_type: str,
+    display_name: str,
+    instances: tuple[tuple[str, str], ...],
+) -> Any:
+    """Build one channel package exposing several named instances with a lifecycle."""
+    from nanobot.extensions.contracts import (
+        ExtensionAction,
+        ExtensionComponentDescriptor,
+        ExtensionComponentKind,
+        ExtensionExecution,
+        ExtensionLifecycle,
+        ExtensionPackageDescriptor,
+        ExtensionSnapshot,
+        ExtensionSource,
+        ExtensionTrust,
+        extension_component_id,
+        extension_package_id,
+    )
+
+    package_id = extension_package_id(ExtensionSource.CHANNEL_PACKAGE, channel_type)
+    return ExtensionSnapshot(
+        packages=(
+            ExtensionPackageDescriptor(
+                id=package_id,
+                name=channel_type,
+                display_name=display_name,
+                source=ExtensionSource.CHANNEL_PACKAGE,
+                trust=ExtensionTrust.FIRST_PARTY,
+                execution=ExtensionExecution.IN_PROCESS,
+                lifecycle=ExtensionLifecycle.DISABLED,
+                components=tuple(
+                    ExtensionComponentDescriptor(
+                        id=extension_component_id(
+                            package_id, ExtensionComponentKind.CHANNEL, instance_id
+                        ),
+                        package_id=package_id,
+                        kind=ExtensionComponentKind.CHANNEL,
+                        name=instance_id,
+                        display_name=instance_id,
+                        execution=ExtensionExecution.IN_PROCESS,
+                        lifecycle=ExtensionLifecycle(lifecycle),
+                        revision=f"{instance_id}-revision",
+                        actions=frozenset({ExtensionAction.ENABLE}),
+                    )
+                    for instance_id, lifecycle in instances
+                ),
+            ),
+        )
+    )
+
+
+def _connect_settings_dispatch(sessions: dict[str, str]) -> Any:
+    """Stand in for the channel package: mint an instance, then report success on poll."""
+    async def dispatch(_connection: Any, request: Any, path: str) -> Any:
+        match = re.fullmatch(
+            r"/api/settings/channels/([^/]+)/connect/(start|poll|cancel)", path
+        )
+        if match is None:
+            return None
+        payload = getattr(request, "_nanobot_webui_mutation_payload", {})
+        if match.group(2) == "start":
+            instance_id = str(payload["instance_id"])
+            session_id = f"session-{instance_id}"
+            sessions[session_id] = instance_id
+            return http_json_response({
+                "session_id": session_id,
+                "instance_id": instance_id,
+                "status": "pending",
+                "qr_url": "https://example.invalid/qr",
+            })
+        session_id = str(payload["session_id"])
+        return http_json_response({
+            "session_id": session_id,
+            "instance_id": sessions[session_id],
+            "status": str(payload.get("outcome", "succeeded")),
+            "pairing_required": True,
+        })
+
+    return dispatch
+
+
+async def _provision_channel_instance(
+    handler: GatewayHTTPHandler,
+    connection: Any,
+    sessions: dict[str, str],
+    *,
+    instance_id: str,
+    outcome: str = "succeeded",
+) -> None:
+    """Run one member-owned create-mode connect session through the mutation boundary."""
+    index = await handler.dispatch(connection, connection.request)
+    assert index is not None and index.status_code == 200
+    start = await handler.dispatch_webui_mutation(
+        connection,
+        "settings.channel.connect.start",
+        {"channel": "weixin", "mode": "create", "instance_id": instance_id},
+    )
+    assert start.status_code == 200
+    session_id = _json(start)["session_id"]
+    poll = await handler.dispatch_webui_mutation(
+        connection,
+        "settings.channel.connect.poll",
+        {"channel": "weixin", "session_id": session_id, "outcome": outcome},
+    )
+    assert poll.status_code == 200
+    assert sessions[session_id] == instance_id
+
+
+@pytest.mark.asyncio
+async def test_self_service_connect_makes_only_the_provisioner_instance_claimable(
+    tmp_path,
+) -> None:
+    """A member claims the instance they connected, and never a colleague's instance."""
+    handler = await _handler(tmp_path)
+    handler.settings = SimpleNamespace(
+        extensions=SimpleNamespace(
+            snapshot=MagicMock(
+                return_value=_channel_instances_snapshot(
+                    "weixin",
+                    "WeChat",
+                    (("wechat-aaa111", "enabled"), ("wechat-bbb222", "disabled")),
+                )
+            )
+        )
+    )
+    sessions: dict[str, str] = {}
+    handler.settings_routes = SimpleNamespace(
+        dispatch=_connect_settings_dispatch(sessions),
+        is_mutation_path=lambda _path: False,
+    )
+    first = _proxy_connection("connect-member-one")
+    second = _proxy_connection("connect-member-two")
+    await _provision_channel_instance(handler, first, sessions, instance_id="wechat-aaa111")
+    await _provision_channel_instance(handler, second, sessions, instance_id="wechat-bbb222")
+
+    listings: dict[str, list[dict[str, Any]]] = {}
+    for label, connection in (("first", first), ("second", second)):
+        request = _request(
+            "/api/collaboration/claimable-channels", dict(connection.request.headers)
+        )
+        response = await handler.dispatch(_connection(request), request)
+        assert response is not None and response.status_code == 200
+        listings[label] = _json(response)["channels"]
+
+    assert listings["first"] == [{
+        "channel_type": "weixin",
+        "channel_display_name": "WeChat",
+        "instance_id": "wechat-aaa111",
+        "display_name": "wechat-aaa111",
+        "status": "running",
+    }]
+    assert [item["instance_id"] for item in listings["second"]] == ["wechat-bbb222"]
+    assert listings["second"][0]["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_claimable_channels_omit_unattributed_abandoned_and_claimed_instances(
+    tmp_path,
+) -> None:
+    """Only a completed, still-present, still-unclaimed, self-provisioned instance is offered."""
+    handler = await _handler(tmp_path)
+    registry = SimpleNamespace(
+        snapshot=MagicMock(
+            return_value=_channel_instances_snapshot(
+                "weixin",
+                "WeChat",
+                (
+                    ("legacy", "enabled"),
+                    ("wechat-aaa111", "enabled"),
+                    ("wechat-ccc333", "disabled"),
+                ),
+            )
+        )
+    )
+    handler.settings = SimpleNamespace(extensions=registry)
+    sessions: dict[str, str] = {}
+    handler.settings_routes = SimpleNamespace(
+        dispatch=_connect_settings_dispatch(sessions),
+        is_mutation_path=lambda _path: False,
+    )
+    connection = _proxy_connection("connect-member-one")
+    await _provision_channel_instance(handler, connection, sessions, instance_id="wechat-aaa111")
+    await _provision_channel_instance(
+        handler, connection, sessions, instance_id="wechat-ccc333", outcome="failed"
+    )
+
+    request = _request(
+        "/api/collaboration/claimable-channels", dict(connection.request.headers)
+    )
+    before = await handler.dispatch(_connection(request), request)
+    assert before is not None and before.status_code == 200
+    assert [item["instance_id"] for item in _json(before)["channels"]] == ["wechat-aaa111"]
+
+    registry.snapshot.return_value = _channel_instances_snapshot(
+        "weixin", "WeChat", (("legacy", "enabled"),)
+    )
+    withdrawn = await handler.dispatch(_connection(request), request)
+    assert withdrawn is not None and _json(withdrawn)["channels"] == []
+
+    registry.snapshot.return_value = _channel_instances_snapshot(
+        "weixin", "WeChat", (("legacy", "enabled"), ("wechat-aaa111", "enabled"))
+    )
+    await _claim_channel_instance(handler, connection, "wechat-aaa111")
+    after = await handler.dispatch(_connection(request), request)
+
+    assert after is not None and after.status_code == 200
+    assert _json(after)["channels"] == []
+
+
+@pytest.mark.asyncio
+async def test_claimable_channels_do_not_reopen_the_host_inventory_read(tmp_path) -> None:
+    """The member listing is additive: the features read still derives no administration."""
+    handler = await _handler(tmp_path)
+    handler.settings = SimpleNamespace(
+        extensions=SimpleNamespace(
+            snapshot=MagicMock(
+                return_value=_channel_instances_snapshot(
+                    "weixin", "WeChat", (("wechat-aaa111", "enabled"),)
+                )
+            )
+        )
+    )
+    sessions: dict[str, str] = {}
+    connect_dispatch = _connect_settings_dispatch(sessions)
+    seen: list[tuple[object, object]] = []
+
+    async def settings_dispatch(connection: Any, request: Any, path: str) -> Any:
+        if path == "/api/settings/nanobot-features":
+            seen.append((
+                getattr(request, "_nanobot_settings_system_admin", None),
+                getattr(request, "_nanobot_settings_host_admin", None),
+            ))
+            return http_json_response({"features": [], "restricted": True})
+        return await connect_dispatch(connection, request, path)
+
+    handler.settings_routes = SimpleNamespace(
+        dispatch=settings_dispatch,
+        is_mutation_path=lambda _path: False,
+    )
+    connection = _proxy_connection("connect-member-one")
+    await _provision_channel_instance(handler, connection, sessions, instance_id="wechat-aaa111")
+
+    features_request = _request(
+        "/api/settings/nanobot-features", dict(connection.request.headers)
+    )
+    features = await handler.dispatch(_connection(features_request), features_request)
+    claimable_request = _request(
+        "/api/collaboration/claimable-channels", dict(connection.request.headers)
+    )
+    claimable = await handler.dispatch(_connection(claimable_request), claimable_request)
+
+    assert features is not None and _json(features)["features"] == []
+    assert seen == [(False, False)]
+    assert claimable is not None and claimable.status_code == 200
+    assert [item["instance_id"] for item in _json(claimable)["channels"]] == ["wechat-aaa111"]
+
+
+@pytest.mark.asyncio
+async def test_another_member_cannot_take_over_a_connect_session_provenance(tmp_path) -> None:
+    """Provenance follows the member who opened the session, not whoever polls it.
+
+    The intruder belongs to the organization the session was opened in, so nothing
+    but the session-owner check stands between them and a stolen claimable instance.
+    """
+    handler = await _handler(tmp_path)
+    handler.settings = SimpleNamespace(
+        extensions=SimpleNamespace(
+            snapshot=MagicMock(
+                return_value=_channel_instances_snapshot(
+                    "weixin", "WeChat", (("wechat-aaa111", "enabled"),)
+                )
+            )
+        )
+    )
+    sessions: dict[str, str] = {}
+    handler.settings_routes = SimpleNamespace(
+        dispatch=_connect_settings_dispatch(sessions),
+        is_mutation_path=lambda _path: False,
+    )
+    owner = _proxy_connection("connect-member-one")
+    intruder = _proxy_connection("connect-member-two")
+    identities: dict[str, str] = {}
+    organizations: dict[str, str] = {}
+    for label, connection in (("owner", owner), ("intruder", intruder)):
+        index = await handler.dispatch(connection, connection.request)
+        assert index is not None and index.status_code == 200
+        identities[label] = _json(index)["user"]["id"]
+        organizations[label] = _json(index)["active_organization_id"]
+    await handler.collaboration.add_organization_member(
+        organizations["owner"], identities["owner"], identities["intruder"],
+        OrganizationRole.MEMBER,
+    )
+
+    start = await handler.dispatch_webui_mutation(
+        owner,
+        "settings.channel.connect.start",
+        {"channel": "weixin", "mode": "create", "instance_id": "wechat-aaa111"},
+    )
+    assert start.status_code == 200
+    stolen = await handler.dispatch_webui_mutation(
+        intruder,
+        "settings.channel.connect.poll",
+        {"channel": "weixin", "session_id": _json(start)["session_id"]},
+    )
+
+    assert stolen.status_code == 200
+    for connection in (owner, intruder):
+        request = _request(
+            "/api/collaboration/claimable-channels", dict(connection.request.headers)
+        )
+        response = await handler.dispatch(_connection(request), request)
+        assert response is not None and response.status_code == 200
+        assert _json(response)["channels"] == []

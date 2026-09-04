@@ -718,7 +718,7 @@ def test_legacy_collaboration_migration_persists_a_default_vault(tmp_path: Path)
         restored.default_vault_id
     ]
     persisted = json.loads(store.path.read_text(encoding="utf-8"))
-    assert persisted["schemaVersion"] == 7
+    assert persisted["schemaVersion"] == 8
     assert persisted["users"][legacy_user.id]["defaultVaultId"] == restored.default_vault_id
     assert persisted["vaults"][restored.default_vault_id]["ownerUserId"] == legacy_user.id
 
@@ -760,7 +760,7 @@ def test_v4_migration_assigns_personal_organizations_and_project_ownership(
     migrated.create_user("post-upgrade")
     persisted = json.loads(store.path.read_text(encoding="utf-8"))
 
-    assert persisted["schemaVersion"] == 7
+    assert persisted["schemaVersion"] == 8
     for user, project in ((alice, alice_project), (bob, bob_project)):
         organizations = migrated.list_organizations(user.id)
         assert len(organizations) == 1
@@ -879,7 +879,7 @@ def test_v6_pairing_migration_marks_legacy_challenges_unbound_and_persists(
         )
     assert migrated.resolve_identity("weixin.legacy", "legacy-sender") is None
     persisted = json.loads(store.path.read_text(encoding="utf-8"))
-    assert persisted["schemaVersion"] == 7
+    assert persisted["schemaVersion"] == 8
     assert persisted["pairingChallenges"][challenge.id]["channelRevision"] == "legacy-unbound"
 
     reloaded = CollaborationStore(store_path=store.path)
@@ -1540,4 +1540,150 @@ def test_store_rejects_tampered_cross_organization_vault_share(tmp_path: Path) -
     store.path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(CollaborationStoreFormatError, match="organization"):
+        CollaborationStore(store_path=store.path).list_users()
+
+
+def test_v7_migration_leaves_existing_channel_instances_unattributed(tmp_path: Path) -> None:
+    """An instance that predates provenance is offered to nobody, not to whoever asks first."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner = store.create_user("legacy owner")
+    organization = store.create_organization(owner.id, "Legacy organization")
+    member = store.create_user("legacy member")
+    store.add_organization_member(organization.id, owner.id, member.id, OrganizationRole.MEMBER)
+    payload = json.loads(store.path.read_text(encoding="utf-8"))
+    payload["schemaVersion"] = 7
+    del payload["channelProvisions"]
+    store.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = CollaborationStore(store_path=store.path)
+
+    assert migrated.list_claimable_channels(owner.id) == []
+    assert migrated.list_claimable_channels(member.id) == []
+    assert {user.id for user in migrated.list_users()} == {owner.id, member.id}
+    persisted = json.loads(store.path.read_text(encoding="utf-8"))
+    assert persisted["schemaVersion"] == 8
+    assert persisted["channelProvisions"] == {}
+
+
+def test_claimable_channels_are_scoped_to_their_unclaimed_provisioner(tmp_path: Path) -> None:
+    """A member sees the instances they provisioned, until someone claims them."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner = store.create_user("studio owner")
+    provisioner = store.create_user("provisioner")
+    colleague = store.create_user("colleague")
+    organization = store.create_organization(owner.id, "Studio")
+    for member in (provisioner, colleague):
+        store.add_organization_member(
+            organization.id, owner.id, member.id, OrganizationRole.MEMBER
+        )
+    bot = store.create_bot(owner.id, organization.id, "Release bot")
+
+    provision = store.record_channel_provision(
+        provisioner.id,
+        channel_type="weixin",
+        instance_id="wechat-a1b2c3",
+        organization_id=organization.id,
+    )
+    assert provision.created_by_user_id == provisioner.id
+
+    assert [
+        (item.channel_type, item.instance_id)
+        for item in store.list_claimable_channels(provisioner.id)
+    ] == [("weixin", "wechat-a1b2c3")]
+    assert store.list_claimable_channels(colleague.id) == []
+    assert store.list_claimable_channels(owner.id) == []
+
+    with pytest.raises(CollaborationConflictError, match="provisioned by another user"):
+        store.record_channel_provision(
+            colleague.id,
+            channel_type="weixin",
+            instance_id="wechat-a1b2c3",
+            organization_id=organization.id,
+        )
+    assert store.record_channel_provision(
+        provisioner.id,
+        channel_type="weixin",
+        instance_id="wechat-a1b2c3",
+        organization_id=organization.id,
+    ) == provision
+
+    challenge, code = store.create_pairing_challenge(
+        owner.id,
+        purpose=PairingPurpose.CLAIM_CHANNEL,
+        organization_id=organization.id,
+        bot_id=bot.id,
+        channel_type="weixin",
+        instance_id="wechat-a1b2c3",
+        channel_revision="r1",
+    )
+    store.verify_pairing_challenge(
+        code,
+        channel_type="weixin",
+        instance_id="wechat-a1b2c3",
+        sender_id="provisioner-sender",
+        channel_revision="r1",
+    )
+    store.consume_pairing_challenge(owner.id, challenge.id, channel_revision="r1")
+
+    assert store.list_claimable_channels(provisioner.id) == []
+
+
+def test_removing_an_organization_member_withdraws_their_claimable_instances(
+    tmp_path: Path,
+) -> None:
+    """Provenance follows membership: a departed member leaves nothing claimable behind."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner = store.create_user("studio owner")
+    provisioner = store.create_user("provisioner")
+    organization = store.create_organization(owner.id, "Studio")
+    store.add_organization_member(
+        organization.id, owner.id, provisioner.id, OrganizationRole.MEMBER
+    )
+    store.record_channel_provision(
+        provisioner.id,
+        channel_type="feishu",
+        instance_id="engineering",
+        organization_id=organization.id,
+    )
+
+    assert store.remove_organization_member(organization.id, owner.id, provisioner.id)
+
+    assert store.list_claimable_channels(provisioner.id) == []
+    assert json.loads(store.path.read_text(encoding="utf-8"))["channelProvisions"] == {}
+
+
+def test_channel_provision_requires_organization_membership(tmp_path: Path) -> None:
+    """Provisioning is recorded inside a tenant the actor belongs to, or not at all."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner = store.create_user("studio owner")
+    outsider = store.create_user("outsider")
+    organization = store.create_organization(owner.id, "Studio")
+
+    with pytest.raises(CollaborationPermissionError):
+        store.record_channel_provision(
+            outsider.id,
+            channel_type="weixin",
+            instance_id="wechat-outsider",
+            organization_id=organization.id,
+        )
+    assert store.list_claimable_channels(outsider.id) == []
+
+
+def test_store_rejects_tampered_cross_organization_channel_provision(tmp_path: Path) -> None:
+    """A hand-written provenance row cannot grant an outsider a claimable instance."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner = store.create_user("owner")
+    outsider = store.create_user("outsider")
+    organization = store.create_organization(owner.id, "Studio")
+    payload = json.loads(store.path.read_text(encoding="utf-8"))
+    payload["channelProvisions"]["weixin\x00tampered"] = {
+        "channelType": "weixin",
+        "instanceId": "tampered",
+        "organizationId": organization.id,
+        "createdByUserId": outsider.id,
+        "createdAtMs": 0,
+    }
+    store.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CollaborationStoreFormatError, match="organization membership"):
         CollaborationStore(store_path=store.path).list_users()

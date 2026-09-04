@@ -16,18 +16,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { CollaborationProjectsController } from "@/hooks/useCollaborationProjects";
 import {
+  ApiError,
+  fetchCollaborationClaimableChannels,
   fetchCollaborationPairing,
-  fetchNanobotFeatures,
   fetchSkillDetail,
   fetchSkills,
 } from "@/lib/api";
 import type {
+  CollaborationClaimableChannel,
   CollaborationPairingChallenge,
-  NanobotFeatureInfo,
   SkillDetail,
   SkillSummary,
 } from "@/lib/types";
-import { nanobotFeaturesRestricted } from "@/components/settings/contracts";
 import { useClient } from "@/providers/ClientProvider";
 
 interface ChannelOption {
@@ -45,13 +45,13 @@ export function BotManagementPanel({
   const { t } = useTranslation();
   const { getToken } = useClient();
   const [name, setName] = useState("");
-  const [featuresLoading, setFeaturesLoading] = useState(true);
+  const [channelsLoading, setChannelsLoading] = useState(true);
   const [skillsLoading, setSkillsLoading] = useState(true);
-  const [featuresError, setFeaturesError] = useState<string | null>(null);
-  const [featuresRestricted, setFeaturesRestricted] = useState(false);
+  const [channelsError, setChannelsError] = useState<string | null>(null);
+  const [channelsRestricted, setChannelsRestricted] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [discoveryRevision, setDiscoveryRevision] = useState(0);
-  const [features, setFeatures] = useState<NanobotFeatureInfo[]>([]);
+  const [claimable, setClaimable] = useState<CollaborationClaimableChannel[]>([]);
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [skillDetail, setSkillDetail] = useState<SkillDetail | null>(null);
   const [skillDetailLoading, setSkillDetailLoading] = useState(false);
@@ -81,22 +81,27 @@ export function BotManagementPanel({
 
   useEffect(() => {
     let cancelled = false;
-    setFeaturesLoading(true);
+    setChannelsLoading(true);
     setSkillsLoading(true);
-    setFeaturesError(null);
+    setChannelsError(null);
+    setChannelsRestricted(false);
     setSkillsError(null);
-    void fetchNanobotFeatures(getToken())
+    void fetchCollaborationClaimableChannels(getToken())
       .then((payload) => {
-        if (!cancelled) {
-          setFeatures(payload.features.filter((feature) => feature.type === "channel"));
-          setFeaturesRestricted(nanobotFeaturesRestricted(payload));
-        }
+        if (!cancelled) setClaimable(payload.channels);
       })
       .catch((reason) => {
-        if (!cancelled) setFeaturesError((reason as Error).message);
+        if (cancelled) return;
+        // A refusal means "you may not ask", which is a different answer from an
+        // empty list. The screen must not present them as the same state.
+        if (reason instanceof ApiError && (reason.status === 401 || reason.status === 403)) {
+          setChannelsRestricted(true);
+          return;
+        }
+        setChannelsError((reason as Error).message);
       })
       .finally(() => {
-        if (!cancelled) setFeaturesLoading(false);
+        if (!cancelled) setChannelsLoading(false);
       });
     void fetchSkills(getToken())
       .then((payload) => {
@@ -147,25 +152,12 @@ export function BotManagementPanel({
     };
   }, [getToken, pairing, projects.finishPairing]);
 
-  const channelOptions = useMemo<ChannelOption[]>(() => features.flatMap((feature) => {
-    const instances = feature.instances?.length
-      ? feature.instances
-      : [{
-          id: "default",
-          name: feature.display_name,
-          enabled: feature.enabled,
-          configured: Boolean(feature.configured),
-          config_values: {},
-          configured_fields: [],
-          runtime_status: feature.runtime_status,
-        }];
-    return instances.map((instance) => ({
-      channelType: feature.name,
-      instanceId: instance.id,
-      label: `${feature.display_name} · ${instance.display_name?.trim() || instance.name || instance.id}`,
-      status: instance.runtime_status ?? (instance.enabled ? "running" : "stopped"),
-    }));
-  }), [features]);
+  const channelOptions = useMemo<ChannelOption[]>(() => claimable.map((channel) => ({
+    channelType: channel.channel_type,
+    instanceId: channel.instance_id,
+    label: `${channel.channel_display_name} · ${channel.display_name.trim() || channel.instance_id}`,
+    status: channel.status,
+  })), [claimable]);
 
   const activeBot = projects.summary?.bots.find((bot) => bot.id === projects.botId) ?? null;
   const activeProject = projects.summary?.projects.find((project) => project.id === projects.projectId) ?? null;
@@ -401,27 +393,32 @@ export function BotManagementPanel({
             <label className="block text-xs font-medium" htmlFor="bot-channel-instance">
               {t("projects.bots.channelInstance")}
             </label>
-            {featuresLoading ? (
+            {channelsLoading ? (
               <p className="text-xs text-muted-foreground">{t("projects.bots.loadingChannels")}</p>
             ) : null}
-            {featuresError ? (
+            {channelsError ? (
               <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
-                <span>{t("projects.bots.loadChannelsFailed", { error: featuresError })}</span>
+                <span>{t("projects.bots.loadChannelsFailed", { error: channelsError })}</span>
                 <Button type="button" size="sm" variant="outline" onClick={() => setDiscoveryRevision((value) => value + 1)}>
                   {t("common.retry")}
                 </Button>
               </div>
             ) : null}
-            {featuresRestricted ? (
+            {channelsRestricted ? (
               <p className="text-xs text-muted-foreground">
                 {t("projects.bots.channelsRestricted")}
+              </p>
+            ) : null}
+            {!channelsLoading && !channelsError && !channelsRestricted && !channelOptions.length ? (
+              <p className="text-xs text-muted-foreground">
+                {t("projects.bots.noClaimableChannels")}
               </p>
             ) : null}
             <select
               id="bot-channel-instance"
               value={selectedChannel}
               onChange={(event) => setSelectedChannel(event.target.value)}
-              disabled={featuresLoading || Boolean(featuresError) || featuresRestricted}
+              disabled={channelsLoading || Boolean(channelsError) || channelsRestricted}
               className="h-11 w-full rounded-control border border-input bg-background px-3 text-sm disabled:opacity-60"
             >
               <option value="">{t("projects.bots.chooseChannel")}</option>

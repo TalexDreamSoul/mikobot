@@ -65,6 +65,7 @@ from nanobot.webui.collaboration_api import (
     bot_payload,
     bot_project_channel_payload,
     bot_project_payload,
+    claimable_channel_payload,
     context_source_payload,
     create_assignee,
     extension_profile_payload,
@@ -206,6 +207,10 @@ _SETTINGS_ADMIN_ATTR = "_nanobot_settings_system_admin"
 # widen what host state they may read.
 _SETTINGS_HOST_ADMIN_ATTR = "_nanobot_settings_host_admin"
 _NO_STORE_HEADERS = [("Cache-Control", "no-store")]
+# Self-service connect sessions the gateway elevated a member to run.  Provenance is
+# written when the instance actually lands, so an abandoned QR scan leaves no record.
+_MAX_TRACKED_CONNECT_SESSIONS = 256
+_CONNECT_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "expired", "cancelled"})
 
 _WEBUI_MUTATION_PATHS = {
     "automation.enable": "/api/webui/automations/enable",
@@ -359,9 +364,82 @@ def _is_string_dict(value: object) -> TypeGuard[dict[str, object]]:
     return all(isinstance(key, str) for key in mapping)
 
 
+def _claimable_channel_presentation(
+    snapshot: object, channel_type: str, instance_id: str
+) -> tuple[str, str, str] | None:
+    """Return the public channel name, instance name, and runtime status, or nothing.
+
+    An instance the registry no longer exposes is not claimable — a Pair Code for it
+    would fail on its missing revision — so it is dropped instead of listed.
+    """
+    from nanobot.extensions.adapters.common import canonical_extension_name
+    from nanobot.extensions.contracts import (
+        ExtensionComponentKind,
+        ExtensionLifecycle,
+        ExtensionSnapshot,
+        ExtensionSource,
+        extension_package_id,
+    )
+
+    if not isinstance(snapshot, ExtensionSnapshot):
+        return None
+    package_id = extension_package_id(
+        ExtensionSource.CHANNEL_PACKAGE,
+        canonical_extension_name(channel_type, fallback="channel"),
+    )
+    package = next(
+        (item for item in snapshot.packages if item.id == package_id), None
+    )
+    if package is None:
+        return None
+    component_name = canonical_extension_name(instance_id, fallback="instance")
+    component = next(
+        (
+            candidate
+            for candidate in package.components
+            if candidate.kind is ExtensionComponentKind.CHANNEL
+            and candidate.name == component_name
+        ),
+        None,
+    )
+    if component is None:
+        return None
+    if component.lifecycle is ExtensionLifecycle.ENABLED:
+        status = "running"
+    elif component.lifecycle in {
+        ExtensionLifecycle.ENABLING, ExtensionLifecycle.RELOADING
+    }:
+        status = "starting"
+    elif component.lifecycle is ExtensionLifecycle.FAILED:
+        status = "failed"
+    else:
+        status = "stopped"
+    return package.display_name, component.display_name, status
+
+
 def _mutation_payload(request: WsRequest) -> dict[str, object] | None:
     payload: object = getattr(request, _WEBUI_MUTATION_PAYLOAD_ATTR, None)
     return payload if _is_string_dict(payload) else None
+
+
+def _connect_result(response: Response) -> tuple[str, str, str] | None:
+    """Return the connect status, session, and instance a channel package reported."""
+    if (
+        response.status_code != 200
+        or _case_insensitive_header(response.headers, "Content-Encoding") != ""
+    ):
+        return None
+    try:
+        payload: object = json.loads(bytes(response.body).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not _is_string_dict(payload):
+        return None
+    values = [payload.get(key) for key in ("status", "session_id", "instance_id")]
+    status, session_id, instance_id = (
+        value.strip() if isinstance(value, str) else "" for value in values
+    )
+    return (status, session_id, instance_id) if status else None
 
 
 def _request_query(request: WsRequest) -> dict[str, list[str]]:
@@ -462,6 +540,7 @@ class GatewayHTTPHandler:
         self._collaboration_init_lock = asyncio.Lock()
         self._collaboration_initialized = False
         self._collaboration_closed = False
+        self._member_connect_sessions: dict[str, tuple[str, str, str]] = {}
         self._webui_connections = webui_connections
         self.static_dist_path = static_dist_path
         self.runtime_model_name = runtime_model_name
@@ -685,6 +764,116 @@ class GatewayHTTPHandler:
         except (CollaborationStoreError, ValueError):
             return False
         return False
+
+    async def _track_member_connect_session(
+        self,
+        request: WsRequest,
+        connect_action: str,
+        payload: Mapping[str, object],
+        response: Response,
+    ) -> None:
+        """Follow one member-run connect session and record who provisioned its instance.
+
+        The channel package mints the instance ID, so ownership is only knowable here,
+        where the gateway already elevated this member to create it.  Nothing is written
+        until the session reports success: an abandoned QR scan must not reserve an ID.
+        """
+        actor_user_id = getattr(request, _SETTINGS_ACTOR_USER_ATTR, None)
+        result = _connect_result(response)
+        channel_type = self._connect_channel_type(request)
+        if (
+            not isinstance(actor_user_id, str)
+            or not actor_user_id
+            or result is None
+            or channel_type is None
+        ):
+            return
+        status, session_id, instance_id = result
+        if connect_action == "start" and str(payload.get("mode", "")).strip() == "create":
+            await self._open_member_connect_session(
+                request, actor_user_id, channel_type, status, session_id, instance_id
+            )
+            return
+        await self._finish_member_connect_session(
+            actor_user_id, channel_type, status, session_id, instance_id
+        )
+
+    async def _open_member_connect_session(
+        self,
+        request: WsRequest,
+        actor_user_id: str,
+        channel_type: str,
+        status: str,
+        session_id: str,
+        instance_id: str,
+    ) -> None:
+        """Remember one create-mode session so its later success can be attributed."""
+        organization_id = getattr(request, _SETTINGS_ACTOR_ORG_ATTR, None)
+        if not instance_id:
+            return
+        if not isinstance(organization_id, str) or not organization_id:
+            self._log.warning(
+                "skipping channel provenance for a member without an organization"
+            )
+            return
+        if status == "succeeded":
+            await self._record_channel_provision(
+                actor_user_id, channel_type, instance_id, organization_id
+            )
+            return
+        if not session_id:
+            return
+        if len(self._member_connect_sessions) >= _MAX_TRACKED_CONNECT_SESSIONS:
+            self._member_connect_sessions.pop(
+                next(iter(self._member_connect_sessions)), None
+            )
+        self._member_connect_sessions[session_id] = (
+            actor_user_id, channel_type, organization_id
+        )
+
+    async def _finish_member_connect_session(
+        self,
+        actor_user_id: str,
+        channel_type: str,
+        status: str,
+        session_id: str,
+        instance_id: str,
+    ) -> None:
+        """Attribute a finished session to the member who opened it, then forget it."""
+        tracked = self._member_connect_sessions.get(session_id) if session_id else None
+        if tracked is None:
+            return
+        if status in _CONNECT_TERMINAL_STATUSES:
+            del self._member_connect_sessions[session_id]
+        tracked_actor, tracked_channel_type, organization_id = tracked
+        if status != "succeeded" or not instance_id:
+            return
+        if tracked_actor != actor_user_id or tracked_channel_type != channel_type:
+            return
+        await self._record_channel_provision(
+            actor_user_id, channel_type, instance_id, organization_id
+        )
+
+    async def _record_channel_provision(
+        self, actor_user_id: str, channel_type: str, instance_id: str, organization_id: str
+    ) -> None:
+        try:
+            await self.collaboration.record_channel_provision(
+                actor_user_id,
+                channel_type=channel_type,
+                instance_id=instance_id,
+                organization_id=organization_id,
+            )
+        except (CollaborationStoreError, ValueError):
+            self._log.exception("unable to record channel instance provenance")
+
+    @staticmethod
+    def _connect_channel_type(request: WsRequest) -> str | None:
+        match = re.fullmatch(
+            r"/api/settings/channels/([^/]+)/connect/(?:start|poll|cancel)",
+            _parse_request_path(request.path)[0],
+        )
+        return unquote(match.group(1)).strip() or None if match is not None else None
 
     @staticmethod
     def _channel_control_target(
@@ -1010,6 +1199,10 @@ class GatewayHTTPHandler:
         # Settings routes (delegated)
         response = await self.settings_routes.dispatch(connection, request, got)
         if response is not None:
+            if connect_match is not None:
+                await self._track_member_connect_session(
+                    request, connect_match.group(1), mutation_payload, response
+                )
             return response
 
         # Collaboration routes
@@ -1068,6 +1261,8 @@ class GatewayHTTPHandler:
             return await self._handle_personal_ics(request)
         if path == "/api/collaboration/organizations":
             return await self._handle_collaboration_organizations(request)
+        if path == "/api/collaboration/claimable-channels":
+            return await self._handle_collaboration_claimable_channels(request)
         match = re.fullmatch(r"/api/collaboration/organizations/([^/]+)", path)
         if match is not None:
             return await self._handle_collaboration_organization(request, unquote(match.group(1)))
@@ -1159,6 +1354,47 @@ class GatewayHTTPHandler:
             {"organizations": [organization_payload(item) for item in organizations]},
             extra_headers=_NO_STORE_HEADERS,
         )
+
+    async def _handle_collaboration_claimable_channels(self, request: WsRequest) -> Response:
+        """List only the unclaimed instances this member provisioned for themselves.
+
+        This replaces the host inventory the claim dropdown used to read.  It answers one
+        member's own question and cannot enumerate another tenant's instances, so it stays
+        additive to — never a reopening of — the closed `nanobot-features` read scope.
+        """
+        identity = await self._collaboration_user_or_error(request)
+        if isinstance(identity, Response):
+            return identity
+        user, _local_owner = identity
+        registry = self.settings.extensions
+        if registry is None:
+            return _http_error(503, "channel registry is unavailable")
+        try:
+            provisions = (await self.collaboration.list_claimable_channels(user.id))[:256]
+        except (CollaborationStoreError, ValueError):
+            return _http_error(503, "collaboration service unavailable")
+        try:
+            snapshot = registry.snapshot()
+        except Exception:
+            self._log.exception("unable to read the channel registry snapshot")
+            return _http_error(503, "channel registry is unavailable")
+        channels: list[dict[str, object]] = []
+        for provision in provisions:
+            presentation = _claimable_channel_presentation(
+                snapshot, provision.channel_type, provision.instance_id
+            )
+            if presentation is None:
+                continue
+            channel_display_name, instance_display_name, status = presentation
+            channels.append(
+                claimable_channel_payload(
+                    provision,
+                    channel_display_name=channel_display_name,
+                    instance_display_name=instance_display_name,
+                    status=status,
+                )
+            )
+        return _http_json_response({"channels": channels}, extra_headers=_NO_STORE_HEADERS)
 
     async def _handle_collaboration_organization(
         self, request: WsRequest, organization_id: str

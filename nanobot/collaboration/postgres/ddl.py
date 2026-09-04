@@ -917,6 +917,63 @@ ALTER TABLE nanobot_collaboration.collaboration_pairing_challenges
     ADD COLUMN IF NOT EXISTS channel_revision varchar(256) NOT NULL DEFAULT 'legacy-unbound';
 """
 
+# Channel provenance recorded at self-service provisioning time.  An instance with no row
+# here predates the record and is deliberately invisible to every member: guessing a
+# creator would turn a missing attribution into a takeover path.
+MIGRATION_7_DDL = r"""
+GRANT USAGE, CREATE ON SCHEMA nanobot_collaboration
+    TO nanobot_collaboration_policy_owner;
+CREATE TABLE IF NOT EXISTS nanobot_collaboration.collaboration_channel_provisions (
+    channel_type varchar(128) NOT NULL
+        CHECK (pg_catalog.length(pg_catalog.btrim(channel_type)) > 0),
+    instance_id varchar(128) NOT NULL
+        CHECK (pg_catalog.length(pg_catalog.btrim(instance_id)) > 0),
+    organization_id varchar(128) NOT NULL,
+    created_by_user_id varchar(128) NOT NULL,
+    created_at_ms bigint NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (channel_type, instance_id),
+    FOREIGN KEY (organization_id, created_by_user_id)
+        REFERENCES nanobot_collaboration.collaboration_organization_memberships
+        (organization_id, user_id) ON DELETE CASCADE
+);
+ALTER TABLE nanobot_collaboration.collaboration_channel_provisions
+    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nanobot_collaboration.collaboration_channel_provisions
+    FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS collaboration_channel_provisions_select
+    ON nanobot_collaboration.collaboration_channel_provisions;
+CREATE POLICY collaboration_channel_provisions_select
+ON nanobot_collaboration.collaboration_channel_provisions FOR SELECT
+USING (created_by_user_id = nanobot_collaboration.nanobot_current_user_id());
+DROP POLICY IF EXISTS collaboration_channel_provisions_insert
+    ON nanobot_collaboration.collaboration_channel_provisions;
+CREATE POLICY collaboration_channel_provisions_insert
+ON nanobot_collaboration.collaboration_channel_provisions FOR INSERT
+WITH CHECK (
+    created_by_user_id = nanobot_collaboration.nanobot_current_user_id()
+    AND nanobot_collaboration.nanobot_has_organization_role(
+        organization_id, ARRAY['owner','admin','member']::varchar[]
+    )
+);
+DROP POLICY IF EXISTS collaboration_channel_provisions_update
+    ON nanobot_collaboration.collaboration_channel_provisions;
+CREATE POLICY collaboration_channel_provisions_update
+ON nanobot_collaboration.collaboration_channel_provisions FOR UPDATE
+USING (created_by_user_id = nanobot_collaboration.nanobot_current_user_id())
+WITH CHECK (created_by_user_id = nanobot_collaboration.nanobot_current_user_id());
+DROP POLICY IF EXISTS collaboration_channel_provisions_delete
+    ON nanobot_collaboration.collaboration_channel_provisions;
+CREATE POLICY collaboration_channel_provisions_delete
+ON nanobot_collaboration.collaboration_channel_provisions FOR DELETE
+USING (created_by_user_id = nanobot_collaboration.nanobot_current_user_id());
+
+ALTER TABLE nanobot_collaboration.collaboration_channel_provisions
+    OWNER TO nanobot_collaboration_policy_owner;
+REVOKE CREATE ON SCHEMA nanobot_collaboration
+    FROM nanobot_collaboration_policy_owner;
+"""
+
 
 MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, INITIAL_SCHEMA_DDL),
@@ -924,5 +981,6 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (3, MIGRATION_3_DDL),
     (4, MIGRATION_4_DDL),
     (5, MIGRATION_5_DDL),
-    (6, MIGRATION_6_DDL)
+    (6, MIGRATION_6_DDL),
+    (7, MIGRATION_7_DDL),
 )

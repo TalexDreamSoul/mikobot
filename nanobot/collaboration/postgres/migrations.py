@@ -34,6 +34,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
     nanobot_collaboration.collaboration_bot_channel_assignments,
     nanobot_collaboration.collaboration_bot_project_channels,
     nanobot_collaboration.collaboration_bot_capability_profiles,
+    nanobot_collaboration.collaboration_channel_provisions,
     nanobot_collaboration.collaboration_pairing_challenges,
     nanobot_collaboration.collaboration_share_grants,
     nanobot_collaboration.collaboration_projects,

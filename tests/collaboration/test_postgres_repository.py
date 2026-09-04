@@ -734,3 +734,152 @@ async def test_postgres_migrations_are_idempotent(postgres_repository: PostgresR
             )
         ).fetchall()
     assert versions and all(count == 1 for _version, count in versions)
+
+
+async def test_postgres_claimable_channels_match_the_local_provenance_invariants(
+    postgres_repository: PostgresRepositoryTestContext,
+) -> None:
+    """PostgreSQL enforces the same creator, membership, and unclaimed rules as local JSON."""
+    repository = postgres_repository.repository
+    owner, member, organization, _project = await _shared_project(repository)
+    colleague = await repository.create_user(_name("colleague"))
+    await repository.add_organization_member(
+        organization.id, owner.id, colleague.id, OrganizationRole.MEMBER
+    )
+    bot = await repository.create_bot(owner.id, organization.id, _name("release-bot"))
+    instance_id = _name("wechat")
+    channel_revision = _name("channel-revision")
+
+    provision = await repository.record_channel_provision(
+        member.id,
+        channel_type="weixin",
+        instance_id=instance_id,
+        organization_id=organization.id,
+    )
+    assert provision.created_by_user_id == member.id
+    assert [
+        (item.channel_type, item.instance_id)
+        for item in await repository.list_claimable_channels(member.id)
+    ] == [("weixin", instance_id)]
+    assert await repository.list_claimable_channels(colleague.id) == []
+    assert await repository.list_claimable_channels(owner.id) == []
+
+    with pytest.raises(CollaborationConflictError, match="provisioned by another user"):
+        await repository.record_channel_provision(
+            colleague.id,
+            channel_type="weixin",
+            instance_id=instance_id,
+            organization_id=organization.id,
+        )
+    assert await repository.record_channel_provision(
+        member.id,
+        channel_type="weixin",
+        instance_id=instance_id,
+        organization_id=organization.id,
+    ) == provision
+
+    outsider = await repository.create_user(_name("outsider"))
+    with pytest.raises(CollaborationPermissionError):
+        await repository.record_channel_provision(
+            outsider.id,
+            channel_type="weixin",
+            instance_id=_name("outsider-instance"),
+            organization_id=organization.id,
+        )
+
+    claim, claim_code = await repository.create_pairing_challenge(
+        owner.id, purpose=PairingPurpose.CLAIM_CHANNEL, organization_id=organization.id,
+        bot_id=bot.id, channel_type="weixin", instance_id=instance_id,
+        channel_revision=channel_revision,
+    )
+    await repository.verify_pairing_challenge(
+        claim_code, channel_type="weixin", instance_id=instance_id,
+        channel_revision=channel_revision, sender_id=_name("claim-sender"),
+    )
+    await repository.consume_pairing_challenge(
+        owner.id, claim.id, channel_revision=channel_revision
+    )
+
+    assert await repository.list_claimable_channels(member.id) == []
+
+
+async def test_postgres_channel_provision_rls_hides_another_members_row(
+    postgres_repository: PostgresRepositoryTestContext,
+) -> None:
+    """Row-level security repeats the member scope, so a missed check cannot leak provenance."""
+    repository = postgres_repository.repository
+    owner, member, organization, _project = await _shared_project(repository)
+    instance_id = _name("wechat")
+    await repository.record_channel_provision(
+        member.id,
+        channel_type="weixin",
+        instance_id=instance_id,
+        organization_id=organization.id,
+    )
+
+    async with postgres_repository.session.transaction(owner.id) as connection:
+        visible = await (
+            await connection.execute(
+                "SELECT instance_id "
+                "FROM nanobot_collaboration.collaboration_channel_provisions "
+                "WHERE instance_id = %s",
+                (instance_id,),
+            )
+        ).fetchall()
+    assert visible == []
+    async with postgres_repository.session.transaction(member.id) as connection:
+        own = await (
+            await connection.execute(
+                "SELECT instance_id "
+                "FROM nanobot_collaboration.collaboration_channel_provisions "
+                "WHERE instance_id = %s",
+                (instance_id,),
+            )
+        ).fetchall()
+    assert own == [(instance_id,)]
+
+
+async def test_postgres_channel_provision_table_is_forced_rls_and_granted(
+    postgres_repository: PostgresRepositoryTestContext,
+) -> None:
+    """Migration seven ships the table with forced RLS, four policies, and a runtime grant."""
+    runtime_role = await _runtime_role(postgres_repository.runtime_dsn)
+    async with await AsyncConnection.connect(postgres_repository.migration_dsn) as connection:
+        versions = await (
+            await connection.execute(
+                "SELECT version FROM nanobot_collaboration.collaboration_schema_migrations "
+                "WHERE version = 7"
+            )
+        ).fetchall()
+        security = await (
+            await connection.execute(
+                "SELECT class.relrowsecurity, class.relforcerowsecurity "
+                "FROM pg_catalog.pg_class AS class "
+                "JOIN pg_catalog.pg_namespace AS namespace "
+                "  ON namespace.oid = class.relnamespace "
+                "WHERE namespace.nspname = 'nanobot_collaboration' "
+                "AND class.relname = 'collaboration_channel_provisions'"
+            )
+        ).fetchone()
+        commands = await (
+            await connection.execute(
+                "SELECT cmd FROM pg_catalog.pg_policies "
+                "WHERE schemaname = 'nanobot_collaboration' "
+                "AND tablename = 'collaboration_channel_provisions' "
+                "ORDER BY cmd"
+            )
+        ).fetchall()
+        grants = await (
+            await connection.execute(
+                "SELECT privilege_type FROM information_schema.role_table_grants "
+                "WHERE table_schema = 'nanobot_collaboration' "
+                "AND table_name = 'collaboration_channel_provisions' "
+                "AND grantee = %s ORDER BY privilege_type",
+                (runtime_role,),
+            )
+        ).fetchall()
+
+    assert versions == [(7,)]
+    assert security == (True, True)
+    assert {row[0] for row in commands} == {"SELECT", "INSERT", "UPDATE", "DELETE"}
+    assert {row[0] for row in grants} == {"SELECT", "INSERT", "UPDATE", "DELETE"}

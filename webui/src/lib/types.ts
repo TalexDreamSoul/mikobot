@@ -482,6 +482,14 @@ export interface CollaborationBotChannelAssignment {
   created_at_ms: number;
 }
 
+export interface CollaborationClaimableChannel {
+  channel_type: string;
+  channel_display_name: string;
+  instance_id: string;
+  display_name: string;
+  status: string;
+}
+
 export interface CollaborationBotProjectChannel {
   bot_id: string;
   project_id: string;
@@ -639,6 +647,10 @@ export interface CollaborationBotPayload {
 
 export interface CollaborationPairingPayload {
   pairing: CollaborationPairingChallenge;
+}
+
+export interface CollaborationClaimableChannelsPayload {
+  channels: CollaborationClaimableChannel[];
 }
 
 export type PersonalTaskReviewState = "confirmed" | "proposed" | "dismissed";

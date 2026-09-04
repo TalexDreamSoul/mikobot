@@ -23,6 +23,7 @@ from nanobot.collaboration.models import (
     BotProjectAssignment,
     BotProjectChannel,
     BotState,
+    ChannelProvision,
     ContextSource,
     ContextSourceKind,
     ConversationBinding,
@@ -62,7 +63,7 @@ from nanobot.collaboration.pairing import (
 )
 from nanobot.config.paths import get_runtime_subdir
 
-_SCHEMA = 7
+_SCHEMA = 8
 _MAX_FILE_BYTES = 2 * 1024 * 1024
 _MAX_ITEMS = 10_000
 _MAX_STRING = 512
@@ -88,6 +89,7 @@ class _StoreState(TypedDict):
     botChannelAssignments: dict[str, _Record]
     botProjectChannels: dict[str, _Record]
     botCapabilityProfiles: dict[str, _Record]
+    channelProvisions: dict[str, _Record]
     pairingChallenges: dict[str, _Record]
     shareGrants: dict[str, _Record]
     personalTasks: dict[str, _Record]
@@ -728,6 +730,9 @@ class CollaborationStore:
                 if key in bot_ids:
                     del state["bots"][key]
             del state["organizations"][organization_id]
+            for key, value in tuple(state["channelProvisions"].items()):
+                if value["organizationId"] == organization_id:
+                    del state["channelProvisions"][key]
             for key, value in tuple(state["organizationMemberships"].items()):
                 if value["organizationId"] == organization_id:
                     del state["organizationMemberships"][key]
@@ -815,6 +820,12 @@ class CollaborationStore:
                 ):
                     raise CollaborationConflictError("project must retain an owner")
             del state["organizationMemberships"][key]
+            for provision_key, provision_value in tuple(state["channelProvisions"].items()):
+                if (
+                    provision_value["organizationId"] == organization_id
+                    and provision_value["createdByUserId"] == user_id
+                ):
+                    del state["channelProvisions"][provision_key]
             for project_id, project_value in tuple(state["projects"].items()):
                 project = _project(project_value)
                 if project.organization_id != organization_id:
@@ -1087,6 +1098,63 @@ class CollaborationStore:
                     and route.project_id == project_id
                 ),
                 key=lambda route: (route.channel_type, route.instance_id),
+            )
+
+    def record_channel_provision(
+        self,
+        actor_user_id: str,
+        *,
+        channel_type: str,
+        instance_id: str,
+        organization_id: str,
+    ) -> ChannelProvision:
+        """Record that *actor_user_id* provisioned one channel instance.
+
+        The first record wins: re-provisioning an instance another member created
+        would turn self-service connect into a takeover path.
+        """
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        channel_type = _key(channel_type, "channel_type")
+        instance_id = _key(instance_id, "instance_id")
+        organization_id = _id(organization_id, "organization_id")
+        with self._state() as state:
+            self._require_organization_member(state, organization_id, actor_user_id)
+            key = _channel_instance_key(channel_type, instance_id)
+            existing_value = state["channelProvisions"].get(key)
+            if existing_value is not None:
+                existing = _channel_provision(existing_value)
+                if existing.created_by_user_id != actor_user_id:
+                    raise CollaborationConflictError(
+                        "channel instance was provisioned by another user"
+                    )
+                return existing
+            provision = ChannelProvision(
+                channel_type, instance_id, organization_id, actor_user_id, _now()
+            )
+            state["channelProvisions"][key] = _encode_channel_provision(provision)
+            self._save(state)
+            return provision
+
+    def list_claimable_channels(self, actor_user_id: str) -> list[ChannelProvision]:
+        """Return the unclaimed instances *actor_user_id* provisioned and may still claim.
+
+        Organization membership needs no filter here: ``_references`` refuses to load a
+        provision whose provisioner left, and both membership-removal paths delete the
+        row, exactly as the PostgreSQL foreign key cascades it.
+        """
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        with self._state() as state:
+            self._require_user(state, actor_user_id)
+            return sorted(
+                (
+                    provision
+                    for value in state["channelProvisions"].values()
+                    if (provision := _channel_provision(value)).created_by_user_id
+                    == actor_user_id
+                    and _channel_instance_key(provision.channel_type, provision.instance_id)
+                    not in state["botChannelAssignments"]
+                ),
+                key=lambda provision: (provision.channel_type, provision.instance_id),
             )
 
     def get_bot_capability_profile(
@@ -2543,6 +2611,7 @@ def _empty() -> _StoreState:
         "botChannelAssignments": {},
         "botProjectChannels": {},
         "botCapabilityProfiles": {},
+        "channelProvisions": {},
         "pairingChallenges": {},
         "shareGrants": {},
         "personalTasks": {},
@@ -2822,6 +2891,14 @@ def _migrate_v6(data: Mapping[str, object]) -> dict[str, object]:
         }
         for challenge_id, raw_challenge in challenges.items()
     }
+    migrated["schemaVersion"] = 7
+    return migrated
+
+
+def _migrate_v7(data: Mapping[str, object]) -> dict[str, object]:
+    """Start channel provenance empty; existing instances have no recorded creator."""
+    migrated = dict(data)
+    migrated["channelProvisions"] = {}
     migrated["schemaVersion"] = _SCHEMA
     return migrated
 
@@ -2841,6 +2918,8 @@ def _normalize(data: object) -> _StoreState:
         root = _migrate_v5(root)
     if root.get("schemaVersion") == 6:
         root = _migrate_v6(root)
+    if root.get("schemaVersion") == 7:
+        root = _migrate_v7(root)
     if set(root) != set(_empty()) or root.get("schemaVersion") != _SCHEMA:
         raise CollaborationStoreFormatError(
             "unsupported collaboration store schema")
@@ -2881,6 +2960,13 @@ def _normalize(data: object) -> _StoreState:
         root["botCapabilityProfiles"], "botCapabilityProfiles",
         _bot_capability_profile, _encode_bot_capability_profile,
         lambda profile: _bot_profile_key(profile.bot_id, profile.project_id),
+    )
+    result["channelProvisions"] = _normalize_collection(
+        root["channelProvisions"], "channelProvisions",
+        _channel_provision, _encode_channel_provision,
+        lambda provision: _channel_instance_key(
+            provision.channel_type, provision.instance_id
+        ),
     )
     result["pairingChallenges"] = _normalize_collection(
         root["pairingChallenges"], "pairingChallenges",
@@ -3028,6 +3114,16 @@ def _references(state: _StoreState) -> None:
         channel = bot_channels.get(_channel_instance_key(route.channel_type, route.instance_id))
         if channel is None or _bot_channel_assignment(channel).bot_id != route.bot_id:
             raise CollaborationStoreFormatError("bot project channel lacks channel assignment")
+    for value in state["channelProvisions"].values():
+        provision = _channel_provision(value)
+        if provision.organization_id not in organizations:
+            raise CollaborationStoreFormatError("channel provision organization is missing")
+        if _organization_member_key(
+            provision.organization_id, provision.created_by_user_id
+        ) not in organization_memberships:
+            raise CollaborationStoreFormatError(
+                "channel provisioner lacks organization membership"
+            )
     for value in state["botCapabilityProfiles"].values():
         profile = _bot_capability_profile(value)
         if profile.bot_id not in bots:
@@ -3345,6 +3441,30 @@ def _encode_bot_channel_assignment(assignment: BotChannelAssignment) -> _Record:
         "instanceId": assignment.instance_id,
         "claimedByUserId": assignment.claimed_by_user_id,
         "createdAtMs": assignment.created_at_ms,
+    }
+
+
+def _channel_provision(data: Mapping[str, object]) -> ChannelProvision:
+    _shape(
+        data,
+        {"channelType", "instanceId", "organizationId", "createdByUserId", "createdAtMs"},
+    )
+    return ChannelProvision(
+        channel_type=_key(data["channelType"], "channelType"),
+        instance_id=_key(data["instanceId"], "instanceId"),
+        organization_id=_id(data["organizationId"], "organizationId"),
+        created_by_user_id=_id(data["createdByUserId"], "createdByUserId"),
+        created_at_ms=_time(data["createdAtMs"]),
+    )
+
+
+def _encode_channel_provision(provision: ChannelProvision) -> _Record:
+    return {
+        "channelType": provision.channel_type,
+        "instanceId": provision.instance_id,
+        "organizationId": provision.organization_id,
+        "createdByUserId": provision.created_by_user_id,
+        "createdAtMs": provision.created_at_ms,
     }
 
 

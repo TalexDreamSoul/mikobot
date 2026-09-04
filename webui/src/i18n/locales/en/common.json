@@ -205,7 +205,7 @@
       "noClaimedChannels": "No claimed channels",
       "noProjects": "No assigned projects",
       "channelInstance": "Channel instance",
-      "chooseChannel": "Choose a channel instance", "channelsRestricted": "Only a system administrator can list the channel instances on this host. Ask an administrator to assign a channel to this bot.",
+      "chooseChannel": "Choose a channel instance", "channelsRestricted": "Your account is not permitted to list channel instances. Ask an administrator to assign a channel to this bot.", "noClaimableChannels": "No channel instances are waiting to be claimed. Connect one from Settings, then it appears here.",
       "claimChannel": "Claim channel",
       "projectChannel": "Claimed channel used for project verification",
       "chooseClaimedChannel": "Choose a claimed channel",

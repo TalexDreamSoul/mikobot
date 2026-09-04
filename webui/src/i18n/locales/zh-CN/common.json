@@ -205,7 +205,7 @@
       "noClaimedChannels": "尚未认领渠道",
       "noProjects": "尚未分配项目",
       "channelInstance": "渠道实例",
-      "chooseChannel": "请选择渠道实例", "channelsRestricted": "只有系统管理员可以列出此主机上的 channel 实例。请让管理员为此 bot 分配 channel。",
+      "chooseChannel": "请选择渠道实例", "channelsRestricted": "当前账号无权列出 channel 实例。请让管理员为此 bot 分配 channel。", "noClaimableChannels": "没有待认领的 channel 实例。请先在设置中连接一个，它会出现在这里。",
       "claimChannel": "认领渠道",
       "projectChannel": "用于项目验证的已认领渠道",
       "chooseClaimedChannel": "请选择已认领渠道",

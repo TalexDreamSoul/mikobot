@@ -13,6 +13,7 @@ from .models import (
     BotProjectAssignment,
     BotProjectChannel,
     BotState,
+    ChannelProvision,
     ContextSource,
     ContextSourceKind,
     ConversationBinding,
@@ -271,6 +272,19 @@ class AsyncLocalCollaborationRepository:
         return await asyncio.to_thread(
             self._store.list_bot_project_channels, actor_user_id, bot_id, project_id
         )
+
+    async def record_channel_provision(
+        self, actor_user_id: str, *, channel_type: str, instance_id: str,
+        organization_id: str,
+    ) -> ChannelProvision:
+        return await asyncio.to_thread(
+            self._store.record_channel_provision, actor_user_id,
+            channel_type=channel_type, instance_id=instance_id,
+            organization_id=organization_id,
+        )
+
+    async def list_claimable_channels(self, actor_user_id: str) -> list[ChannelProvision]:
+        return await asyncio.to_thread(self._store.list_claimable_channels, actor_user_id)
 
     async def get_bot_capability_profile(
         self, actor_user_id: str, bot_id: str, *, project_id: str | None = None

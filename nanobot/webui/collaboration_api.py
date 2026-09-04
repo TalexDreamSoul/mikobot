@@ -12,6 +12,7 @@ from nanobot.collaboration.models import (
     BotChannelAssignment,
     BotProjectAssignment,
     BotProjectChannel,
+    ChannelProvision,
     ContextSource,
     ContextSourceKind,
     ExtensionProfile,
@@ -76,6 +77,27 @@ def bot_channel_payload(assignment: BotChannelAssignment) -> dict[str, object]:
         "instance_id": assignment.instance_id,
         "claimed_by_user_id": assignment.claimed_by_user_id,
         "created_at_ms": assignment.created_at_ms,
+    }
+
+
+def claimable_channel_payload(
+    provision: ChannelProvision,
+    *,
+    channel_display_name: str,
+    instance_display_name: str,
+    status: str,
+) -> dict[str, object]:
+    """Serialize one claimable instance as the two public names the dropdown needs.
+
+    Deliberately narrower than the host inventory it replaces: no configured values,
+    no extension identity or revision, and no filesystem location.
+    """
+    return {
+        "channel_type": provision.channel_type,
+        "channel_display_name": channel_display_name,
+        "instance_id": provision.instance_id,
+        "display_name": instance_display_name,
+        "status": status,
     }
 
 
