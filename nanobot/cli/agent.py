@@ -130,6 +130,7 @@ def agent(
     from nanobot.cli import terminal as cli_terminal
     from nanobot.cli.stream import ThinkingSpinner
     from nanobot.cron.service import CronService
+    from nanobot.extensions.adapters import long_lived_hooks, registered_hook_factory
     from nanobot.extensions.runtime import build_core_extension_registry, runtime_skills_loader
     from nanobot.providers.factory import make_provider
     from nanobot.providers.image_generation import image_gen_provider_configs
@@ -169,6 +170,10 @@ def agent(
 
     _set_nanobot_logs(logs)
 
+    hooks = long_lived_hooks(
+        "cli",
+        registered_hook_factory("file-edit-activity", create_file_edit_activity_hook),
+    )
     try:
         agent_loop = agent_loop_class.from_config(
             runtime_config,
@@ -176,7 +181,8 @@ def agent(
             provider=provider,
             cron_service=cron,
             image_generation_provider_configs=image_gen_provider_configs(runtime_config),
-            hook_factories=[create_file_edit_activity_hook],
+            hooks=hooks.hooks,
+            hook_factories=hooks.hook_factories,
             tool_registry=tools,
         )
     except ValueError as exc:
@@ -187,6 +193,7 @@ def agent(
         tools,
         skills_loader=runtime_skills_loader(agent_loop),
         mcp_runtime_status=mcp_provider.runtime_status,
+        hooks=hooks,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):

@@ -2,7 +2,7 @@
 
 import asyncio
 import signal
-from collections.abc import Awaitable, Callable, Coroutine, Iterable
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
@@ -38,6 +38,10 @@ from nanobot.config.schema import Config
 from nanobot.extensions.adapters import (
     ChannelExtensionServices,
     OptionalFeatureExtensionServices,
+    ProviderExtensionServices,
+    long_lived_hooks,
+    registered_hook,
+    registered_hook_factory,
 )
 from nanobot.extensions.runtime import build_core_extension_registry, runtime_skills_loader
 from nanobot.gateway.runtime import GatewayInstance
@@ -489,6 +493,11 @@ def _run_gateway(
     )
 
     # Create agent with cron service
+    hooks = long_lived_hooks(
+        "gateway",
+        registered_hook("mcp-readiness", _MCPReadinessHook(mcp_provider)),
+        registered_hook_factory("file-edit-activity", create_file_edit_activity_hook),
+    )
     agent = AgentLoop.from_config(
         config, bus,
         provider=provider_snapshot.provider,
@@ -503,8 +512,8 @@ def _run_gateway(
         turn_delivery_factory=turn_delivery_factory,
         provider_signature=provider_snapshot.signature,
         local_trigger_store=trigger_store,
-        hooks=[_MCPReadinessHook(mcp_provider)],
-        hook_factories=[create_file_edit_activity_hook],
+        hooks=hooks.hooks,
+        hook_factories=hooks.hook_factories,
         tool_registry=tools,
         recovery_admission=recovery,
     )
@@ -543,6 +552,14 @@ def _run_gateway(
     )
     optional_feature_services = OptionalFeatureExtensionServices()
 
+    async def _reload_image_generation() -> Mapping[str, object]:
+        """Delegate to the one existing image runtime-control owner."""
+        from nanobot.agent.tools.image_generation import request_image_generation_reload
+
+        return await request_image_generation_reload(bus)
+
+    provider_services = ProviderExtensionServices(reload_image=_reload_image_generation)
+
 
     def _channel_runtime_status() -> dict[str, Any]:
         return channels.get_status()
@@ -556,6 +573,8 @@ def _run_gateway(
         channel_runtime_status=_channel_runtime_status,
         channel_services=channel_services,
         optional_feature_services=optional_feature_services,
+        provider_services=provider_services,
+        hooks=hooks,
     )
     def _schedule_webui_background(awaitable: Awaitable[None]) -> None:
         agent.schedule_background(cast(Coroutine[Any, Any, None], awaitable))

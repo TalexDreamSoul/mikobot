@@ -73,6 +73,10 @@ from nanobot.cli.webui_support import (  # noqa: E402
     _validate_gateway_startup,
 )
 from nanobot.config.paths import get_workspace_path  # noqa: E402
+from nanobot.extensions.adapters import (  # noqa: E402
+    long_lived_hooks,
+    registered_hook_factory,
+)
 from nanobot.extensions.runtime import (  # noqa: E402
     build_core_extension_registry,
     runtime_skills_loader,
@@ -344,12 +348,17 @@ def serve(
     session_manager = SessionManager(runtime_config.workspace_path)
     tools = ToolRegistry()
     mcp_provider = MCPProvider.from_config(runtime_config, tools)
+    hooks = long_lived_hooks(
+        "api",
+        registered_hook_factory("file-edit-activity", create_file_edit_activity_hook),
+    )
     try:
         agent_loop = AgentLoop.from_config(
             runtime_config, bus,
             session_manager=session_manager,
             image_generation_provider_configs=image_gen_provider_configs(runtime_config),
-            hook_factories=[create_file_edit_activity_hook],
+            hooks=hooks.hooks,
+            hook_factories=hooks.hook_factories,
             tool_registry=tools,
         )
     except ValueError as exc:
@@ -360,6 +369,7 @@ def serve(
         tools,
         skills_loader=runtime_skills_loader(agent_loop),
         mcp_runtime_status=mcp_provider.runtime_status,
+        hooks=hooks,
     )
 
     model_name, preset_tag = _model_display(runtime_config)

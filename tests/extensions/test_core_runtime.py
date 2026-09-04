@@ -14,6 +14,7 @@ from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistrationMetadata, ToolRegistry
 from nanobot.channels.websocket.runtime import WebSocketConfig
 from nanobot.config.schema import Config, MCPServerConfig
+from nanobot.extensions.adapters import LongLivedHooks
 from nanobot.extensions.contracts import (
     ExtensionAdapter,
     ExtensionLifecycle,
@@ -130,6 +131,7 @@ def test_core_runtime_composes_exact_adapters_from_live_dependencies(
         "configured-mcp",
         "channels",
         "optional-features",
+        "provider-registry",
     ]
     assert [component.name for component in packages[ExtensionSource.BUILTIN, "nanobot-tools"].components] == [
         "runtime_live",
@@ -137,7 +139,8 @@ def test_core_runtime_composes_exact_adapters_from_live_dependencies(
     assert packages[ExtensionSource.WORKSPACE, "runtime-skill"].revision is not None
     assert packages[ExtensionSource.CONFIGURED, "runtime-mcp"].lifecycle is ExtensionLifecycle.ENABLED
     assert skills.filter_values == [False]
-    assert loaded_config_calls == 2  # Configured MCP and channel adapters each load fresh config.
+    # Configured MCP, channel, and provider adapters each load fresh config.
+    assert loaded_config_calls == 3
     assert status_calls == 1  # Only the MCP adapter consumes its runtime-status callback.
 
 
@@ -208,6 +211,7 @@ def test_sdk_exposes_registry_built_after_default_tool_registration(
         skills_loader: SkillsLoader | None = None,
         config_loader: Callable[[], Config] | None = None,
         mcp_runtime_status: Callable[[], Mapping[str, str]] | None = None,
+        hooks: LongLivedHooks | None = None,
     ) -> ExtensionRegistry:
         observed_rows.extend((row.name, row.metadata.source) for row in tools.registration_snapshot())
         registry = original_builder(
@@ -216,16 +220,25 @@ def test_sdk_exposes_registry_built_after_default_tool_registration(
             skills_loader=skills_loader,
             config_loader=config_loader,
             mcp_runtime_status=mcp_runtime_status,
+            hooks=hooks,
         )
         built_registries.append(registry)
         return registry
 
     monkeypatch.setattr("nanobot.nanobot.build_core_extension_registry", record_builder)
     bot = Nanobot.from_config(config_path)
+    snapshot = bot.extensions.snapshot()
+    packages = {package.id: package for package in snapshot.packages}
 
     assert any(source is ExtensionSource.BUILTIN for _, source in observed_rows)
     assert bot.extensions is built_registries[0]
     assert not hasattr(bot._loop, "extensions")
-    assert extension_package_id(ExtensionSource.BUILTIN, "nanobot-tools") in {
-        package.id for package in bot.extensions.snapshot().packages
-    }
+    assert extension_package_id(ExtensionSource.BUILTIN, "nanobot-tools") in packages
+    assert extension_package_id(ExtensionSource.PROVIDER_REGISTRY, "openrouter") in packages
+
+    # The SDK's declared hooks are inventoried and are exactly what the loop executes.
+    hook_package = packages[extension_package_id(ExtensionSource.BUILTIN, "agent-hooks-sdk")]
+    assert [component.name for component in hook_package.components] == ["file-edit-activity"]
+    assert hook_package.lifecycle is ExtensionLifecycle.RESTART_REQUIRED
+    executed = [*bot._loop._extra_hooks, *bot._loop._hook_factories]
+    assert len(executed) == len(hook_package.components)

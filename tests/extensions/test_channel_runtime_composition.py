@@ -82,7 +82,7 @@ def _channel_component(snapshot: ExtensionSnapshot) -> ExtensionComponentDescrip
     )
 
 
-def test_runtime_registry_registers_six_adapters_and_keeps_config_only_channel_status(
+def test_runtime_registry_registers_core_adapters_and_keeps_config_only_channel_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -125,6 +125,7 @@ def test_runtime_registry_registers_six_adapters_and_keeps_config_only_channel_s
         "configured-mcp",
         "channels",
         "optional-features",
+        "provider-registry",
     ]
     assert [component.name for component in core_package.components] == ["composition-live"]
     assert _channel_component(snapshot).lifecycle is ExtensionLifecycle.DISABLED

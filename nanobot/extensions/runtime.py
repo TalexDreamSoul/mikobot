@@ -14,9 +14,14 @@ from nanobot.extensions.adapters import (
     ConfiguredMcpExtensionAdapter,
     CoreToolsExtensionAdapter,
     EffectiveSkillsExtensionAdapter,
+    HookExtensionAdapter,
+    LongLivedHooks,
     OptionalFeatureExtensionAdapter,
     OptionalFeatureExtensionServices,
+    ProviderExtensionServices,
+    ProviderRegistryExtensionAdapter,
 )
+from nanobot.extensions.adapters.providers import OAuthStatusReader
 from nanobot.extensions.registry import ExtensionRegistry
 
 
@@ -37,6 +42,9 @@ def build_core_extension_registry(
     channel_runtime_status: Callable[[], Mapping[str, Mapping[str, object]]] | None = None,
     channel_services: ChannelExtensionServices | None = None,
     optional_feature_services: OptionalFeatureExtensionServices | None = None,
+    provider_oauth_status: OAuthStatusReader | None = None,
+    provider_services: ProviderExtensionServices | None = None,
+    hooks: LongLivedHooks | None = None,
 ) -> ExtensionRegistry:
     """Compose the current runtime's core extension inventory without global state."""
     if skills_loader is None:
@@ -68,6 +76,15 @@ def build_core_extension_registry(
         )
     )
     registry.register(OptionalFeatureExtensionAdapter(services=optional_feature_services))
+    registry.register(
+        ProviderRegistryExtensionAdapter(
+            config_loader,
+            oauth_status=provider_oauth_status,
+            services=provider_services,
+        )
+    )
+    if hooks is not None:
+        registry.register(HookExtensionAdapter(hooks))
     return registry
 
 

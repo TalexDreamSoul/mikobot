@@ -13,6 +13,7 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.agent.tools.mcp import MCPProvider
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.config.schema import Config
+from nanobot.extensions.adapters import long_lived_hooks, registered_hook_factory
 from nanobot.extensions.registry import ExtensionRegistry
 from nanobot.extensions.runtime import build_core_extension_registry, runtime_skills_loader
 from nanobot.providers.base import LLMUsage
@@ -137,10 +138,15 @@ class Nanobot:
 
         tools = ToolRegistry()
         mcp_provider = MCPProvider.from_config(config, tools)
+        hooks = long_lived_hooks(
+            "sdk",
+            registered_hook_factory("file-edit-activity", create_file_edit_activity_hook),
+        )
         loop = AgentLoop.from_config(
             config,
             image_generation_provider_configs=image_gen_provider_configs(config),
-            hook_factories=[create_file_edit_activity_hook],
+            hooks=hooks.hooks,
+            hook_factories=hooks.hook_factories,
             tool_registry=tools,
         )
         extensions = build_core_extension_registry(
@@ -148,6 +154,7 @@ class Nanobot:
             tools,
             skills_loader=runtime_skills_loader(loop),
             mcp_runtime_status=mcp_provider.runtime_status,
+            hooks=hooks,
         )
         return cls(
             loop,
