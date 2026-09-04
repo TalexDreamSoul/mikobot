@@ -49,6 +49,20 @@ The provider half of this child is mechanical. The hook half is not, and it need
 
 **This decision is not made by this PRD.** A human owner must choose before the hook requirements below are implemented; R5 and R6 are written against Option A and must be revised if B or C is chosen. The provider requirements R1 through R4 are independent of this choice and can proceed immediately.
 
+### Decision — Option A, with Option C's honesty rules (2026-09-04)
+
+Chosen. Three independent lines point the same way:
+
+- `.agent/design.md` opens with "core stays small; extend at the edges" and requires changes to `agent/loop.py` to be minimal and justified. Option B changes the `AgentLoop` constructor signature. The `implement.md:110` escape hatch is conditional on no edge-owned alternative existing, and Option A *is* that alternative, so the hatch is not available.
+- The architecture audit's central finding was that this project reaches for a new framework layer where none is needed. Option B introduces a public SDK wrapper type to serve a read-only inventory; that is the same pattern.
+- Option C's blind spot is externally supplied hooks — precisely the operator-installed executable code that R5's trust disclosure exists for. An inventory that looks complete while omitting the riskiest rows is worse than one that is visibly partial.
+
+Option C's *honesty rules* are adopted regardless: hooks are startup-bound, so every row is read-only, declares only `INSPECT`, and reports `restart_required`. Claiming a hook can hot reload would be the same lie the parent PRD's R4 forbids.
+
+The drift risk Option A carries is real and must be converted into a test, not a comment: one shared helper returns the hook values and their descriptors together so each composition site writes the literal once, and a test asserts that all four production sites obtain hooks through that helper and that the descriptor set equals the value set. Without that test this decision is not implemented, only asserted.
+
+Revisit only if SDK and embedder hooks must be inventoried without caller cooperation. That is Option B, and the constructor change should be accepted explicitly at that point rather than arrived at by drift.
+
 ## Requirements
 
 ### R1 — One canonical package per provider family
