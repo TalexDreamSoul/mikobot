@@ -266,6 +266,18 @@ The installer writes `~/.config/systemd/user/nanobot-gateway.service`, runs
 current Python executable with `python -m nanobot gateway --foreground`, so the
 service runs in the same environment you used to install nanobot.
 
+### Surviving a bad self-edit
+
+`Restart=always` brings the gateway back, but it cannot help when the thing that keeps
+killing it is the state on disk. nanobot can edit its own installed code and rewrite its
+own config, so a bad self-edit restarts straight back into the same failure.
+
+[`deploy/systemd-guard/`](../deploy/systemd-guard/) is a worked example of closing that
+gap: a pre-start check that repairs invalid config and uncompilable self-edits in place,
+an hourly known-good snapshot taken only while the gateway is actually healthy, and a
+rollback that fires on a systemd-detected crash loop. It is copied from a real
+deployment with its paths hardcoded, so read it before adapting rather than after.
+
 > **Note:** User services only run while you are logged in. To keep the gateway running after logout, enable lingering:
 >
 > ```bash
