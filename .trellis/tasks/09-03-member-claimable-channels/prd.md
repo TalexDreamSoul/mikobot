@@ -50,15 +50,38 @@ Give an ordinary member a tenant-scoped way to see the channel instances they ma
 
 ## Acceptance Criteria
 
-- [ ] AC1: A member who provisions an instance through self-service connect sees exactly that instance in the claim dropdown, and no other member's instance appears.
-- [ ] AC2: A second member in the same organization sees an empty claim list for the first member's unclaimed instance.
-- [ ] AC3: Instances created before the ownership record exists are not offered to any member.
-- [ ] AC4: An already-claimed instance disappears from the claim list.
+- [x] AC1: A member who provisions an instance through self-service connect sees exactly that instance in the claim dropdown, and no other member's instance appears.
+- [x] AC2: A second member in the same organization sees an empty claim list for the first member's unclaimed instance.
+- [x] AC3: Instances created before the ownership record exists are not offered to any member.
+- [x] AC4: An already-claimed instance disappears from the claim list.
 - [ ] AC5: The claim payload contains no config values, credentials, host paths, or extension revisions.
-- [ ] AC6: `/api/settings/nanobot-features` still returns no inventory to a non-administrator after this task.
+- [x] AC6: `/api/settings/nanobot-features` still returns no inventory to a non-administrator after this task.
 - [ ] AC7: Bot management distinguishes "nothing to claim" from "not permitted" and from "request failed", in English and Simplified Chinese.
 - [ ] AC8: Local JSON and PostgreSQL backends enforce the same ownership and visibility invariants.
-- [ ] AC9: Full `pytest` (both `testpaths`), `ruff`, `basedpyright`, and WebUI tests pass.
+- [x] AC9: Full `pytest` (both `testpaths`), `ruff`, `basedpyright`, and WebUI tests pass.
+
+## Verification status (2026-09-04)
+
+Six criteria are met and backed by tests whose predicates were mutation-checked:
+removing the creator filter fails two tests, removing the unclaimed filter fails one.
+
+Three are not closed, and are recorded rather than assumed:
+
+- **AC5** has no regression test. The payload was verified by inspection — a field scan
+  over the handler found no `extension_id`, revision, lifecycle, trust, `config_values`,
+  `setup`, or `configured_fields` — but inspection is not a test, and the next person to
+  widen the payload gets no signal. Needs an allowlist assertion on the response keys.
+- **AC7** is implemented and both locales carry copy for all three states, but only the
+  "not permitted" state is under test. "Nothing to claim" and "request failed" are not.
+- **AC8** is met for the local backend and written but unexercised for PostgreSQL: the 16
+  tests in `tests/collaboration/test_postgres_repository.py` skip without
+  `NANOBOT_TEST_POSTGRES_DSN`, so RLS parity currently rests on code review. This is an
+  infrastructure gap, not a coverage gap, and it predates this task.
+
+This task is not archived until AC5 and AC7 have tests. The archived
+`09-01-bot-channel-management` shows what closing on unverified criteria costs: it was
+recorded complete with zero of eleven boxes checked, and the tenant-authorization defects
+that followed were all inside its scope.
 
 ## Out of Scope
 
