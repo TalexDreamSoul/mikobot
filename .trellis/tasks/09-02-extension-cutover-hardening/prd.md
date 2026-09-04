@@ -24,6 +24,25 @@ Delete every temporary compatibility presenter and duplicate lifecycle control t
 - Channel-owned WebUI modules are explicitly retained by the channel child's key decision (`.trellis/tasks/09-03-channel-optional-extension-adapters/prd.md:116`); Feishu and Weixin panels and generic channel forms are not cutover targets.
 - Existing WS routes that carry these payloads are `settings.feature.enable`/`disable`, `settings.channel.*`, `settings.cli_app.*`, and `settings.mcp.*` (`nanobot/webui/ws_http.py:237-258`), each mapped to an HTTP path in `nanobot/webui/settings_routes.py:98-142`.
 
+### Measured dead vocabulary (2026-09-04)
+
+The architecture audit counted 11 of 46 enum members with no producer anywhere in
+`nanobot/`, as evidence that the contract was designed for nine families while only some
+were wired. After the provider, hook, and channel adapters landed, 5 remain:
+
+| Member | Expected resolution |
+|---|---|
+| `ExtensionSource.CLI_APP` | `09-03-cli-app-extension-adapter` |
+| `ExtensionComponentKind.CLI_APP` | same |
+| `ExtensionAction.UNINSTALL` | same — uninstalling an installed CLI app |
+| `ExtensionLifecycle.DISABLING` | **no adapter emits it.** Delete unless a producer appears. |
+| `ExtensionLifecycle.CHANGED` | **no adapter emits it.** Same. |
+
+The first three are expected to gain producers. The last two are transient states nothing
+reports, and this task should delete them rather than leave vocabulary that reads as
+supported. Re-run the count before closing; a member that is still unused at cutover is
+not "reserved for later", it is a claim the contract cannot back.
+
 ## Requirements
 
 ### R1 — Delete the compatibility presenters
