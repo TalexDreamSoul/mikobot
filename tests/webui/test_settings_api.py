@@ -68,18 +68,23 @@ def test_settings_payload_propagates_preset_resolution_failure(
         settings_payload()
 
 
-def test_docs_version_uses_released_versions_and_falls_back_for_dev() -> None:
-    assert _docs_version("0.2.3") == "0.2.3"
-    assert _docs_version("0.2.3.post1") == "0.2.3.post1"
-    assert _docs_version("0.2.3.dev0") == "latest"
-    assert _docs_version("0.2.3+editable") == "latest"
+def test_docs_version_points_every_release_at_the_path_that_exists() -> None:
+    """The versioned paths this used to build are 404s on the real docs site.
+
+    /docs/0.3.0 does not resolve even though 0.3.0 is the published version, so
+    the old mapping gave released users a broken help menu while dev builds got
+    a working one. Asserting the return value alone is what let that ship: both
+    sides were green against each other, and neither checked the URL.
+    """
+    for version in ("0.2.3", "0.2.3.post1", "0.2.3.dev0", "0.2.3+editable", "0.4.0"):
+        assert _docs_version(version) == "latest"
 
 
 def test_kimi_k3_only_offers_supported_reasoning_effort_values() -> None:
     assert _reasoning_effort_values_for("moonshot", "kimi-k3") == ["", "max"]
 
 
-def test_settings_payload_includes_versioned_docs(
+def test_settings_payload_serves_docs_links_that_resolve(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -91,9 +96,9 @@ def test_settings_payload_includes_versioned_docs(
     payload = settings_payload()
 
     assert payload["docs"] == {
-        "version": "0.2.3",
-        "base_url": "https://nanobot.wiki/docs/0.2.3",
-        "chat_apps_url": "https://nanobot.wiki/docs/0.2.3/getting-started/chat-apps",
+        "version": "latest",
+        "base_url": "https://nanobot.wiki/docs/latest",
+        "chat_apps_url": "https://nanobot.wiki/docs/latest/getting-started/chat-apps",
         "latest_url": "https://nanobot.wiki/docs/latest",
     }
 

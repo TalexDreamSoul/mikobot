@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import re
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -104,16 +103,22 @@ class SystemSettingsPayload(TypedDict):
     docs: dict[str, Any]
 
 
-_DOCS_STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:\.post\d+)?$")
+_DOCS_LATEST_VERSION = "latest"
 _DOCS_LATEST_URL = "https://nanobot.wiki/docs/latest"
 
 
 def docs_version(version: str) -> str:
-    """Map package versions to the matching public docs path."""
-    normalized = version.strip()
-    if _DOCS_STABLE_VERSION_RE.fullmatch(normalized):
-        return normalized
-    return "latest"
+    """Map package versions to the matching public docs path.
+
+    Every version maps to "latest", because nanobot.wiki publishes no versioned
+    paths: /docs/0.3.0 is a 404 today for the version currently on PyPI, so the
+    previous mapping sent released users to a missing page for every docs link
+    in the UI while /docs/latest served fine. catalog.ts had already settled on
+    "latest" for the same reason. Restore the version-specific branch only once
+    a versioned path actually resolves.
+    """
+    del version
+    return _DOCS_LATEST_VERSION
 
 
 def docs_payload(version: str) -> dict[str, Any]:
