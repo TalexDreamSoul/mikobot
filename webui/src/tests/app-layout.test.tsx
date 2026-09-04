@@ -67,6 +67,14 @@ function mockFetchRoutes(routes: Record<string, unknown>): void {
   );
 }
 
+function activeSettingsNavLabel(settingsNav: HTMLElement): string | undefined {
+  const current = within(settingsNav)
+    .getAllByRole("button")
+    .filter((button) => button.getAttribute("aria-current") === "page");
+  expect(current).toHaveLength(1);
+  return current[0].textContent ?? undefined;
+}
+
 function baseSettingsPayload() {
   return {
     agent: {
@@ -2711,6 +2719,34 @@ describe("App layout", () => {
       await screen.findByRole("navigation", { name: "Settings sections" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Overview" })).not.toBeInTheDocument();
+  });
+
+  it("opens the Extensions section from a settings deep link", async () => {
+    mockFetchRoutes({
+      "/api/settings": baseSettingsPayload(),
+      "/api/settings/extensions": { available: true, packages: [], diagnostics: [] },
+    });
+    window.history.replaceState(null, "", "/#/settings?section=extensions");
+
+    render(<App />);
+
+    await waitFor(() => expect(connectSpy).toHaveBeenCalled());
+    const settingsNav = await screen.findByRole("navigation", { name: "Settings sections" });
+    expect(activeSettingsNavLabel(settingsNav)).toBe("Extensions");
+    // The section itself has to render, not merely the navigation highlight.
+    expect(await screen.findByText("This gateway reports no extension packages."))
+      .toBeInTheDocument();
+  });
+
+  it("falls back to Overview for a settings section the router does not accept", async () => {
+    mockFetchRoutes({ "/api/settings": baseSettingsPayload() });
+    window.history.replaceState(null, "", "/#/settings?section=extensionz");
+
+    render(<App />);
+
+    await waitFor(() => expect(connectSpy).toHaveBeenCalled());
+    const settingsNav = await screen.findByRole("navigation", { name: "Settings sections" });
+    expect(activeSettingsNavLabel(settingsNav)).toBe("Overview");
   });
 
   it("updates the URL hash when switching settings sections", async () => {

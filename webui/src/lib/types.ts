@@ -1299,6 +1299,103 @@ export type NanobotExtensionExecution =
   | "child_process"
   | "remote";
 
+export type ExtensionSource =
+  | "builtin"
+  | "agent_plugin"
+  | "python_entry_point"
+  | "workspace"
+  | "configured"
+  | "channel_package"
+  | "provider_registry"
+  | "cli_app"
+  | "optional_feature";
+
+export type ExtensionComponentKind =
+  | "skill"
+  | "mcp_server"
+  | "tool"
+  | "channel"
+  | "llm_provider"
+  | "image_provider"
+  | "transcription_provider"
+  | "hook"
+  | "cli_app"
+  | "optional_feature";
+
+/** A configuration destination named by section, never by URL, path, or credential. */
+export interface ExtensionConfigurationTarget {
+  section: string;
+  item: string | null;
+}
+
+export interface ExtensionDiagnostic {
+  owner_id: string;
+  code: string;
+  message: string;
+}
+
+export interface ExtensionComponent {
+  id: string;
+  package_id: string;
+  kind: ExtensionComponentKind;
+  name: string;
+  display_name: string;
+  description: string;
+  capabilities: string[];
+  execution: NanobotExtensionExecution;
+  lifecycle: NanobotExtensionLifecycle;
+  revision: string | null;
+  actions: NanobotExtensionAction[];
+  configuration: ExtensionConfigurationTarget | null;
+  diagnostic: ExtensionDiagnostic | null;
+}
+
+/**
+ * One canonical package from `/api/settings/extensions`.
+ *
+ * `isolated` and `permissions_enforced` are facts the registry computed, not a
+ * presentation choice: the surface renders them instead of restating an assumption.
+ * `isolated: null` means the owning adapter made no isolation claim at all.
+ */
+export interface ExtensionPackage {
+  id: string;
+  name: string;
+  display_name: string;
+  description: string;
+  source: ExtensionSource;
+  trust: NanobotExtensionTrust;
+  execution: NanobotExtensionExecution;
+  isolated: boolean | null;
+  lifecycle: NanobotExtensionLifecycle;
+  version: string | null;
+  revision: string | null;
+  permissions: string[];
+  permissions_enforced: boolean;
+  risk_acknowledgement_required: boolean;
+  actions: NanobotExtensionAction[];
+  configuration: ExtensionConfigurationTarget | null;
+  diagnostic: ExtensionDiagnostic | null;
+  components: ExtensionComponent[];
+}
+
+export interface ExtensionInventoryPayload {
+  /** False when no registry is composed, which is not the same as an empty host. */
+  available: boolean;
+  packages: ExtensionPackage[];
+  diagnostics: ExtensionDiagnostic[];
+}
+
+export interface ExtensionActionResultPayload {
+  ok: boolean;
+  actor_id: string;
+  action: NanobotExtensionAction;
+  package_id: string;
+  target_id: string;
+  lifecycle: NanobotExtensionLifecycle | null;
+  message: string;
+  package: ExtensionPackage | null;
+}
+
 export interface NanobotExtensionDescriptor {
   extension_id?: string;
   extension_revision?: string | null;

@@ -5,6 +5,7 @@ import { ImageGenerationSettings } from "@/components/settings/capabilities/Imag
 import { AdvancedSettings } from "@/components/settings/capabilities/SecuritySettings";
 import { TranscriptionSettings } from "@/components/settings/capabilities/TranscriptionSettings";
 import { WebSettings } from "@/components/settings/capabilities/WebSettings";
+import { ExtensionsSettings } from "@/components/settings/extensions/ExtensionsSettings";
 import {
   ModelPresetDeleteDialog,
   ModelsSettings,
@@ -480,6 +481,8 @@ export function SettingsPage({
         );
       case "skills":
         return <SkillsCatalogSettings skills={skills} />;
+      case "extensions":
+        return <ExtensionsSettings onOpenSection={selectSection} />;
       case "runtime":
         return (
           <RuntimeSettings

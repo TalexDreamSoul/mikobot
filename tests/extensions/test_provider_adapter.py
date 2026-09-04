@@ -481,6 +481,47 @@ def test_provider_matching_and_registry_order_are_unchanged_by_projection(
     }
 
 
+def test_gateway_fallback_resolves_a_keywordless_model_by_registry_order(
+    tmp_path: Path,
+) -> None:
+    """Pin the no-keyword-match fallback branch: gateways win, OAuth is skipped.
+
+    Only explicitly configured providers can be selected here, so adding a provider to
+    the registry cannot turn this red; a reorder that demotes gateways can, which is the
+    behavior being pinned.
+    """
+    model = "zzz-unknown-model-9000"
+
+    def configured(**keys: str) -> Config:
+        config = _config(tmp_path)
+        for name, key in keys.items():
+            getattr(config.providers, name).api_key = key
+        return config
+
+    gateway_only = configured(openrouter="sk-gateway")
+    before = gateway_only.get_provider_name(model)
+    _adapter(gateway_only).snapshot()
+
+    assert before == "openrouter"
+    assert gateway_only.get_provider_name(model) == before
+
+    # A gateway is preferred over a configured non-gateway that sits later in the registry.
+    assert configured(openrouter="sk-gateway", deepseek="sk-direct").get_provider_name(
+        model
+    ) == "openrouter"
+    # Without a gateway the same branch continues in registry order.
+    assert configured(deepseek="sk-direct").get_provider_name(model) == "deepseek"
+    # OAuth providers are never fallback candidates; they need an explicit model choice.
+    assert configured(github_copilot="sk-oauth", deepseek="sk-direct").get_provider_name(
+        model
+    ) == "deepseek"
+
+    # A configured local endpoint still takes precedence over the gateway loop.
+    local_first = configured(openrouter="sk-gateway")
+    local_first.providers.ollama.api_base = "http://127.0.0.1:11434/v1"
+    assert local_first.get_provider_name(model) == "ollama"
+
+
 def test_preset_and_fallback_resolution_survive_projection(tmp_path: Path) -> None:
     """Preset and fallback-preset resolution are unaffected by inventory projection."""
     config = Config.model_validate(

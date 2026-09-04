@@ -11,7 +11,9 @@ from nanobot.agent.hook import AgentHook, AgentHookContext, AgentTurnHookContext
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.progress_hook import AgentProgressHook
 from nanobot.agent.runner import AgentRunner
+from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
+from nanobot.config.schema import Config
 from nanobot.extensions.adapters.hooks import (
     HookExtensionAdapter,
     LongLivedHooks,
@@ -35,6 +37,7 @@ from nanobot.extensions.contracts import (
     extension_component_id,
     extension_package_id,
 )
+from nanobot.extensions.runtime import build_core_extension_registry
 
 _ADMIN = ExtensionActionContext(actor_id="owner", is_system_admin=True)
 _USER = ExtensionActionContext(actor_id="member", is_system_admin=False)
@@ -49,6 +52,9 @@ class _Recording(AgentHook):
 
     async def before_iteration(self, context: AgentHookContext) -> None:
         self._events.append(f"{self._label}:{context.iteration}")
+
+    async def on_stream(self, _context: AgentHookContext, delta: str) -> None:
+        self._events.append(f"{self._label}:{delta}")
 
 
 def _factory(events: list[str], label: str):
@@ -235,16 +241,32 @@ async def test_declared_hooks_execute_in_the_unchanged_five_position_order() -> 
     events: list[str] = []
     bundle = _bundle(events)
 
+    async def on_stream(delta: str) -> None:
+        events.append(f"progress:{delta}")
+
     hook = build_agent_turn_hook(
         AgentTurnHookSpec(
+            on_stream=on_stream,
             registered_hook_factories=bundle.hook_factories,
             registered_hooks=bundle.hooks,
             turn_hook_factories=[_factory(events, "turn_factory")],
             turn_hooks=[_Recording(events, "turn")],
         )
     )
-    await hook.before_iteration(AgentHookContext(iteration=3, messages=[]))
 
+    # ``AgentProgressHook.before_iteration`` only logs, so the progress hook's own
+    # position is observable through the streaming path.
+    await hook.on_stream(AgentHookContext(iteration=3, messages=[]), "delta")
+    assert events == [
+        "progress:delta",
+        "registered_factory:delta",
+        "registered:delta",
+        "turn_factory:delta",
+        "turn:delta",
+    ]
+
+    events.clear()
+    await hook.before_iteration(AgentHookContext(iteration=3, messages=[]))
     assert events == [
         "registered_factory:3",
         "registered:3",
@@ -392,6 +414,38 @@ async def test_inspect_is_the_only_action_the_hook_adapter_executes() -> None:
         ExtensionActionRequest(context=_USER, target_id=target, action=ExtensionAction.INSPECT)
     )
     assert denied.ok is False
+
+
+def test_a_bundle_built_around_the_helper_fails_alone_at_snapshot_time(
+    tmp_path: Path,
+) -> None:
+    """The one snapshot-time hook failure is contained; the other seven adapters survive.
+
+    ``long_lived_hooks`` normally rejects a malformed identity at composition time, which
+    is the right handling for a first-party programming error. Constructing
+    ``LongLivedHooks`` directly bypasses that gate, so the failure surfaces during
+    ``snapshot()`` instead — where the registry's adapter isolation must contain it.
+    """
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path)
+    smuggled = LongLivedHooks(
+        composition="gateway",
+        declarations=(RegisteredHook(name="Not A Canonical Name", hook=_Recording([], "x")),),
+    )
+
+    with pytest.raises(ValueError):
+        HookExtensionAdapter(smuggled).snapshot()
+
+    broken = build_core_extension_registry(config, ToolRegistry(), hooks=smuggled).snapshot()
+    healthy = build_core_extension_registry(config, ToolRegistry()).snapshot()
+
+    assert [(d.owner_id, d.code) for d in broken.diagnostics] == [
+        ("agent-hooks", "adapter_snapshot_failed")
+    ]
+    assert not [p for p in broken.packages if p.name.startswith("agent-hooks")]
+    # Every package from the other seven adapters is byte-for-byte intact.
+    assert broken.packages == healthy.packages
+    assert healthy.diagnostics == ()
 
 
 def test_declaration_values_are_reachable_only_through_the_bundle() -> None:

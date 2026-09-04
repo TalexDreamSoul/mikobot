@@ -297,13 +297,19 @@ async def test_no_settings_route_reaches_a_member_without_a_recorded_decision(
     """A newly added privileged route cannot ship undecided the way pairing did."""
     from nanobot.webui.settings_routes import (
         _CAPABILITY_ROUTES,
+        _EXTENSION_ROUTES,
         _MODEL_ROUTES,
         _SYSTEM_ROUTES,
     )
 
     undecided: list[tuple[str, int]] = []
     stale: list[str] = []
-    for path in (*_MODEL_ROUTES, *_CAPABILITY_ROUTES, *_SYSTEM_ROUTES):
+    for path in (
+        *_MODEL_ROUTES,
+        *_CAPABILITY_ROUTES,
+        *_EXTENSION_ROUTES,
+        *_SYSTEM_ROUTES,
+    ):
         request = _mutation_request(
             path,
             {"name": "probe", "provider": "openai", "code": "PROBE"},

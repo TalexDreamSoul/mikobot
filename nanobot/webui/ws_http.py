@@ -265,6 +265,7 @@ _WEBUI_MUTATION_PATHS = {
     "settings.mcp.oauth_start": "/api/settings/mcp-oauth/start",
     "settings.mcp.oauth_complete": "/api/settings/mcp-oauth/complete",
     "settings.mcp.oauth_cancel": "/api/settings/mcp-oauth/cancel",
+    "settings.extension.action": "/api/settings/extensions/action",
     "collaboration.organization.create": "/api/collaboration/mutations/organization/create",
     "collaboration.organization.update": "/api/collaboration/mutations/organization/update",
     "collaboration.organization.delete": "/api/collaboration/mutations/organization/delete",

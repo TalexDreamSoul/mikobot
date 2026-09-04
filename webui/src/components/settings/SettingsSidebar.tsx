@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import {
   Activity,
+  Blocks,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -41,6 +42,7 @@ const SETTINGS_NAV_ITEMS: Array<{ key: SettingsSectionKey; icon: LucideIcon; fal
   { key: "browser", icon: Globe2, fallback: "Web" },
   { key: "channels", icon: MessageCircle, fallback: "Channels" },
   { key: "login-security", icon: KeyRound, fallback: "Login & Security" },
+  { key: "extensions", icon: Blocks, fallback: "Extensions" },
   { key: "runtime", icon: Server, fallback: "System" },
   { key: "advanced", icon: ShieldCheck, fallback: "Security" },
 ];

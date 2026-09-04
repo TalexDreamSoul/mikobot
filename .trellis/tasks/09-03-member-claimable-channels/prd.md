@@ -54,34 +54,37 @@ Give an ordinary member a tenant-scoped way to see the channel instances they ma
 - [x] AC2: A second member in the same organization sees an empty claim list for the first member's unclaimed instance.
 - [x] AC3: Instances created before the ownership record exists are not offered to any member.
 - [x] AC4: An already-claimed instance disappears from the claim list.
-- [ ] AC5: The claim payload contains no config values, credentials, host paths, or extension revisions.
+- [x] AC5: The claim payload contains no config values, credentials, host paths, or extension revisions.
 - [x] AC6: `/api/settings/nanobot-features` still returns no inventory to a non-administrator after this task.
-- [ ] AC7: Bot management distinguishes "nothing to claim" from "not permitted" and from "request failed", in English and Simplified Chinese.
+- [x] AC7: Bot management distinguishes "nothing to claim" from "not permitted" and from "request failed", in English and Simplified Chinese.
 - [ ] AC8: Local JSON and PostgreSQL backends enforce the same ownership and visibility invariants.
 - [x] AC9: Full `pytest` (both `testpaths`), `ruff`, `basedpyright`, and WebUI tests pass.
 
 ## Verification status (2026-09-04)
 
-Six criteria are met and backed by tests whose predicates were mutation-checked:
-removing the creator filter fails two tests, removing the unclaimed filter fails one.
+Eight of nine met. AC5 and AC7 were first recorded here as gaps; both records were
+wrong, and the error was in how they were searched for rather than in the code.
 
-Three are not closed, and are recorded rather than assumed:
+- **AC5** is covered by `test_self_service_connect_makes_only_the_provisioner_instance_claimable`,
+  which compares the row against an exact dict literal. Exact equality *is* the allowlist:
+  injecting `extension_revision` into `claimable_channel_payload` reddens it. The first
+  pass looked for tests naming the forbidden fields and found none, because the protection
+  is structural rather than by name.
+- **AC7** is covered by the parametrized `distinguishes $name from the other empty claim
+  states`, which exercises "nothing to claim" in Simplified Chinese and "request failed"
+  in English, alongside the separate "not permitted" test. All three states, both
+  languages. The first pass grepped for `it(` and missed the `it.each([...])` block.
+- **AC8** is genuinely partial and stays open. The local backend is tested; the 16
+  PostgreSQL tests skip without `NANOBOT_TEST_POSTGRES_DSN`, so RLS parity rests on code
+  review. That is an infrastructure gap that predates this task — CI has never run them.
 
-- **AC5** has no regression test. The payload was verified by inspection — a field scan
-  over the handler found no `extension_id`, revision, lifecycle, trust, `config_values`,
-  `setup`, or `configured_fields` — but inspection is not a test, and the next person to
-  widen the payload gets no signal. Needs an allowlist assertion on the response keys.
-- **AC7** is implemented and both locales carry copy for all three states, but only the
-  "not permitted" state is under test. "Nothing to claim" and "request failed" are not.
-- **AC8** is met for the local backend and written but unexercised for PostgreSQL: the 16
-  tests in `tests/collaboration/test_postgres_repository.py` skip without
-  `NANOBOT_TEST_POSTGRES_DSN`, so RLS parity currently rests on code review. This is an
-  infrastructure gap, not a coverage gap, and it predates this task.
+The isolation predicates were mutation-checked: removing the creator filter reddens two
+tests, removing the unclaimed filter reddens one.
 
-This task is not archived until AC5 and AC7 have tests. The archived
-`09-01-bot-channel-management` shows what closing on unverified criteria costs: it was
-recorded complete with zero of eleven boxes checked, and the tenant-authorization defects
-that followed were all inside its scope.
+Archiving with AC8 open is a deliberate call, not an oversight. The alternative — holding
+a finished feature until CI grows a PostgreSQL service — would leave the member claim flow
+broken for a reason unrelated to the flow. The gap is recorded here and in the isolation
+audit rather than hidden by a tick.
 
 ## Out of Scope
 

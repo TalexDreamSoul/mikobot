@@ -348,6 +348,140 @@
       "title": "Settings",
       "ariaLabel": "Settings sections"
     },
+    "extensions": {
+      "title": "Extensions",
+      "description": "Every package this gateway has loaded, who owns each component, and what it is trusted to do. nanobot does not sandbox or verify third-party extensions.",
+      "refresh": "Refresh",
+      "loading": "Loading extensions…",
+      "registryUnavailable": "This gateway composed no extension registry, so no inventory can be reported. This is not an empty host.",
+      "emptyHost": "This gateway reports no extension packages.",
+      "emptyFiltered": "No package matches these filters.",
+      "resultCount": "Showing {{shown}} of {{total}} packages",
+      "registryUnavailableShort": "No inventory is available.",
+      "dataOnly": "Data only — this package runs no code. Its content still reaches the model's prompt.",
+      "filters": {
+        "search": "Search extensions",
+        "searchPlaceholder": "Search packages and components",
+        "kind": "Family",
+        "source": "Source",
+        "trust": "Trust",
+        "lifecycle": "Lifecycle",
+        "anyOf": "All: {{label}}",
+        "clear": "Clear filters"
+      },
+      "list": {
+        "label": "Installed extension packages",
+        "componentCount_one": "{{count}} component",
+        "componentCount_other": "{{count}} components"
+      },
+      "diagnostics": {
+        "title": "Extension families that could not report",
+        "description": "These owners failed to report. Everything below is still complete for every other owner."
+      },
+      "detail": {
+        "label": "Extension details",
+        "back": "Back to all extensions",
+        "selectPrompt": "Select a package to inspect its components and trust.",
+        "identity": "Extension ID",
+        "source": "Source",
+        "trust": "Trust",
+        "execution": "Runs",
+        "isolation": "Isolation",
+        "lifecycle": "Lifecycle",
+        "version": "Version",
+        "revision": "Revision",
+        "noRevision": "None reported",
+        "permissions": "Declared permissions",
+        "permissionsNone": "This package declares no permissions.",
+        "permissionsUnenforced": "Self-declared by the package and not enforced. nanobot does not restrict what this extension can reach.",
+        "permissionsEnforced": "These permissions are enforced by nanobot.",
+        "supportedActions": "Supported actions",
+        "noActions": "This package's owner declares no lifecycle action here.",
+        "components_one": "Components ({{count}})",
+        "components_other": "Components ({{count}})",
+        "componentsNone": "This package contributes no components right now.",
+        "capabilities": "Capabilities",
+        "configureIn": "Open {{section}}",
+        "configureUnavailable": "No configuration page is available for this destination."
+      },
+      "isolation": {
+        "yes": "Isolated",
+        "no": "Not isolated",
+        "unknown": "No isolation claim"
+      },
+      "risk": {
+        "badge": "Unisolated third-party code",
+        "title": "Unisolated third-party code",
+        "body": "{{trust}} · {{isolation}} · {{execution}}. This code may read files, credentials, network, and any other resource visible to the nanobot process. nanobot does not verify it or make it safe.",
+        "dialogTitle": "{{action}} {{name}}?",
+        "dialogBody": "{{trust}} · {{isolation}} · {{execution}}. This code may read files, credentials, network, and any other resource visible to the nanobot process. Its declared permissions are self-declared and not enforced. nanobot does not verify this package or make it safe.",
+        "revisionLabel": "Revision",
+        "confirm": "{{action}} anyway"
+      },
+      "conflict": {
+        "title": "This extension changed",
+        "body": "The host reports a different revision than the one shown. Reopen the details and decide again.",
+        "reopen": "Reload details"
+      },
+      "lifecycle": {
+        "discovered": "Discovered",
+        "unavailable": "Unavailable",
+        "disabled": "Disabled",
+        "enabling": "Enabling",
+        "enabled": "Enabled",
+        "reloading": "Reloading",
+        "disabling": "Disabling",
+        "failed": "Failed",
+        "changed": "Changed",
+        "restart_required": "Restart required"
+      },
+      "trust": {
+        "first_party": "First-party",
+        "operator_trusted": "Operator-trusted",
+        "workspace_content": "Workspace content",
+        "remote_service": "Remote service"
+      },
+      "execution": {
+        "data": "Data only",
+        "in_process": "In the nanobot process",
+        "child_process": "In a child process",
+        "remote": "On a remote service"
+      },
+      "source": {
+        "builtin": "Built-in",
+        "agent_plugin": "Agent Plugin",
+        "python_entry_point": "Python entry point",
+        "workspace": "Workspace",
+        "configured": "Configured",
+        "channel_package": "Channel package",
+        "provider_registry": "Provider registry",
+        "cli_app": "CLI app",
+        "optional_feature": "Optional feature"
+      },
+      "kind": {
+        "skill": "Skill",
+        "mcp_server": "MCP server",
+        "tool": "Tool",
+        "channel": "Channel",
+        "llm_provider": "Model provider",
+        "image_provider": "Image provider",
+        "transcription_provider": "Voice provider",
+        "hook": "Hook",
+        "cli_app": "CLI app",
+        "optional_feature": "Optional feature"
+      },
+      "action": {
+        "inspect": "Inspect",
+        "configure": "Configure",
+        "enable": "Enable",
+        "disable": "Disable",
+        "reload": "Reload",
+        "reconnect": "Reconnect",
+        "install": "Install",
+        "uninstall": "Uninstall",
+        "restart_required": "Restart required"
+      }
+    },
     "nav": {
       "general": "General",
       "byok": "BYOK",
@@ -366,7 +500,8 @@
       "advanced": "Security",
       "apps": "Apps",
       "automations": "Automations",
-      "skills": "Skills"
+      "skills": "Skills",
+      "extensions": "Extensions"
     },
     "sections": {
       "interface": "Interface",

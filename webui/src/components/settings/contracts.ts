@@ -12,6 +12,7 @@ export type SettingsSectionKey =
   | "apps"
   | "automations"
   | "skills"
+  | "extensions"
   | "runtime"
   | "advanced";
 

@@ -20,6 +20,7 @@ from nanobot.channels.validation import validate_channel_config
 from nanobot.pairing import approve_code, deny_code, list_pending
 from nanobot.webui import settings_capabilities as capability_domain
 from nanobot.webui import settings_contracts as contracts
+from nanobot.webui import settings_extensions as extension_domain
 from nanobot.webui import settings_models as model_domain
 from nanobot.webui import settings_system as system_domain
 from nanobot.webui.cli_apps_api import cli_apps_action, cli_apps_payload
@@ -142,6 +143,11 @@ _SYSTEM_ROUTES = {
     },
 }
 
+_EXTENSION_ROUTES = {
+    "/api/settings/extensions": "extensions-list",
+    "/api/settings/extensions/action": "extensions-action",
+}
+
 _SETTINGS_MUTATION_PATHS = frozenset({
     "/api/settings/update",
     "/api/settings/model-configurations/create",
@@ -173,6 +179,7 @@ _SETTINGS_MUTATION_PATHS = frozenset({
     "/api/settings/mcp-oauth/start",
     "/api/settings/mcp-oauth/complete",
     "/api/settings/mcp-oauth/cancel",
+    "/api/settings/extensions/action",
     *_MCP_PRESET_ACTIONS_BY_PATH,
 })
 
@@ -244,6 +251,7 @@ class WebUISettingsRouter:
             logger,
         )
         self._system = system_domain.SystemSettingsHandler(settings, logger)
+        self._extensions = extension_domain.ExtensionSettingsHandler(settings, logger)
 
     async def dispatch(
         self,
@@ -291,6 +299,7 @@ class WebUISettingsRouter:
                     "features-enable",
                     "channel-configure",
                     "channel-connect",
+                    "extensions-action",
                 }
             ),
         )
@@ -306,6 +315,8 @@ class WebUISettingsRouter:
                 domain_request,
                 self._capability_operations(),
             )
+        elif domain == "extensions":
+            result = await self._extensions.handle(action, domain_request)
         else:
             channel_connect = _channel_connect_route(path)
             result = await self._system.handle(
@@ -331,6 +342,8 @@ class WebUISettingsRouter:
             return "models", action
         if action := _CAPABILITY_ROUTES.get(path):
             return "capabilities", action
+        if action := _EXTENSION_ROUTES.get(path):
+            return "extensions", action
         if action := _SYSTEM_ROUTES.get(path):
             return "system", action
         if _channel_connect_route(path) is not None:

@@ -170,7 +170,7 @@ function SurfaceLoadingFallback() {
   );
 }
 
-const SETTINGS_SECTION_KEYS: SettingsSectionKey[] = [
+const SETTINGS_SECTION_KEYS = [
   "overview",
   "appearance",
   "models",
@@ -182,9 +182,22 @@ const SETTINGS_SECTION_KEYS: SettingsSectionKey[] = [
   "apps",
   "automations",
   "skills",
+  "extensions",
   "runtime",
   "advanced",
-];
+] as const satisfies readonly SettingsSectionKey[];
+
+// A section omitted above is not a type error on its own — the array would simply be a
+// shorter SettingsSectionKey[] — but ?section=<it> would then silently fall back to
+// overview. This turns the omission into a compile error instead of a routing bug.
+type UnroutedSettingsSection = Exclude<
+  SettingsSectionKey,
+  (typeof SETTINGS_SECTION_KEYS)[number]
+>;
+const _allSettingsSectionsAreRoutable: [UnroutedSettingsSection] extends [never]
+  ? true
+  : UnroutedSettingsSection = true;
+void _allSettingsSectionsAreRoutable;
 
 function isSettingsSectionKey(value: string | null): value is SettingsSectionKey {
   return SETTINGS_SECTION_KEYS.includes(value as SettingsSectionKey);

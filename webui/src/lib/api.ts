@@ -30,6 +30,9 @@ import type {
   CollaborationTask,
   CollaborationTaskList,
   CollaborationTaskStatus,
+  ExtensionActionResultPayload,
+  ExtensionInventoryPayload,
+  NanobotExtensionAction,
   PersonalAssistantPayload,
   PersonalTask,
   PersonalTaskReviewState,
@@ -1035,6 +1038,52 @@ export async function fetchNanobotFeatures(
 
 export async function fetchApiService(token: string, base: string = ""): Promise<ApiServicePayload> {
   return request<ApiServicePayload>(`${base}/api/settings/api-service`, token);
+}
+
+export async function fetchExtensionInventory(
+  token: string,
+  base: string = "",
+): Promise<ExtensionInventoryPayload> {
+  return request<ExtensionInventoryPayload>(
+    `${base}/api/settings/extensions`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export interface ExtensionActionRequest {
+  targetId: string;
+  action: NanobotExtensionAction;
+  /**
+   * The revision shown in the detail the operator acted on. The gateway refuses a
+   * mismatch with 409 rather than applying the action to whatever is current now.
+   */
+  expectedRevision: string | null;
+  riskAcknowledged?: boolean;
+  values?: Record<string, unknown>;
+}
+
+export async function runExtensionAction(
+  transport: WebUIMutationTransport,
+  request: ExtensionActionRequest,
+): Promise<ExtensionActionResultPayload> {
+  const targetId = request.targetId.trim();
+  if (!targetId) {
+    throw new ApiError(400, "Extension action target is unavailable.");
+  }
+  return mutation<ExtensionActionResultPayload>(
+    transport,
+    "settings.extension.action",
+    {
+      target_id: targetId,
+      action: request.action,
+      expected_revision: request.expectedRevision ?? "",
+      ...(request.riskAcknowledged ? { risk_acknowledged: true } : {}),
+      ...(request.values ? { values: request.values } : {}),
+    },
+    PACKAGE_MUTATION_TIMEOUT_MS,
+  );
 }
 
 export interface NanobotFeatureActionTarget {

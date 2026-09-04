@@ -2,6 +2,7 @@ import { cleanup, render } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, vi } from "vitest";
 import { SettingsView } from "@/components/settings/SettingsView";
+import type { SettingsSectionKey } from "@/components/settings/contracts";
 import { ClientProvider } from "@/providers/ClientProvider";
 import type { SettingsPayload } from "@/lib/types";
 
@@ -125,17 +126,7 @@ export function settingsPayload(): SettingsPayload {
 
 export function renderSettingsView(
   options: {
-    initialSection?:
-      | "overview"
-      | "appearance"
-      | "apps"
-      | "channels"
-      | "automations"
-      | "advanced"
-      | "models"
-      | "image"
-      | "browser"
-      | "runtime";
+    initialSection?: SettingsSectionKey;
     initialSettings?: SettingsPayload;
     showSidebar?: boolean;
     onBackToChat?: () => void;
