@@ -1,0 +1,122 @@
+name: Publish to PyPI
+
+# Publishing is deliberately not automatic on tag push. A tag can be pushed by
+# mistake or point at a commit that never passed CI, and a PyPI version number
+# cannot be reused once taken -- not even after deleting the release. So this
+# runs only when a human dispatches it, and it refuses to publish a tag whose
+# commit is not the one it claims.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example, v0.4.0)
+        required: true
+        type: string
+      repository:
+        description: Target index
+        required: true
+        default: testpypi
+        type: choice
+        options:
+          - testpypi
+          - pypi
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify the tag resolves to this commit
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "refs/tags/$TAG")"
+
+      - name: Verify the package version matches the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          # A tag that disagrees with pyproject would publish a version nobody
+          # can trace back to a commit.
+          declared="$(python3 -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          test "v${declared}" = "$TAG"
+
+      - name: Refuse to publish a pre-release version to PyPI
+        if: inputs.repository == 'pypi'
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          # .dev/.a/.b/.rc belong on TestPyPI. Catching it here is cheaper than
+          # burning the version number on the real index.
+          [[ ! "$TAG" =~ (dev|a|b|rc)[0-9]+$ ]]
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+
+      - name: Build the WebUI into the wheel payload
+        working-directory: webui
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Fail if the WebUI payload is missing
+        shell: bash
+        run: |
+          # The wheel bundles nanobot/web/dist. Publishing without it ships a
+          # package whose gateway serves nothing, and the sdist would still
+          # look healthy.
+          test -f nanobot/web/dist/index.html
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Check distribution metadata
+        run: uvx twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+  publish:
+    name: Publish to ${{ inputs.repository }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Requires a matching PyPI Trusted Publisher, plus a GitHub environment of
+    # the same name. Gate that environment on a required reviewer so the upload
+    # itself needs a second pair of eyes.
+    environment: ${{ inputs.repository }}
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ inputs.repository == 'pypi' && 'https://upload.pypi.org/legacy/' || 'https://test.pypi.org/legacy/' }}
