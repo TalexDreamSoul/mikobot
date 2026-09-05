@@ -130,7 +130,7 @@ def test_save_and_load_state_persists_context_tokens(tmp_path) -> None:
 
     channel._save_state()
 
-    saved = json.loads((tmp_path / "account.json").read_text())
+    saved = json.loads((tmp_path / "account.json").read_text(encoding="utf-8"))
     assert saved["context_tokens"] == {"wx-user": "ctx-1"}
 
     restored = WeixinChannel(
@@ -162,7 +162,7 @@ def test_save_state_preserves_token_committed_by_another_instance(tmp_path) -> N
     channel._get_updates_buf = "stale-cursor"
     channel._save_state()
 
-    assert json.loads((tmp_path / "account.json").read_text()) == replacement
+    assert json.loads((tmp_path / "account.json").read_text(encoding="utf-8")) == replacement
 
 
 def test_save_state_force_overwrites_replaced_token(tmp_path) -> None:
@@ -174,7 +174,7 @@ def test_save_state_force_overwrites_replaced_token(tmp_path) -> None:
 
     channel.connect_commit_account(token="new-token", base_url="https://new.example")
 
-    saved = json.loads((tmp_path / "account.json").read_text())
+    saved = json.loads((tmp_path / "account.json").read_text(encoding="utf-8"))
     assert saved["token"] == "new-token"
     assert saved["base_url"] == "https://new.example"
 
@@ -198,7 +198,7 @@ def test_save_state_persists_explicit_config_token_over_stale_state(tmp_path) ->
 
     channel._save_state()
 
-    saved = json.loads((tmp_path / "account.json").read_text())
+    saved = json.loads((tmp_path / "account.json").read_text(encoding="utf-8"))
     assert saved["token"] == "configured-token"
     assert saved["get_updates_buf"] == "current-cursor"
 
@@ -221,7 +221,7 @@ def test_save_state_preserves_qr_replacement_of_configured_token(tmp_path) -> No
 
     old_runtime._save_state()
 
-    saved = json.loads((tmp_path / "account.json").read_text())
+    saved = json.loads((tmp_path / "account.json").read_text(encoding="utf-8"))
     assert saved["token"] == "replacement-token"
     assert saved["base_url"] == "https://new.example"
 
@@ -236,7 +236,7 @@ def test_save_state_with_empty_runtime_token_preserves_persisted_account(tmp_pat
 
     channel._save_state()
 
-    assert json.loads((tmp_path / "account.json").read_text()) == persisted
+    assert json.loads((tmp_path / "account.json").read_text(encoding="utf-8")) == persisted
 
 
 @pytest.mark.asyncio
@@ -287,7 +287,7 @@ async def test_login_force_ignores_persisted_account_through_qr_flow(tmp_path) -
     assert channel._context_tokens == {}
     assert channel._typing_tickets == {}
     assert channel.config.base_url == "https://ilinkai.weixin.qq.com"
-    assert json.loads((tmp_path / "account.json").read_text()) == persisted
+    assert json.loads((tmp_path / "account.json").read_text(encoding="utf-8")) == persisted
 
 
 @pytest.mark.asyncio
@@ -539,7 +539,7 @@ async def test_process_message_persists_context_token_to_state_file(tmp_path) ->
         }
     )
 
-    saved = json.loads((tmp_path / "account.json").read_text())
+    saved = json.loads((tmp_path / "account.json").read_text(encoding="utf-8"))
     assert saved["context_tokens"] == {"wx-user": "ctx-2b"}
 
 

@@ -408,7 +408,7 @@ class WeixinChannel(BaseChannel):
         if not state_file.exists():
             return False
         try:
-            data = cast(dict[str, Any], json.loads(state_file.read_text()))
+            data = cast(dict[str, Any], json.loads(state_file.read_text(encoding="utf-8")))
             replaced_config_token_hash = data.get(_REPLACED_CONFIG_TOKEN_HASH_KEY, "")
             if not isinstance(replaced_config_token_hash, str):
                 replaced_config_token_hash = ""
@@ -452,7 +452,7 @@ class WeixinChannel(BaseChannel):
             if not force and state_file.exists():
                 persisted: object = None
                 try:
-                    persisted = json.loads(state_file.read_text())
+                    persisted = json.loads(state_file.read_text(encoding="utf-8"))
                 except Exception:
                     persisted = None
                 persisted_token = ""
@@ -491,7 +491,7 @@ class WeixinChannel(BaseChannel):
             }
             if self._replaced_config_token_hash:
                 data[_REPLACED_CONFIG_TOKEN_HASH_KEY] = self._replaced_config_token_hash
-            state_file.write_text(json.dumps(data, ensure_ascii=False))
+            state_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def _commit_account(self, *, token: str, base_url: str) -> None:
         self._token = token
@@ -776,7 +776,7 @@ class WeixinChannel(BaseChannel):
         state_file = self._get_state_dir() / "account.json"
         if state_file.exists():
             with suppress(Exception):
-                persisted = json.loads(state_file.read_text())
+                persisted = json.loads(state_file.read_text(encoding="utf-8"))
                 if isinstance(persisted, dict):
                     persisted_data = cast(dict[str, Any], persisted)
                     candidates.append(str(persisted_data.get("token", "") or ""))

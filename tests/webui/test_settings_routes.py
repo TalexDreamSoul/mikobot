@@ -672,7 +672,7 @@ async def test_web_search_update_persists_the_credential_only_for_admins(
 
     assert allowed is not None
     assert allowed.status_code == 200
-    saved = json.loads(config_path.read_text())
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
     assert saved["tools"]["web"]["search"]["provider"] == "tavily"
     assert saved["tools"]["web"]["search"]["apiKey"] == "operator-supplied-key"
 

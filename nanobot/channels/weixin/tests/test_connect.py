@@ -76,7 +76,7 @@ async def test_weixin_connect_store_saves_confirmed_qr_login(
     assert completed["status"] == "succeeded"
     assert completed["account"] == "wx-user"
 
-    saved = json.loads((state_dir / "account.json").read_text())
+    saved = json.loads((state_dir / "account.json").read_text(encoding="utf-8"))
     assert saved["token"] == "wx-token"
     assert saved["base_url"] == "https://weixin.example"
 
@@ -468,7 +468,7 @@ async def test_weixin_connect_store_rejects_existing_binding_during_forced_login
 
     assert completed["status"] == "failed"
     assert "new WeChat login" in completed["message"]
-    assert json.loads((state_dir / "account.json").read_text())["token"] == "working-token"
+    assert json.loads((state_dir / "account.json").read_text(encoding="utf-8"))["token"] == "working-token"
 
 
 @pytest.mark.asyncio

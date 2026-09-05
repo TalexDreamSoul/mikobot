@@ -24,7 +24,7 @@ def test_apply_patch_edits_replace(tmp_path):
     )
 
     assert "update calc.py" in result
-    assert target.read_text() == "def add(a, b):\n    return a - b\n"
+    assert target.read_text(encoding="utf-8") == "def add(a, b):\n    return a - b\n"
 
 
 def test_apply_patch_edits_add_new_file(tmp_path):
@@ -43,7 +43,7 @@ def test_apply_patch_edits_add_new_file(tmp_path):
     )
 
     assert "add config.py" in result
-    assert (tmp_path / "config.py").read_text() == "DEBUG = True\n"
+    assert (tmp_path / "config.py").read_text(encoding="utf-8") == "DEBUG = True\n"
 
 
 def test_apply_patch_edits_preserves_new_file_trailing_blank_lines(tmp_path):
@@ -62,7 +62,7 @@ def test_apply_patch_edits_preserves_new_file_trailing_blank_lines(tmp_path):
     )
 
     assert "add notes.txt" in result
-    assert (tmp_path / "notes.txt").read_text() == "one\n\n"
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "one\n\n"
 
 
 def test_apply_patch_edits_add_to_existing_file(tmp_path):
@@ -84,7 +84,7 @@ def test_apply_patch_edits_add_to_existing_file(tmp_path):
 
     assert "update log.py" in result
     assert (
-        target.read_text()
+        target.read_text(encoding="utf-8")
         == "import logging\n\nlogger = logging.getLogger(__name__)\ndef debug(msg):\n    logger.debug(msg)\n"
     )
 
@@ -170,7 +170,7 @@ def test_apply_patch_rejects_delete_action(tmp_path):
     )
 
     assert "unknown action: delete" in result
-    assert target.read_text() == "def unused():\n    pass\ndef used():\n    return 1\n"
+    assert target.read_text(encoding="utf-8") == "def unused():\n    pass\ndef used():\n    return 1\n"
 
 
 def test_apply_patch_edits_batch_multiple_files(tmp_path):
@@ -201,8 +201,8 @@ def test_apply_patch_edits_batch_multiple_files(tmp_path):
 
     assert "update a.py" in result
     assert "update b.py" in result
-    assert a.read_text() == "Y = 1\n"
-    assert b.read_text() == "from a import Y\nprint(X)\n"
+    assert a.read_text(encoding="utf-8") == "Y = 1\n"
+    assert b.read_text(encoding="utf-8") == "from a import Y\nprint(X)\n"
 
 
 def test_apply_patch_edits_rejects_ambiguous_old_text(tmp_path):
@@ -224,7 +224,7 @@ def test_apply_patch_edits_rejects_ambiguous_old_text(tmp_path):
     )
 
     assert "old_text appears multiple times" in result
-    assert target.read_text() == "target\nmiddle\ntarget\n"
+    assert target.read_text(encoding="utf-8") == "target\nmiddle\ntarget\n"
 
 
 def test_apply_patch_edits_dry_run_validates_without_writing(tmp_path):
@@ -252,7 +252,7 @@ def test_apply_patch_edits_dry_run_validates_without_writing(tmp_path):
     )
 
     assert "Patch dry-run succeeded" in result
-    assert target.read_text() == "before\n"
+    assert target.read_text(encoding="utf-8") == "before\n"
     assert not (tmp_path / "added.txt").exists()
 
 
@@ -290,8 +290,8 @@ def test_apply_patch_edits_allows_absolute_and_parent_paths_when_unrestricted(tm
 
     assert "Patch applied" in absolute
     assert "Patch applied" in parent
-    assert absolute_target.read_text() == "absolute\n"
-    assert parent_target.read_text() == "parent\n"
+    assert absolute_target.read_text(encoding="utf-8") == "absolute\n"
+    assert parent_target.read_text(encoding="utf-8") == "parent\n"
 
 
 def test_apply_patch_edits_rejects_outside_paths_when_restricted(tmp_path):
@@ -452,4 +452,4 @@ def test_apply_patch_edits_rolls_back_when_late_operation_fails(tmp_path):
     )
 
     assert "file to update does not exist: missing.txt" in result
-    assert first.read_text() == "before\n"
+    assert first.read_text(encoding="utf-8") == "before\n"
