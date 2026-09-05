@@ -1,10 +1,56 @@
 #!/usr/bin/env bash
-# 仅在 systemd 判定崩溃循环(OnFailure)时触发
+# 由 systemd 的 OnFailure= 触发。
+#
+# OnFailure 在单元「失败」时就会触发, 而失败不只有崩溃一种: 一次例行的
+# systemctl stop/restart, 若关闭耗时超过 TimeoutStopSec, systemd 会 SIGKILL
+# 并把结果记为 failed —— 与崩溃循环无法区分。本脚本因此不能把「被触发」当成
+# 「需要回滚」: 早期版本一上来就覆盖 selfedits, 结果在一次升级维护中把旧版本
+# 的文件粘进了新安装, 包版本报新、代码却是旧的, 只有比对哈希才看得出来。
+#
+# 所以顺序是: 先尝试把服务拉起来并确认它真的在服务, 只有确认起不来才动状态。
 set -uo pipefail
 G=/root/miko-guard/good
 PY=/root/.local/share/uv/tools/nanobot-ai/bin/python
 SITE=/root/.local/share/uv/tools/nanobot-ai/lib/python3.13/site-packages
-logger -t miko-guard "检测到崩溃循环, 开始回滚"
+
+PORT=$($PY -c "
+import json
+try:
+    print(json.load(open('/root/.nanobot/config.json')).get('gateway', {}).get('port', 18790))
+except Exception:
+    print(18790)
+" 2>/dev/null || echo 18790)
+
+# 「活着」以网关真的应答为准, 而不是 systemd 的 active —— 进程在但不服务时,
+# is-active 仍然是 active, 那正是最需要回滚的情形。
+gateway_healthy() {
+  curl -sf --max-time 5 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1
+}
+
+# 等待至多 $1 秒。真崩溃会很快退出, 所以一旦单元停在 failed 就立即返回,
+# 不必把时间耗满; 反过来启动慢也不会被误判。只认 failed: activating 与
+# inactive 都可能只是启动途中的一瞬, 据此提前判死会把慢启动当成崩溃。
+wait_for_gateway() {
+  local deadline=$(( SECONDS + $1 ))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    gateway_healthy && return 0
+    if [ "$(systemctl show nanobot -p ActiveState --value 2>/dev/null)" = "failed" ]; then
+      return 1
+    fi
+    sleep 3
+  done
+  return 1
+}
+
+systemctl reset-failed nanobot 2>/dev/null || true
+systemctl start nanobot 2>/dev/null || true
+
+if wait_for_gateway 90; then
+  logger -t miko-guard "网关在未回滚的情况下已恢复服务, 不改动任何状态(可能只是关闭超时被判为失败)"
+  exit 0
+fi
+
+logger -t miko-guard "网关无法自行恢复, 开始回滚"
 
 [ -f "$G/config.json" ] && cp -f "$G/config.json" /root/.nanobot/config.json
 
@@ -29,8 +75,8 @@ if [ -d "$G/selfedits" ]; then
 fi
 systemctl reset-failed nanobot 2>/dev/null || true
 systemctl start nanobot 2>/dev/null || true
-sleep 20
-if ! systemctl is-active --quiet nanobot; then
+
+if ! wait_for_gateway 60; then
   logger -t miko-guard "回滚后仍失败, 执行重装(将丢弃所有自改)"
   cp -a "$SITE/nanobot" /root/miko-guard/broken-$(date +%s) 2>/dev/null || true
 

@@ -18,12 +18,27 @@ drift between the two is the failure mode this whole layer exists to catch.
 | `nanobot.service` | The gateway. `StartLimitBurst=5` in 5 minutes means a crash loop, which fires `OnFailure`. |
 | `precheck.sh` | Runs before every start. Repairs in place so *this* start can succeed. |
 | `snapshot.sh` | Marks the current state known-good. Refuses unless the gateway is live and healthy. |
-| `rollback.sh` | Fires only on a systemd-detected crash loop. |
+| `rollback.sh` | Runs on any `OnFailure`, then decides for itself whether a rollback is warranted. |
 | `miko-snapshot.timer` | Hourly. |
 
 The ordering matters: `precheck` fixes the cheap, obvious breakage (invalid JSON, a
 self-edit that does not compile) so most bad states never reach a crash loop at all.
 `rollback` is the heavier path for everything else.
+
+`OnFailure` is not a crash-loop signal. It fires whenever the unit enters a failed
+state, and a routine `systemctl stop` or `restart` gets there too: if shutdown outlasts
+`TimeoutStopSec`, systemd sends SIGKILL and records the result as failed. That is
+indistinguishable, from the unit's side, from the service dying on its own.
+
+So `rollback.sh` treats being invoked as a question, not an instruction. It first starts
+the gateway and waits for `/health` to answer; if the gateway serves, it logs that fact
+and exits without touching anything. Only a gateway that will not come up gets the
+config, store, and self-edits restored.
+
+An earlier version restored first and checked afterwards. During an upgrade that pasted
+the previous release's self-edited file into the freshly installed package: the version
+metadata read new, the service reported healthy, and only a file hash comparison showed
+that the channel was running old code.
 
 ## What `snapshot.sh` keeps, and why each item is there
 
@@ -48,6 +63,12 @@ when the resulting version does not match the recorded one.
 It never deletes the collaboration store. A store created after the last known-good
 snapshot is moved to `collaboration.rollback-<epoch>` instead, because a rollback that
 destroys tenant data is worse than the crash it was fixing.
+
+That move is not a substitute for a fresh snapshot. `good/` is only as current as the
+last hourly run, so a rollback returns the store to that point and everything written
+since lands in the `collaboration.rollback-<epoch>` copy. Take a snapshot before any
+maintenance that might trip `OnFailure`, and check that copy afterwards rather than
+assuming it duplicates what is live.
 
 ## Install
 
