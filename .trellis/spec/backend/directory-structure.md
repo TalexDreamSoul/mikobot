@@ -156,7 +156,7 @@ There is no `services/` layer. Logic lives with the runtime owner:
 | Turn orchestration, session/workspace scope | `nanobot/agent/loop.py` |
 | Provider + tool conversation loop | `nanobot/agent/runner.py` |
 | Platform I/O, message formatting, retries | the channel package |
-| Persistence and authorization for tenancy | `nanobot/collaboration/` |
+| Projects, members, and channel assignments | `nanobot/collaboration/` (wired only by the gateway; the host owner's own turns bypass it) |
 | HTTP request validation and projection | `nanobot/webui/` |
 | Cross-cutting pure helpers | `nanobot/utils/` |
 

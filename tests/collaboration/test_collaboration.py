@@ -211,11 +211,11 @@ def _provider() -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_keeps_local_websocket_owner_and_gives_proxy_sender_private_scope(
+async def test_agent_loop_leaves_local_owner_alone_and_gives_proxy_sender_private_scope(
     tmp_path: Path,
     local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
 ) -> None:
-    """Proxy identities cannot inherit the local owner's project workspace."""
+    """The host owner's own turns bypass collaboration; proxy identities get a private scope."""
     workspace = tmp_path / "agent"
     workspace.mkdir()
     store, repository = local_collaboration_repository
@@ -223,16 +223,45 @@ async def test_agent_loop_keeps_local_websocket_owner_and_gives_proxy_sender_pri
     local = await loop._conversation_scope_for_message(
         InboundMessage("websocket", "browser", "local-chat", "hello")
     )
+    cli = await loop._conversation_scope_for_message(
+        InboundMessage("cli", "user", "direct", "hello")
+    )
     external = await loop._conversation_scope_for_message(
         InboundMessage("websocket", "proxy:remote-user", "remote-chat", "hello")
     )
 
-    assert local.user_id == (await repository.ensure_local_owner(workspace))[0].id
-    assert Path(local.workspace_path or "").resolve() == workspace.resolve()
+    assert local is None
+    assert cli is None
+    assert external is not None
     assert external.kind is ConversationScopeKind.DIRECT
-    assert external.user_id != local.user_id
-    assert external.project_id != local.project_id
     assert Path(external.workspace_path or "").is_relative_to(store.root / "workspaces")
+    assert await repository.resolve_identity("websocket", "browser") is None
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_without_a_repository_runs_single_user(tmp_path: Path) -> None:
+    """The CLI, SDK, and API compositions pass no repository and see no collaboration scope."""
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    with patch("nanobot.agent.loop.SubagentManager") as subagents:
+        subagents.return_value.cancel_by_session = AsyncMock(return_value=0)
+        loop = AgentLoop(bus=MessageBus(), provider=_provider(), workspace=workspace)
+
+    message = InboundMessage("telegram", "alice", "alice", "hello", metadata={"direct": True})
+    scope = await loop._conversation_scope_for_message(message)
+    key = await loop._effective_session_key(message)
+    turn_workspace = await loop._effective_workspace_scope(
+        channel=message.channel,
+        message_metadata=message.metadata,
+        session_metadata=None,
+        attributes={},
+    )
+
+    assert loop.collaboration is None
+    assert scope is None
+    assert key == "telegram:alice"
+    assert turn_workspace.project_path == workspace.resolve()
+    assert not loop.tools.has("projects")
 
 
 @pytest.mark.asyncio

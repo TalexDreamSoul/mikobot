@@ -60,6 +60,29 @@ that lifecycle. `AgentLoop.from_config()` therefore requires a caller-owned
 
 Keep this split in mind when debugging. If a problem is about channel routing, session keys, workspace selection, or outbound delivery, start in `agent/loop.py`. If it is about provider calls, tool calls, streaming, or iteration limits, start in `agent/runner.py`.
 
+## Projects and Channel Assignments
+
+`nanobot/collaboration/` is the small control plane the gateway uses to serve
+other people. It stores users, projects, project membership, one
+`ChannelAssignment` per chat-channel instance, Pair Codes, and conversation
+bindings in one JSON document under the runtime `collaboration/` directory.
+
+| Concept | Meaning |
+|---|---|
+| Administrator | The local owner, or an OIDC subject listed in `admin_subjects`. Manages every project and may hand any channel instance to any member. |
+| Project | A workspace plus members and optional Skill / MCP allowlists. |
+| Channel assignment | One connected channel instance routed to one project on behalf of one member. Created by a one-time Pair Code sent from that channel. |
+| Conversation binding | An explicit group or thread bound to a project. |
+
+Only the gateway composition root (`nanobot/cli/gateway_runtime.py`) wires a
+`CollaborationRepository` into `AgentLoop` and `ChannelManager`. The CLI, the
+Python SDK, and the API server pass nothing and run single-user. Inside the
+loop, the host owner's own CLI and token-authenticated WebUI turns never touch
+the repository; only chat-channel senders and OIDC or proxy principals are
+resolved to a project scope, which sets their workspace, session namespace,
+and allowed capabilities. The WebUI **Projects** view (Channels, Members,
+Capabilities) is the management surface.
+
 ## Providers
 
 Provider metadata is centralized in `nanobot/providers/registry.py`. Configuration fields live in `nanobot/config/schema.py`.

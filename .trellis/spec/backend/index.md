@@ -50,7 +50,7 @@ Before writing code:
    `agent/runner.py`, check whether it can live in a channel, tool, skill, or MCP server
    instead.
 2. **Check the boundary.** Does the change touch paths, outbound HTTP, shell execution, or
-   tenant authorization? Read [`.agent/security.md`](../../../.agent/security.md) first.
+   project authorization? Read [`.agent/security.md`](../../../.agent/security.md) first.
 3. **Check for an existing pattern.** Find two or three sibling implementations and match them.
    Do not invent a new shape for a problem the tree already solves.
 4. **Check for a persistence contract.** Any change to configuration, the collaboration store,

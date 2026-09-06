@@ -56,11 +56,9 @@ from nanobot.collaboration import (
     COLLABORATION_BINDING_METADATA_KEY,
     COLLABORATION_PROJECT_METADATA_KEY,
     COLLABORATION_USER_METADATA_KEY,
-    AsyncLocalCollaborationRepository,
     CollaborationPermissionError,
     CollaborationRepository,
     ConversationScope,
-    build_collaboration_repository,
 )
 from nanobot.collaboration.conversation import canonical_conversation_id
 from nanobot.collaboration.pairing import CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY
@@ -322,7 +320,6 @@ class AgentLoop:
         idle_compact_check_interval_seconds: int = 0,
         recovery_admission: RecoveryAdmission | None = None,
         collaboration_repository: CollaborationRepository | None = None,
-        owns_collaboration_repository: bool | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -346,12 +343,10 @@ class AgentLoop:
         self._runtime_model_publisher = runtime_model_publisher
         self.workspace = workspace
         self._canonical_workspace = workspace.expanduser().resolve(strict=False)
-        self.collaboration = collaboration_repository or AsyncLocalCollaborationRepository()
-        self._owns_collaboration_repository = (
-            collaboration_repository is None
-            if owns_collaboration_repository is None
-            else owns_collaboration_repository
-        )
+        # The collaboration repository is optional composition: the gateway wires
+        # one so chat-channel senders are routed to projects; the CLI, the SDK, and
+        # the API server run single-user and pass nothing.
+        self.collaboration = collaboration_repository
         self._collaboration_initialized = False
         self._collaboration_initialize_lock = asyncio.Lock()
         initial_model = model or provider.get_default_model()
@@ -426,7 +421,8 @@ class AgentLoop:
     async def _ensure_collaboration_initialized(self) -> None:
         if getattr(self, "_collaboration_initialized", False):
             return
-        if not hasattr(self, "collaboration") or not hasattr(self, "workspace"):
+        repository = getattr(self, "collaboration", None)
+        if repository is None or not hasattr(self, "workspace"):
             return
         initialize_lock = getattr(self, "_collaboration_initialize_lock", None)
         if initialize_lock is None:
@@ -434,8 +430,8 @@ class AgentLoop:
         async with initialize_lock:
             if getattr(self, "_collaboration_initialized", False):
                 return
-            await self.collaboration.initialize()
-            await self.collaboration.ensure_local_owner(self.workspace)
+            await repository.initialize()
+            await repository.ensure_local_owner(self.workspace)
             self._collaboration_initialized = True
 
     @classmethod
@@ -467,9 +463,6 @@ class AgentLoop:
                 config.workspace_path,
                 sessions_root=data_dir / "sessions" if data_dir is not None else None,
             )
-        if "collaboration_repository" not in extra:
-            extra["collaboration_repository"] = build_collaboration_repository()
-            extra.setdefault("owns_collaboration_repository", True)
         provider = extra.pop("provider", None) or make_provider(config)
         resolved = config.resolve_preset()
         model = extra.pop("model", None) or resolved.model
@@ -890,56 +883,32 @@ class AgentLoop:
         """Forget ephemeral file-read state for a reset or removed session."""
         self._file_state_store.discard(key)
 
-    async def _conversation_scope_for_message(self, msg: InboundMessage) -> ConversationScope:
-        local_owner = msg.channel in {"cli", "websocket"} and not msg.sender_id.startswith(
-            "proxy:"
-        )
-        user, _default_project = await self.collaboration.ensure_identity_user(
+    @staticmethod
+    def _is_local_owner(msg: InboundMessage) -> bool:
+        """Whether *msg* comes from the host's own CLI or token-authenticated WebUI."""
+        return msg.channel in {"cli", "websocket"} and not msg.sender_id.startswith("proxy:")
+
+    async def _conversation_scope_for_message(
+        self, msg: InboundMessage
+    ) -> ConversationScope | None:
+        """Resolve the project scope for a chat-channel sender, or ``None``.
+
+        Local CLI and token-authenticated WebUI turns are the host owner's own and
+        keep the upstream workspace-scope behaviour untouched. Only external
+        senders (chat channels, proxy or OIDC principals) are routed through the
+        collaboration store, and only when the composition root wired one.
+        """
+        if self.collaboration is None or self._is_local_owner(msg):
+            return None
+        await self.collaboration.ensure_identity_user(
             msg.channel,
             msg.sender_id,
             self.workspace,
-            local_owner=local_owner,
+            local_owner=False,
         )
         metadata = dict(msg.metadata or {})
         conversation_id = canonical_conversation_id(msg.chat_id, metadata)
-        if local_owner:
-            raw_workspace = metadata.get("workspace_scope")
-            workspace_scope = (
-                cast(Mapping[str, object], raw_workspace)
-                if isinstance(raw_workspace, Mapping)
-                else None
-            )
-            raw_project_path = (
-                workspace_scope.get("project_path")
-                if workspace_scope is not None
-                else None
-            )
-            if isinstance(raw_project_path, str) and raw_project_path.strip():
-                selected_path = await asyncio.to_thread(
-                    lambda: Path(raw_project_path).expanduser().resolve(strict=False)
-                )
-                project = None
-                for item in await self.collaboration.list_projects(user.id):
-                    project_workspace = item.workspace_path
-                    item_path = await asyncio.to_thread(
-                        lambda: Path(project_workspace).resolve(strict=False)
-                    )
-                    if item_path == selected_path:
-                        project = item
-                        break
-                if project is None:
-                    project = await self.collaboration.create_project(
-                        user.id,
-                        selected_path.name or str(selected_path),
-                        selected_path,
-                    )
-                await self.collaboration.bind_conversation(
-                    msg.channel,
-                    conversation_id,
-                    project.id,
-                    user.id,
-                )
-        if msg.channel in {"cli", "websocket"}:
+        if msg.channel == "websocket":
             metadata["direct"] = True
         scope = await self.collaboration.resolve_scope(
             msg.channel,
@@ -1039,7 +1008,8 @@ class AgentLoop:
             return False
         pending_scope = await self._conversation_scope_for_message(pending_msg)
         if (
-            pending_scope.kind != active_scope.kind
+            pending_scope is None
+            or pending_scope.kind != active_scope.kind
             or pending_scope.user_id != active_scope.user_id
             or pending_scope.project_id != active_scope.project_id
             or pending_scope.allowed_skills != active_scope.allowed_skills
@@ -1101,13 +1071,10 @@ class AgentLoop:
         """
         if msg.session_key_override:
             return msg.session_key
-        local_owner = msg.channel in {"cli", "websocket"} and not msg.sender_id.startswith(
-            "proxy:"
-        )
-        if local_owner:
+        if self._is_local_owner(msg):
             return UNIFIED_SESSION_KEY if self._unified_session else msg.session_key
         scope = await self._conversation_scope_for_message(msg)
-        if scope.user_id and scope.project_id is not None:
+        if scope is not None and scope.user_id and scope.project_id is not None:
             if self._unified_session:
                 return f"unified:{scope.user_id}"
             return f"user:{scope.user_id}:{msg.session_key}"
@@ -1823,15 +1790,9 @@ class AgentLoop:
         async def _close_exec_sessions() -> None:
             await self._exec_session_manager.close_all()
 
-        collaboration_cleanup: tuple[Callable[[], Awaitable[None]], ...] = ()
-        if getattr(self, "_owns_collaboration_repository", False) and hasattr(
-            self, "collaboration"
-        ):
-            collaboration_cleanup = (self.collaboration.aclose,)
         cleanup_steps: tuple[Callable[[], Awaitable[None]], ...] = (
             self.subagents.close,
             _close_exec_sessions,
-            *collaboration_cleanup,
         )
         for cleanup in cleanup_steps:
             try:
@@ -2040,7 +2001,7 @@ class AgentLoop:
 
         if ctx.kind is TurnKind.USER and msg.sender_id != "subagent" and msg.media:
             media_scope = await self._conversation_scope_for_message(msg)
-            if media_scope.user_id and media_scope.project_id is not None:
+            if media_scope is not None and media_scope.user_id and media_scope.project_id is not None:
                 managed_media_root = await asyncio.to_thread(
                     lambda: get_media_dir().resolve(strict=False)
                 )
@@ -2096,6 +2057,16 @@ class AgentLoop:
         ctx.tools = tools
         if ctx.kind is TurnKind.USER and msg.sender_id != "subagent":
             collaboration_scope = await self._conversation_scope_for_message(msg)
+            if collaboration_scope is None:
+                ctx.attributes.pop("collaboration_scope", None)
+                for key in (
+                    COLLABORATION_USER_METADATA_KEY,
+                    COLLABORATION_PROJECT_METADATA_KEY,
+                    COLLABORATION_BINDING_METADATA_KEY,
+                ):
+                    session.metadata.pop(key, None)
+                self.sessions.save(session)
+                return await self._restore_turn_state(ctx, session, msg, force_fresh_scope)
             ctx.attributes["collaboration_scope"] = collaboration_scope
             if collaboration_scope.user_id is not None:
                 session.metadata[COLLABORATION_USER_METADATA_KEY] = collaboration_scope.user_id
@@ -2115,7 +2086,15 @@ class AgentLoop:
                 session.metadata.pop(COLLABORATION_BINDING_METADATA_KEY, None)
             ctx.tools = self._tools_for_conversation_scope(ctx.tools, collaboration_scope)
             self.sessions.save(session)
+        await self._restore_turn_state(ctx, session, msg, force_fresh_scope)
 
+    async def _restore_turn_state(
+        self,
+        ctx: TurnContext,
+        session: Session,
+        msg: InboundMessage,
+        force_fresh_scope: bool,
+    ) -> None:
         if ctx.kind is TurnKind.SYSTEM:
             logger.info("Processing system message from {}", msg.sender_id)
         elif session.policy.log_content:

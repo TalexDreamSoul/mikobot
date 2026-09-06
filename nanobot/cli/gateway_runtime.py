@@ -33,6 +33,7 @@ from nanobot.cli.webui_support import (
     _webui_display_url,
     _webui_endpoint_reachable,
 )
+from nanobot.collaboration import build_collaboration_repository
 from nanobot.config.paths import is_default_workspace
 from nanobot.config.schema import Config
 from nanobot.extensions.adapters import (
@@ -498,6 +499,10 @@ def _run_gateway(
         registered_hook("mcp-readiness", _MCPReadinessHook(mcp_provider)),
         registered_hook_factory("file-edit-activity", create_file_edit_activity_hook),
     )
+    # The gateway is the one composition root that serves other people: chat
+    # channels and OIDC/proxy principals are routed to projects through the
+    # collaboration store. The CLI, SDK, and API server stay single-user.
+    collaboration = build_collaboration_repository()
     agent = AgentLoop.from_config(
         config, bus,
         provider=provider_snapshot.provider,
@@ -505,6 +510,7 @@ def _run_gateway(
         context_window_tokens=provider_snapshot.context_window_tokens,
         cron_service=cron,
         session_manager=session_manager,
+        collaboration_repository=collaboration,
         image_generation_provider_configs=image_gen_provider_configs(config),
         provider_snapshot_loader=_load_gateway_provider_snapshot,
         preset_catalog_loader=load_model_preset_catalog,
@@ -803,7 +809,7 @@ def _run_gateway(
         session_manager=session_manager,
         cron_service=cron,
         local_trigger_store=trigger_store,
-        collaboration_repository=getattr(agent, "collaboration", None),
+        collaboration_repository=collaboration,
         webui_runtime_model_name=_webui_runtime_model_name,
         webui_refresh_runtime_config=_webui_refresh_runtime_config,
         webui_cron_pending_job_ids=agent.pending_cron_job_ids_for_session,
