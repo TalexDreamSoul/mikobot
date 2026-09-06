@@ -420,66 +420,8 @@ export interface WorkspacesPayload {
 export interface CollaborationUser {
   id: string;
   display_name: string;
-  default_vault_id?: string | null;
-  default_persona_id?: string | null;
-  default_organization_id?: string | null;
-  default_bot_id?: string | null;
-}
-
-export type CollaborationOrganizationRole = "owner" | "admin" | "member";
-
-export interface CollaborationOrganization {
-  id: string;
-  name: string;
-  created_by_user_id: string;
-  is_personal: boolean;
-  created_at_ms: number;
-  updated_at_ms: number;
-}
-
-export interface CollaborationOrganizationMember {
-  organization_id: string;
-  user_id: string;
-  role: CollaborationOrganizationRole;
-  created_at_ms: number;
-}
-
-export interface CollaborationOrganizationsPayload {
-  organizations: CollaborationOrganization[];
-}
-
-export interface CollaborationOrganizationPayload {
-  organization: CollaborationOrganization;
-  members: CollaborationOrganizationMember[];
-}
-
-export type CollaborationBotState = "active" | "disabled";
-
-export interface CollaborationBot {
-  id: string;
-  organization_id: string;
-  owner_user_id: string;
-  name: string;
-  avatar_url: string | null;
-  persona_id: string | null;
-  state: CollaborationBotState;
-  created_at_ms: number;
-  updated_at_ms: number;
-}
-
-export interface CollaborationBotProjectAssignment {
-  bot_id: string;
-  project_id: string;
-  assigned_by_user_id: string;
-  created_at_ms: number;
-}
-
-export interface CollaborationBotChannelAssignment {
-  bot_id: string;
-  channel_type: string;
-  instance_id: string;
-  claimed_by_user_id: string;
-  created_at_ms: number;
+  is_admin: boolean;
+  default_project_id: string | null;
 }
 
 export interface CollaborationClaimableChannel {
@@ -490,31 +432,21 @@ export interface CollaborationClaimableChannel {
   status: string;
 }
 
-export interface CollaborationBotProjectChannel {
-  bot_id: string;
-  project_id: string;
+export interface CollaborationChannelAssignment {
   channel_type: string;
   instance_id: string;
+  project_id: string;
+  assignee_user_id: string;
   enabled: boolean;
+  created_by_user_id: string;
+  created_at_ms: number;
   updated_at_ms: number;
 }
-
-export interface CollaborationBotCapabilityProfile {
-  bot_id: string;
-  project_id: string | null;
-  revision: number;
-  settings: CollaborationExtensionSettings;
-  updated_at_ms: number;
-}
-
-export type CollaborationPairingPurpose = "claim_channel" | "assign_bot_project";
 
 export interface CollaborationPairingChallenge {
   id: string;
-  purpose: CollaborationPairingPurpose;
-  organization_id: string;
-  bot_id: string;
-  project_id: string | null;
+  project_id: string;
+  assignee_user_id: string;
   channel_type: string;
   instance_id: string;
   expires_at_ms: number;
@@ -527,7 +459,9 @@ export interface CollaborationPairingChallenge {
 export interface CollaborationProject {
   id: string;
   name: string;
-  organization_id: string | null;
+  created_by_user_id: string;
+  allowed_skills: string[] | null;
+  allowed_mcp_servers: string[] | null;
   created_at_ms: number;
   updated_at_ms: number;
 }
@@ -541,41 +475,9 @@ export interface CollaborationProjectMember {
   created_at_ms: number;
 }
 
-export interface CollaborationTaskList {
-  id: string;
-  project_id: string;
-  name: string;
-  position: number;
-  created_at_ms?: number;
-  updated_at_ms?: number;
-}
-
-export type CollaborationTaskStatus = "todo" | "in_progress" | "done" | "cancelled";
-
-export interface CollaborationTask {
-  id: string;
-  project_id: string;
-  task_list_id: string;
-  title: string;
-  status: CollaborationTaskStatus;
-  description: string;
-  assignee_user_id: string | null;
-  position: number;
-  created_at_ms?: number;
-  updated_at_ms?: number;
-}
-
-export interface CollaborationExtensionSettings {
-  skills?: string[];
-  mcpServers?: string[];
-  plugins?: string[];
-  contextMaxTokens?: number;
-  [key: string]: unknown;
-}
-
-export interface CollaborationExtensionProfile {
-  revision: number;
-  settings: CollaborationExtensionSettings;
+export interface CollaborationCapabilities {
+  allowed_skills?: string[] | null;
+  allowed_mcp_servers?: string[] | null;
 }
 
 export interface CollaborationAvailableSkill {
@@ -589,112 +491,32 @@ export interface CollaborationAvailableMcpServer {
   name: string;
 }
 
-export type CollaborationContextSourceKind = "skill" | "mcp" | "plugin" | "document" | "custom";
-export type CollaborationEditableContextSourceKind = Extract<
-  CollaborationContextSourceKind,
-  "document" | "custom"
->;
-
-export interface CollaborationContextSource {
-  id: string;
-  project_id: string;
-  name: string;
-  kind: CollaborationContextSourceKind;
-  enabled: boolean;
-  config: Record<string, unknown>;
-  created_at_ms?: number;
-  updated_at_ms?: number;
-}
-
 export interface CollaborationPayload {
   user: CollaborationUser;
+  is_admin: boolean;
   projects: CollaborationProject[];
-  organizations: CollaborationOrganization[];
-  bots: CollaborationBot[];
-  active_organization_id: string | null;
-  active_bot_id: string | null;
+  assignments: CollaborationChannelAssignment[];
   active_project_id: string | null;
 }
 
 export interface CollaborationProjectPayload {
   project: CollaborationProject;
   members: CollaborationProjectMember[];
-  bots: Array<{
-    bot: CollaborationBot;
-    assignment: CollaborationBotProjectAssignment;
-    channels: CollaborationBotProjectChannel[];
-  }>;
-  task_lists: CollaborationTaskList[];
-  tasks: CollaborationTask[];
-  extension_profile: CollaborationExtensionProfile;
+  assignments: CollaborationChannelAssignment[];
   available: {
     skills: CollaborationAvailableSkill[];
     mcp_servers: CollaborationAvailableMcpServer[];
   };
-  context_sources: CollaborationContextSource[];
-}
-
-export interface CollaborationBotPayload {
-  bot: CollaborationBot;
-  projects: Array<{
-    assignment: CollaborationBotProjectAssignment;
-    project: CollaborationProject;
-  }>;
-  channels: CollaborationBotChannelAssignment[];
-  project_channels: CollaborationBotProjectChannel[];
-  capability_profiles: CollaborationBotCapabilityProfile[];
+  can_manage: boolean;
 }
 
 export interface CollaborationPairingPayload {
   pairing: CollaborationPairingChallenge;
+  channel_activation?: { ok: boolean; message?: string };
 }
 
 export interface CollaborationClaimableChannelsPayload {
   channels: CollaborationClaimableChannel[];
-}
-
-export type PersonalTaskReviewState = "confirmed" | "proposed" | "dismissed";
-
-export interface PersonalVault {
-  id: string;
-  name: string;
-  kind: "private" | "work" | "life";
-  created_at_ms: number;
-  updated_at_ms: number;
-}
-
-export interface PersonalPersona {
-  id: string;
-  name: string;
-  default_vault_id: string;
-  instructions: string;
-}
-
-export interface PersonalTask {
-  id: string;
-  vault_id: string;
-  title: string;
-  note: string;
-  status: CollaborationTaskStatus;
-  priority: number;
-  due_at_ms: number | null;
-  timezone: string | null;
-  recurrence_rule: string | null;
-  source_type: string;
-  source_ref: string | null;
-  external_provider: string | null;
-  review_state: PersonalTaskReviewState;
-  created_at_ms: number;
-  updated_at_ms: number;
-}
-
-export interface PersonalAssistantPayload {
-  user: CollaborationUser;
-  default_vault_id: string | null;
-  default_persona_id: string | null;
-  vaults: PersonalVault[];
-  personas: PersonalPersona[];
-  tasks: PersonalTask[];
 }
 
 export type SidebarDensity = "comfortable" | "compact";

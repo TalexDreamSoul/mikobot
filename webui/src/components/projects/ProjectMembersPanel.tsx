@@ -15,7 +15,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type {
-  CollaborationOrganizationMember,
   CollaborationProjectMember,
   CollaborationProjectPayload,
   CollaborationProjectRole,
@@ -26,16 +25,12 @@ const PROJECT_ROLES: CollaborationProjectRole[] = ["member", "owner"];
 export function ProjectMembersPanel({
   detail,
   currentUserId,
-  organizationMembers,
-  organizationLoading,
   busyKey,
   onAddMember,
   onRemoveMember,
 }: {
   detail: CollaborationProjectPayload;
   currentUserId: string;
-  organizationMembers: CollaborationOrganizationMember[];
-  organizationLoading: boolean;
   busyKey: string | null;
   onAddMember: (memberUserId: string, role: CollaborationProjectRole) => Promise<unknown>;
   onRemoveMember: (memberUserId: string) => Promise<unknown>;
@@ -45,7 +40,7 @@ export function ProjectMembersPanel({
   const [role, setRole] = useState<CollaborationProjectRole>("member");
   const [memberToRemove, setMemberToRemove] = useState<CollaborationProjectMember | null>(null);
   const currentMembership = detail.members.find((member) => member.user_id === currentUserId) ?? null;
-  const canManage = currentMembership?.role === "owner";
+  const canManage = detail.can_manage;
   const existingMember = detail.members.find((member) => member.user_id === memberUserId.trim()) ?? null;
 
   const addMember = async (event: FormEvent) => {
@@ -146,23 +141,7 @@ export function ProjectMembersPanel({
 
             <form onSubmit={(event) => void addMember(event)} className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem_auto] sm:items-end">
               <div className="min-w-0">
-                <label htmlFor="project-organization-member" className="text-xs font-medium">{t("projects.members.chooseFromOrganization")}</label>
-                <select
-                  id="project-organization-member"
-                  value=""
-                  onChange={(event) => setMemberUserId(event.target.value)}
-                  disabled={organizationLoading || !organizationMembers.length || Boolean(busyKey)}
-                  className="mt-1.5 h-11 w-full rounded-control border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
-                >
-                  <option value="">{organizationLoading ? t("projects.members.loadingOrganization") : t("projects.members.selectUser")}</option>
-                  {organizationMembers.map((member) => (
-                    <option key={member.user_id} value={member.user_id}>{member.user_id}</option>
-                  ))}
-                </select>
-                {!organizationLoading && !organizationMembers.length ? (
-                  <p className="mt-1.5 text-xs leading-5 text-muted-foreground">{t("projects.members.rosterUnavailable")}</p>
-                ) : null}
-                <label htmlFor="project-member-user-id" className="mt-3 block text-xs font-medium">{t("projects.members.exactUserId")}</label>
+                <label htmlFor="project-member-user-id" className="block text-xs font-medium">{t("projects.members.exactUserId")}</label>
                 <Input
                   id="project-member-user-id"
                   value={memberUserId}

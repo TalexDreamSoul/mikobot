@@ -5,9 +5,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useCollaborationProjects } from "@/hooks/useCollaborationProjects";
 import * as api from "@/lib/api";
 import type {
-  CollaborationBot,
-  CollaborationOrganization,
-  CollaborationOrganizationPayload,
   CollaborationPayload,
   CollaborationProject,
   CollaborationProjectPayload,
@@ -19,34 +16,19 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return {
     ...actual,
     fetchCollaboration: vi.fn(),
-    fetchCollaborationBot: vi.fn(),
-    fetchCollaborationOrganization: vi.fn(),
     fetchCollaborationProject: vi.fn(),
   };
 });
 
 const timestamp = 1_735_689_600_000;
 
-function organization(
-  id: string,
-  name: string,
-  isPersonal = false,
-): CollaborationOrganization {
+function project(id: string, name: string): CollaborationProject {
   return {
     id,
     name,
-    is_personal: isPersonal,
     created_by_user_id: "user-1",
-    created_at_ms: timestamp,
-    updated_at_ms: timestamp,
-  };
-}
-
-function project(id: string, name: string, organizationId: string): CollaborationProject {
-  return {
-    id,
-    name,
-    organization_id: organizationId,
+    allowed_skills: null,
+    allowed_mcp_servers: null,
     created_at_ms: timestamp,
     updated_at_ms: timestamp,
   };
@@ -55,40 +37,23 @@ function project(id: string, name: string, organizationId: string): Collaboratio
 function projectPayload(value: CollaborationProject): CollaborationProjectPayload {
   return {
     project: value,
-    members: [],
-    task_lists: [],
-    tasks: [],
-    extension_profile: { revision: 1, settings: {} },
+    members: [{ project_id: value.id, user_id: "user-1", role: "owner", created_at_ms: timestamp }],
+    assignments: [],
     available: { skills: [], mcp_servers: [] },
-    context_sources: [],
-  };
-}
-
-function organizationPayload(value: CollaborationOrganization): CollaborationOrganizationPayload {
-  return {
-    organization: value,
-    members: [{
-      organization_id: value.id,
-      user_id: "user-1",
-      role: "owner",
-      created_at_ms: timestamp,
-    }],
+    can_manage: true,
   };
 }
 
 function collaboration(
-  organizations: CollaborationOrganization[],
   projects: CollaborationProject[],
   activeProjectId: string | null = null,
-  bots: CollaborationBot[] = [],
+  isAdmin = false,
 ): CollaborationPayload {
   return {
-    user: { id: "user-1", display_name: "Ari" },
-    organizations,
+    user: { id: "user-1", display_name: "Ari", is_admin: isAdmin, default_project_id: activeProjectId },
+    is_admin: isAdmin,
     projects,
-    bots,
-    active_organization_id: null,
-    active_bot_id: null,
+    assignments: [],
     active_project_id: activeProjectId,
   };
 }
@@ -123,86 +88,75 @@ function wrap(client: FakeClient) {
 describe("useCollaborationProjects", () => {
   beforeEach(() => {
     vi.mocked(api.fetchCollaboration).mockReset();
-    vi.mocked(api.fetchCollaborationOrganization).mockReset();
     vi.mocked(api.fetchCollaborationProject).mockReset();
-    vi.mocked(api.fetchCollaborationBot).mockReset();
   });
 
-  it("selects the explicitly personal organization when organization timestamps collide", async () => {
-    const shared = organization("org-shared", "Studio");
-    const personal = organization("org-personal", "Ari's workspace", true);
-    vi.mocked(api.fetchCollaboration).mockResolvedValue(collaboration([shared, personal], []));
-    vi.mocked(api.fetchCollaborationOrganization).mockImplementation(async (_token, id) => (
-      organizationPayload(id === personal.id ? personal : shared)
+  it("selects the active project and exposes administration from the summary", async () => {
+    const first = project("project-1", "First");
+    const second = project("project-2", "Second");
+    vi.mocked(api.fetchCollaboration).mockResolvedValue(collaboration([first, second], second.id, true));
+    vi.mocked(api.fetchCollaborationProject).mockImplementation(async (_token, id) => (
+      projectPayload(id === first.id ? first : second)
     ));
 
     const { result } = renderHook(useCollaborationProjects, { wrapper: wrap(fakeClient()) });
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.personalOrganizationId).toBe("org-personal");
-    expect(result.current.organizationId).toBe("org-personal");
+    expect(result.current.isAdmin).toBe(true);
+    expect(result.current.projectId).toBe(second.id);
+    await waitFor(() => expect(result.current.detail?.project.id).toBe(second.id));
   });
 
-  it("switches to that organization's project and clears stale project detail", async () => {
-    const personal = organization("org-personal", "Ari's workspace", true);
-    const shared = organization("org-shared", "Studio");
-    const personalProject = project("project-personal", "Private roadmap", personal.id);
-    const sharedProject = project("project-shared", "Team roadmap", shared.id);
-    const summary = collaboration([personal, shared], [personalProject, sharedProject], personalProject.id);
-    let resolveSharedDetail!: (value: CollaborationProjectPayload) => void;
-
-    vi.mocked(api.fetchCollaboration).mockResolvedValue(summary);
-    vi.mocked(api.fetchCollaborationOrganization).mockImplementation(async (_token, id) => (
-      organizationPayload(id === personal.id ? personal : shared)
-    ));
+  it("switches projects, persists the default, and clears stale detail", async () => {
+    const first = project("project-1", "First");
+    const second = project("project-2", "Second");
+    let resolveSecond!: (value: CollaborationProjectPayload) => void;
+    const client = fakeClient();
+    client.requestMutation.mockResolvedValue({ user: collaboration([first, second]).user });
+    vi.mocked(api.fetchCollaboration).mockResolvedValue(collaboration([first, second], first.id));
     vi.mocked(api.fetchCollaborationProject).mockImplementation((_token, id) => {
-      if (id === sharedProject.id) {
+      if (id === second.id) {
         return new Promise<CollaborationProjectPayload>((resolve) => {
-          resolveSharedDetail = resolve;
+          resolveSecond = resolve;
         });
       }
-      return Promise.resolve(projectPayload(personalProject));
+      return Promise.resolve(projectPayload(first));
     });
-
-    const { result } = renderHook(useCollaborationProjects, { wrapper: wrap(fakeClient()) });
-    await waitFor(() => expect(result.current.detail?.project.id).toBe(personalProject.id));
-
-    act(() => {
-      result.current.selectOrganization(shared.id);
-    });
-
-    await waitFor(() => expect(result.current.projectId).toBe(sharedProject.id));
-    await waitFor(() => expect(api.fetchCollaborationProject).toHaveBeenLastCalledWith("tok", sharedProject.id));
-    expect(result.current.detail).toBeNull();
-
-    await act(async () => {
-      resolveSharedDetail(projectPayload(sharedProject));
-    });
-    await waitFor(() => expect(result.current.detail?.project.id).toBe(sharedProject.id));
-  });
-
-  it("creates projects in the selected organization", async () => {
-    const personal = organization("org-personal", "Ari's workspace", true);
-    const shared = organization("org-shared", "Studio");
-    const existing = project("project-personal", "Private roadmap", personal.id);
-    const created = project("project-shared", "Release plan", shared.id);
-    const summary = collaboration([personal, shared], [existing]);
-    const client = fakeClient();
-    client.requestMutation.mockResolvedValue({ project: created });
-
-    vi.mocked(api.fetchCollaboration).mockResolvedValue(summary);
-    vi.mocked(api.fetchCollaborationOrganization).mockImplementation(async (_token, id) => (
-      organizationPayload(id === personal.id ? personal : shared)
-    ));
-    vi.mocked(api.fetchCollaborationProject).mockResolvedValue(projectPayload(existing));
 
     const { result } = renderHook(useCollaborationProjects, { wrapper: wrap(client) });
-    await waitFor(() => expect(result.current.organizationId).toBe(personal.id));
+    await waitFor(() => expect(result.current.detail?.project.id).toBe(first.id));
 
     act(() => {
-      result.current.selectOrganization(shared.id);
+      result.current.selectProject(second.id);
     });
-    await waitFor(() => expect(result.current.organizationId).toBe(shared.id));
+
+    await waitFor(() => expect(result.current.projectId).toBe(second.id));
+    expect(result.current.detail).toBeNull();
+    await waitFor(() => expect(client.requestMutation).toHaveBeenCalledWith(
+      "collaboration.user.defaults",
+      { project_id: second.id },
+      expect.any(Number),
+    ));
+    await act(async () => {
+      resolveSecond(projectPayload(second));
+    });
+    await waitFor(() => expect(result.current.detail?.project.id).toBe(second.id));
+  });
+
+  it("creates a project and selects it", async () => {
+    const existing = project("project-1", "First");
+    const created = project("project-2", "Release plan");
+    const client = fakeClient();
+    client.requestMutation.mockResolvedValue({ project: created });
+    vi.mocked(api.fetchCollaboration)
+      .mockResolvedValueOnce(collaboration([existing], existing.id))
+      .mockResolvedValue(collaboration([existing, created], existing.id));
+    vi.mocked(api.fetchCollaborationProject).mockImplementation(async (_token, id) => (
+      projectPayload(id === created.id ? created : existing)
+    ));
+
+    const { result } = renderHook(useCollaborationProjects, { wrapper: wrap(client) });
+    await waitFor(() => expect(result.current.projectId).toBe(existing.id));
 
     await act(async () => {
       await result.current.createProject("Release plan");
@@ -210,116 +164,24 @@ describe("useCollaborationProjects", () => {
 
     expect(client.requestMutation).toHaveBeenCalledWith(
       "collaboration.project.create",
-      { name: "Release plan", organization_id: shared.id },
+      { name: "Release plan" },
       expect.any(Number),
     );
-  });
-
-  it("surfaces authoritative organization mutation failures", async () => {
-    const personal = organization("org-personal", "Ari's workspace", true);
-    const client = fakeClient();
-    client.requestMutation.mockRejectedValue(new Error("Only owners can rename this organization."));
-
-    vi.mocked(api.fetchCollaboration).mockResolvedValue(collaboration([personal], []));
-    vi.mocked(api.fetchCollaborationOrganization).mockResolvedValue(organizationPayload(personal));
-
-    const { result } = renderHook(useCollaborationProjects, { wrapper: wrap(client) });
-    await waitFor(() => expect(result.current.organizationId).toBe(personal.id));
-
-    await act(async () => {
-      await expect(result.current.renameOrganization("Changed name"))
-        .rejects.toThrow("Only owners can rename this organization.");
-    });
-    await waitFor(() => expect(result.current.error).toBe("Only owners can rename this organization."));
-  });
-
-  it("surfaces a backend rejection when a project member belongs to another organization", async () => {
-    const studio = organization("org-studio", "Studio");
-    const projectValue = project("project-studio", "Team roadmap", studio.id);
-    const client = fakeClient();
-    client.requestMutation.mockRejectedValue(new Error("User is not a member of this organization."));
-
-    vi.mocked(api.fetchCollaboration).mockResolvedValue(collaboration([studio], [projectValue], projectValue.id));
-    vi.mocked(api.fetchCollaborationOrganization).mockResolvedValue(organizationPayload(studio));
-    vi.mocked(api.fetchCollaborationProject).mockResolvedValue(projectPayload(projectValue));
-
-    const { result } = renderHook(useCollaborationProjects, { wrapper: wrap(client) });
-    await waitFor(() => expect(result.current.detail?.project.id).toBe(projectValue.id));
-
-    await act(async () => {
-      await expect(result.current.addProjectMember("outside-user", "member"))
-        .rejects.toThrow("User is not a member of this organization.");
-    });
-
-    await waitFor(() => expect(result.current.error).toBe("User is not a member of this organization."));
-  });
-
-  it("keeps the active project when switching bots in the same organization", async () => {
-    const studio = organization("org-studio", "Studio");
-    const projectValue = project("project-studio", "Team roadmap", studio.id);
-    const releaseBot: CollaborationBot = {
-      id: "bot-release",
-      organization_id: studio.id,
-      owner_user_id: "user-1",
-      name: "Release bot",
-      avatar_url: null,
-      persona_id: null,
-      state: "active",
-      created_at_ms: timestamp,
-      updated_at_ms: timestamp,
-    };
-    const reviewBot: CollaborationBot = { ...releaseBot, id: "bot-review", name: "Review bot" };
-    const summary = collaboration([studio], [projectValue], projectValue.id, [releaseBot, reviewBot]);
-    const client = fakeClient();
-    client.requestMutation.mockResolvedValue({ user: summary.user });
-
-    vi.mocked(api.fetchCollaboration).mockResolvedValue(summary);
-    vi.mocked(api.fetchCollaborationOrganization).mockResolvedValue(organizationPayload(studio));
-    vi.mocked(api.fetchCollaborationProject).mockResolvedValue(projectPayload(projectValue));
-    vi.mocked(api.fetchCollaborationBot).mockResolvedValue({
-      bot: reviewBot,
-      channels: [],
-      projects: [],
-      project_channels: [],
-      capability_profiles: [],
-    });
-
-    const { result } = renderHook(useCollaborationProjects, { wrapper: wrap(client) });
-    await waitFor(() => expect(result.current.projectId).toBe(projectValue.id));
-
-    act(() => {
-      result.current.selectBot(reviewBot.id);
-    });
-
-    await waitFor(() => expect(result.current.botId).toBe(reviewBot.id));
-    expect(result.current.organizationId).toBe(studio.id);
-    expect(result.current.projectId).toBe(projectValue.id);
-    await waitFor(() => expect(client.requestMutation).toHaveBeenCalledWith(
-      "collaboration.user.defaults",
-      {
-        organization_id: studio.id,
-        bot_id: reviewBot.id,
-        project_id: projectValue.id,
-      },
-      expect.any(Number),
-    ));
+    await waitFor(() => expect(result.current.projectId).toBe(created.id));
   });
 
   it("keeps the backend final-owner error after refreshing project membership", async () => {
-    const studio = organization("org-studio", "Studio");
-    const projectValue = project("project-studio", "Team roadmap", studio.id);
+    const value = project("project-1", "Team roadmap");
     const client = fakeClient();
     client.requestMutation.mockRejectedValue(Object.assign(
       new Error("A project must retain at least one owner."),
       { status: 409 },
     ));
-
-    vi.mocked(api.fetchCollaboration).mockResolvedValue(collaboration([studio], [projectValue], projectValue.id));
-    vi.mocked(api.fetchCollaborationOrganization).mockResolvedValue(organizationPayload(studio));
-    vi.mocked(api.fetchCollaborationProject).mockResolvedValue(projectPayload(projectValue));
+    vi.mocked(api.fetchCollaboration).mockResolvedValue(collaboration([value], value.id));
+    vi.mocked(api.fetchCollaborationProject).mockResolvedValue(projectPayload(value));
 
     const { result } = renderHook(useCollaborationProjects, { wrapper: wrap(client) });
-    await waitFor(() => expect(result.current.detail?.project.id).toBe(projectValue.id));
+    await waitFor(() => expect(result.current.detail?.project.id).toBe(value.id));
 
     await act(async () => {
       await expect(result.current.removeProjectMember("user-1"))
@@ -327,5 +189,26 @@ describe("useCollaborationProjects", () => {
     });
 
     await waitFor(() => expect(result.current.error).toBe("A project must retain at least one owner."));
+  });
+
+  it("sends capability allowlists for the selected project", async () => {
+    const value = project("project-1", "Team roadmap");
+    const client = fakeClient();
+    client.requestMutation.mockResolvedValue({ project: { ...value, allowed_skills: ["docs"] } });
+    vi.mocked(api.fetchCollaboration).mockResolvedValue(collaboration([value], value.id));
+    vi.mocked(api.fetchCollaborationProject).mockResolvedValue(projectPayload(value));
+
+    const { result } = renderHook(useCollaborationProjects, { wrapper: wrap(client) });
+    await waitFor(() => expect(result.current.detail?.project.id).toBe(value.id));
+
+    await act(async () => {
+      await result.current.saveCapabilities({ allowed_skills: ["docs"] });
+    });
+
+    expect(client.requestMutation).toHaveBeenCalledWith(
+      "collaboration.project.update",
+      { project_id: value.id, capabilities: { allowed_skills: ["docs"] } },
+      expect.any(Number),
+    );
   });
 });

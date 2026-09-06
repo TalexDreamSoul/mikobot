@@ -1,4 +1,4 @@
-"""Private-vault media relocation for inbound channel attachments."""
+"""Private per-user media relocation for inbound channel attachments."""
 
 from __future__ import annotations
 
@@ -11,6 +11,11 @@ from pathlib import Path
 from nanobot.config.paths import get_media_dir, get_runtime_subdir
 
 
+def user_private_root(owner_user_id: str) -> Path:
+    """Return the runtime directory that holds one user's private files."""
+    return get_runtime_subdir("users") / owner_user_id
+
+
 def _is_under(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -19,18 +24,14 @@ def _is_under(path: Path, root: Path) -> bool:
     return True
 
 
-def relocate_media_to_vault(
-    paths: list[str], *, owner_user_id: str, vault_id: str
-) -> list[str]:
-    """Move channel-managed media into the owner's private vault.
+def relocate_media_to_user(paths: list[str], *, owner_user_id: str) -> list[str]:
+    """Move channel-managed media into the owner's private media directory.
 
     Only files created below Nanobot's managed media root are eligible.  Caller
     supplied paths are ignored rather than becoming a read primitive.
     """
     media_root = get_media_dir().resolve(strict=False)
-    destination_root = (
-        get_runtime_subdir("vaults") / owner_user_id / vault_id / "media"
-    )
+    destination_root = user_private_root(owner_user_id) / "media"
     destination_root.mkdir(parents=True, exist_ok=True)
     with suppress(OSError):
         destination_root.chmod(0o700)

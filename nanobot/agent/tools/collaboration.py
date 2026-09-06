@@ -1,4 +1,4 @@
-"""Project, conversation-binding, and task tools."""
+"""Project and conversation-binding tools."""
 # Tool.execute accepts heterogeneous schemas.
 # pyright: reportIncompatibleMethodOverride=false
 
@@ -11,14 +11,12 @@ from typing import Literal
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import RequestContext, ToolContext, current_request_context
-from nanobot.agent.tools.schema import ObjectSchema, StringSchema, tool_parameters_schema
+from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
 from nanobot.collaboration import (
     CollaborationRepository,
     CollaborationStoreError,
     ConversationScope,
     Project,
-    Task,
-    TaskStatus,
 )
 from nanobot.collaboration.conversation import canonical_conversation_id
 from nanobot.collaboration.links import IdentityLinkError, IdentityLinkStore
@@ -45,19 +43,6 @@ def _project_payload(project: Project) -> dict[str, object]:
         "id": project.id,
         "name": project.name,
         "workspace_path": project.workspace_path,
-    }
-
-
-def _task_payload(task: Task) -> dict[str, object]:
-    return {
-        "id": task.id,
-        "project_id": task.project_id,
-        "task_list_id": task.task_list_id,
-        "title": task.title,
-        "status": task.status.value,
-        "description": task.description,
-        "assignee_user_id": task.assignee_user_id,
-        "position": task.position,
     }
 
 
@@ -157,109 +142,4 @@ class ProjectsTool(Tool):
             return ToolResult.error(f"Error managing projects: {exc}")
 
 
-@tool_parameters(
-    ObjectSchema(
-        {
-            "action": StringSchema(
-                "Action: list, create, update, delete, list_lists, or create_list.",
-                enum=("list", "create", "update", "delete", "list_lists", "create_list"),
-            ),
-            "task_id": StringSchema("Task id for update or delete.", nullable=True),
-            "task_list_id": StringSchema(
-                "Task-list id for create or list filtering.", nullable=True
-            ),
-            "title": StringSchema("Task title for create or update.", nullable=True),
-            "description": StringSchema("Optional task description.", nullable=True),
-            "status": StringSchema(
-                "Task status.",
-                enum=("todo", "in_progress", "done", "cancelled"),
-                nullable=True,
-            ),
-            "list_name": StringSchema("Task-list name for create_list.", nullable=True),
-        },
-        required=["action"],
-        additional_properties=False,
-    ).to_json_schema()
-)
-class ProjectTasksTool(Tool):
-    """Manage task lists and tasks inside the authorized current project."""
-
-    def __init__(self, repository: CollaborationRepository) -> None:
-        self._repository = repository
-
-    @classmethod
-    def enabled(cls, ctx: ToolContext) -> bool:
-        return ctx.collaboration_repository is not None
-
-    @classmethod
-    def create(cls, ctx: ToolContext) -> Tool:
-        if ctx.collaboration_repository is None:
-            raise RuntimeError("collaboration repository is unavailable")
-        return cls(ctx.collaboration_repository)
-
-    @property
-    def name(self) -> str:
-        return "project_tasks"
-
-    @property
-    def description(self) -> str:
-        return (
-            "List and maintain task lists for the authorized current project. Use this for durable "
-            "project work items; it never reads or changes another project."
-        )
-
-    async def execute(
-        self,
-        action: Literal["list", "create", "update", "delete", "list_lists", "create_list"],
-        task_id: str | None = None,
-        task_list_id: str | None = None,
-        title: str | None = None,
-        description: str | None = None,
-        status: Literal["todo", "in_progress", "done", "cancelled"] | None = None,
-        list_name: str | None = None,
-    ) -> str | ToolResult:
-        scope = _scope(current_request_context())
-        if scope is None or scope.user_id is None or scope.project_id is None:
-            return ToolResult.error("Error: bind this conversation to a project before using project tasks.")
-        try:
-            if action == "list_lists":
-                lists = await self._repository.list_task_lists(scope.user_id, scope.project_id)
-                return json.dumps({"task_lists": [{"id": item.id, "name": item.name, "position": item.position} for item in lists]}, ensure_ascii=False)
-            if action == "create_list":
-                if not list_name or not list_name.strip():
-                    return ToolResult.error("Error: create_list requires list_name.")
-                item = await self._repository.create_task_list(scope.project_id, scope.user_id, list_name.strip())
-                return json.dumps({"task_list": {"id": item.id, "name": item.name}})
-            if action == "list":
-                tasks = await self._repository.list_tasks(scope.user_id, scope.project_id, task_list_id=task_list_id)
-                return json.dumps({"tasks": [_task_payload(task) for task in tasks]}, ensure_ascii=False)
-            if action == "create":
-                if not title or not title.strip():
-                    return ToolResult.error("Error: create requires a task title.")
-                target_list_id = task_list_id
-                if not target_list_id:
-                    lists = await self._repository.list_task_lists(scope.user_id, scope.project_id)
-                    target_list_id = lists[0].id if lists else (await self._repository.create_task_list(scope.project_id, scope.user_id, "Tasks")).id
-                task = await self._repository.create_task(
-                    scope.project_id, target_list_id, scope.user_id, title.strip(),
-                    description=(description or "").strip(), status=TaskStatus(status or "todo"),
-                )
-                return json.dumps({"task": _task_payload(task)}, ensure_ascii=False)
-            if not task_id:
-                return ToolResult.error(f"Error: {action} requires task_id.")
-            current = await self._repository.get_task(scope.user_id, task_id)
-            if current is None or current.project_id != scope.project_id:
-                return ToolResult.error("Error: task is not in the current project.")
-            if action == "delete":
-                return json.dumps({"deleted": await self._repository.delete_task(task_id, scope.user_id)})
-            task = await self._repository.update_task(
-                task_id, scope.user_id, title=title.strip() if title is not None else None,
-                description=description.strip() if description is not None else None,
-                status=TaskStatus(status) if status is not None else None,
-            )
-            return json.dumps({"task": _task_payload(task)}, ensure_ascii=False)
-        except (CollaborationStoreError, ValueError) as exc:
-            return ToolResult.error(f"Error managing project tasks: {exc}")
-
-
-__all__ = ["ProjectTasksTool", "ProjectsTool"]
+__all__ = ["ProjectsTool"]

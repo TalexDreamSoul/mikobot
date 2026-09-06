@@ -17,12 +17,12 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.collaboration import (
-    COLLABORATION_VAULT_METADATA_KEY,
+    COLLABORATION_PROJECT_METADATA_KEY,
     CollaborationPermissionError,
     ConversationScope,
     ConversationScopeKind,
 )
-from nanobot.collaboration.pairing import BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY
+from nanobot.collaboration.pairing import CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY
 from nanobot.config.schema import Config
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 from nanobot.session.turn_continuation import INTERNAL_CONTINUATION_META
@@ -305,7 +305,7 @@ async def test_process_message_captures_original_text_before_restore(
 
 
 @pytest.mark.asyncio
-async def test_strict_route_denial_stops_before_full_tools_or_vault_session_access(
+async def test_strict_route_denial_stops_before_full_tools_or_session_access(
     tmp_path: Path,
 ) -> None:
     provider = MagicMock()
@@ -322,7 +322,6 @@ async def test_strict_route_denial_stops_before_full_tools_or_vault_session_acce
             None,
             None,
             None,
-            0,
             None,
             "isolated-route",
             route_denied=True,
@@ -343,10 +342,10 @@ async def test_strict_route_denial_stops_before_full_tools_or_vault_session_acce
         sender_id="external-user",
         chat_id="group-42",
         content="inspect the private workspace",
-        metadata={BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY: True},
+        metadata={CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY: True},
     )
 
-    with pytest.raises(CollaborationPermissionError, match="no enabled bot-project route"):
+    with pytest.raises(CollaborationPermissionError, match="not assigned to a project"):
         await loop._process_message(message)
 
     provider.chat_with_retry.assert_not_awaited()
@@ -354,5 +353,5 @@ async def test_strict_route_denial_stops_before_full_tools_or_vault_session_acce
     assert private_tool.contexts == []
     session = loop.sessions.get_cached(message.session_key)
     assert session is not None
-    assert COLLABORATION_VAULT_METADATA_KEY not in session.metadata
+    assert COLLABORATION_PROJECT_METADATA_KEY not in session.metadata
     assert session.messages == []

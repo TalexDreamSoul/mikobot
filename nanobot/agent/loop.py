@@ -54,24 +54,20 @@ from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import RuntimeEventBus
 from nanobot.collaboration import (
     COLLABORATION_BINDING_METADATA_KEY,
-    COLLABORATION_BOT_METADATA_KEY,
     COLLABORATION_PROJECT_METADATA_KEY,
     COLLABORATION_USER_METADATA_KEY,
-    COLLABORATION_VAULT_METADATA_KEY,
     AsyncLocalCollaborationRepository,
     CollaborationPermissionError,
     CollaborationRepository,
     ConversationScope,
     build_collaboration_repository,
 )
-from nanobot.collaboration.context import collaboration_runtime_context
 from nanobot.collaboration.conversation import canonical_conversation_id
-from nanobot.collaboration.pairing import BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY
+from nanobot.collaboration.pairing import CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
 from nanobot.config.paths import get_media_dir, get_runtime_subdir
 from nanobot.config.schema import AgentDefaults, ModelPresetConfig
 from nanobot.llm_usage.context import source_from_request
-from nanobot.personal.digests import RecordingJournal, RecordingNote
 from nanobot.providers.base import LLMProvider, LLMUsage, ProviderConversationState
 from nanobot.providers.factory import ProviderSnapshot
 from nanobot.runtime_context import (
@@ -83,7 +79,7 @@ from nanobot.runtime_context import (
     resolve_runtime_context,
     runtime_context_blocks_from_metadata,
 )
-from nanobot.security.vault_media import relocate_media_to_vault
+from nanobot.security.private_media import relocate_media_to_user
 from nanobot.security.workspace_access import (
     WorkspaceScope,
     WorkspaceScopeResolver,
@@ -358,7 +354,6 @@ class AgentLoop:
         )
         self._collaboration_initialized = False
         self._collaboration_initialize_lock = asyncio.Lock()
-        self.recordings = RecordingJournal()
         initial_model = model or provider.get_default_model()
         self.max_iterations = max_iterations if max_iterations is not None else defaults.max_tool_iterations
         initial_context_window = context_window_tokens if context_window_tokens is not None else defaults.context_window_tokens
@@ -401,9 +396,6 @@ class AgentLoop:
         )
         self._unified_session = unified_session
         self._running = False
-        self._collaboration_context_provider: RuntimeContextProvider = partial(
-            collaboration_runtime_context, self.collaboration
-        )
         self._runtime_context_providers: list[RuntimeContextProvider] = []
         self._active_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._discarding_sessions: set[str] = set()
@@ -763,10 +755,7 @@ class AgentLoop:
         request: RequestContext,
         tools: ToolRegistry,
     ) -> list[RuntimeContextBlock]:
-        internal_providers = [
-            *tools.get_runtime_context_providers(),
-            self._collaboration_context_provider,
-        ]
+        internal_providers = list(tools.get_runtime_context_providers())
         blocks = runtime_context_blocks_from_metadata(request.metadata)
         blocks.extend(await resolve_runtime_context(internal_providers, request))
         if self._runtime_context_providers:
@@ -960,11 +949,11 @@ class AgentLoop:
             self.workspace,
         )
         if scope.route_denied or (
-            metadata.get(BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY) is True
+            metadata.get(CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY) is True
             and scope.is_isolated
         ):
             raise CollaborationPermissionError(
-                "channel has no enabled bot-project route"
+                "channel instance is not assigned to a project"
             )
         return scope
 
@@ -1053,8 +1042,8 @@ class AgentLoop:
             pending_scope.kind != active_scope.kind
             or pending_scope.user_id != active_scope.user_id
             or pending_scope.project_id != active_scope.project_id
-            or pending_scope.profile != active_scope.profile
-            or pending_scope.profile_revision != active_scope.profile_revision
+            or pending_scope.allowed_skills != active_scope.allowed_skills
+            or pending_scope.allowed_mcp_servers != active_scope.allowed_mcp_servers
             or pending_scope.workspace_path != active_scope.workspace_path
         ):
             return False
@@ -1076,12 +1065,11 @@ class AgentLoop:
         scope: ConversationScope | None,
         key: str,
     ) -> set[str] | None:
-        if scope is None or scope.profile is None or key not in scope.profile.settings:
+        """Return the project's allowlist for *key*, or ``None`` when unrestricted."""
+        if scope is None:
             return None
-        raw = scope.profile.settings.get(key)
-        if not isinstance(raw, tuple):
-            return set()
-        return {item for item in raw if isinstance(item, str) and item}
+        allowed = scope.allowed_skills if key == "skills" else scope.allowed_mcp_servers
+        return set(allowed) if allowed is not None else None
 
     def _tools_for_conversation_scope(
         self,
@@ -1108,7 +1096,8 @@ class AgentLoop:
 
         Local CLI and direct WebSocket owners retain their legacy session keys
         for compatibility with synchronous pending/recovery queues. Trusted
-        proxy principals and all multi-tenant channels are principal-scoped.
+        proxy principals and channel senders whose conversation resolves to a
+        project get a per-user namespace; unbound groups keep the channel key.
         """
         if msg.session_key_override:
             return msg.session_key
@@ -1118,10 +1107,10 @@ class AgentLoop:
         if local_owner:
             return UNIFIED_SESSION_KEY if self._unified_session else msg.session_key
         scope = await self._conversation_scope_for_message(msg)
-        if scope.user_id and scope.vault_id:
+        if scope.user_id and scope.project_id is not None:
             if self._unified_session:
-                return f"unified:{scope.user_id}:{scope.vault_id}"
-            return f"vault:{scope.user_id}:{scope.vault_id}:{msg.session_key}"
+                return f"unified:{scope.user_id}"
+            return f"user:{scope.user_id}:{msg.session_key}"
         if self._unified_session:
             return UNIFIED_SESSION_KEY
         return msg.session_key
@@ -2051,7 +2040,7 @@ class AgentLoop:
 
         if ctx.kind is TurnKind.USER and msg.sender_id != "subagent" and msg.media:
             media_scope = await self._conversation_scope_for_message(msg)
-            if media_scope.user_id and media_scope.vault_id:
+            if media_scope.user_id and media_scope.project_id is not None:
                 managed_media_root = await asyncio.to_thread(
                     lambda: get_media_dir().resolve(strict=False)
                 )
@@ -2069,10 +2058,9 @@ class AgentLoop:
                         continue
                     relocated_media.extend(
                         await asyncio.to_thread(
-                            relocate_media_to_vault,
+                            relocate_media_to_user,
                             [media_path],
                             owner_user_id=media_scope.user_id,
-                            vault_id=media_scope.vault_id,
                         )
                         or [media_path]
                     )
@@ -2113,33 +2101,12 @@ class AgentLoop:
                 session.metadata[COLLABORATION_USER_METADATA_KEY] = collaboration_scope.user_id
             else:
                 session.metadata.pop(COLLABORATION_USER_METADATA_KEY, None)
-            if collaboration_scope.vault_id is not None:
-                session.metadata[COLLABORATION_VAULT_METADATA_KEY] = collaboration_scope.vault_id
-                if (
-                    msg.channel.startswith("feishu")
-                    and msg.metadata.get("msg_type") == "audio"
-                    and "[transcription: " in msg.content
-                ):
-                    transcript = msg.content.split("[transcription: ", 1)[1].split("]", 1)[0].strip()
-                    if transcript:
-                        self.recordings.append(RecordingNote(
-                            collaboration_scope.user_id or "", collaboration_scope.vault_id,
-                            str(msg.metadata.get("source_chat_id") or msg.chat_id),
-                            str(msg.metadata.get("message_id") or ""),
-                            int(time.time() * 1000), transcript,
-                        ))
-            else:
-                session.metadata.pop(COLLABORATION_VAULT_METADATA_KEY, None)
             if collaboration_scope.project_id is not None:
                 session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = (
                     collaboration_scope.project_id
                 )
             else:
                 session.metadata.pop(COLLABORATION_PROJECT_METADATA_KEY, None)
-            if collaboration_scope.bot_id is not None:
-                session.metadata[COLLABORATION_BOT_METADATA_KEY] = collaboration_scope.bot_id
-            else:
-                session.metadata.pop(COLLABORATION_BOT_METADATA_KEY, None)
             if collaboration_scope.binding is not None:
                 session.metadata[COLLABORATION_BINDING_METADATA_KEY] = (
                     collaboration_scope.binding.id

@@ -16,7 +16,6 @@ class SettingsRequest:
     payload: dict[str, Any] | None = None
     local_browser: bool = False
     actor_user_id: str | None = None
-    actor_organization_id: str | None = None
     system_admin: bool = False
     # True only for a host administrator. `system_admin` is also raised for a member
     # acting on a channel instance they own, so host-wide reads must gate on this.

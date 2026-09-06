@@ -202,7 +202,7 @@ class ReadSessionTool(_SessionTool):
             if session_privacy_scope(session_key) is not None:
                 return ToolResult.error("Error: scoped session access requires a request context")
         elif not same_privacy_scope(current_key, session_key):
-            return ToolResult.error("Error: cross-vault session access is not authorized")
+            return ToolResult.error("Error: cross-user session access is not authorized")
         query_text = query.strip() if query else ""
         if query_text in _UNSUPPORTED_MATCH_ALL_QUERIES:
             return ToolResult.error(

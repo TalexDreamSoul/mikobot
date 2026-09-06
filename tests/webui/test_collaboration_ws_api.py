@@ -13,11 +13,7 @@ from websockets.http11 import Request as WsRequest
 
 from nanobot.channels.websocket.runtime import TrustedProxyAuthConfig, WebSocketConfig
 from nanobot.collaboration import AsyncLocalCollaborationRepository, CollaborationStore
-from nanobot.collaboration.models import (
-    COLLABORATION_USER_METADATA_KEY,
-    OrganizationRole,
-    PairingPurpose,
-)
+from nanobot.collaboration.models import COLLABORATION_USER_METADATA_KEY
 from nanobot.cron.types import CronJob, CronPayload, CronSchedule
 from nanobot.session.manager import SessionManager
 from nanobot.webui.forking import handle_webui_fork_chat
@@ -91,6 +87,7 @@ async def _handler(tmp_path) -> GatewayHTTPHandler:
         dispatch=AsyncMock(return_value=None),
         is_mutation_path=lambda _path: False,
     )
+    handler.settings = SimpleNamespace(extensions=None)
     handler.skills_workspace_path = tmp_path / "workspace"
     handler.static_dist_path = None
     handler.cron_service = None
@@ -107,10 +104,13 @@ async def _handler(tmp_path) -> GatewayHTTPHandler:
     await handler.initialize_collaboration()
     return handler
 
-def _channel_extension_snapshot(
-    channel_type: str, instance_id: str, revision: str
-) -> tuple[Any, str]:
-    """Build one exact channel target with an opaque current revision."""
+
+def _channel_instances_snapshot(
+    channel_type: str,
+    display_name: str,
+    instances: tuple[tuple[str, str], ...],
+) -> Any:
+    """Build one channel package exposing several named instances with a lifecycle."""
     from nanobot.extensions.contracts import (
         ExtensionAction,
         ExtensionComponentDescriptor,
@@ -126,86 +126,72 @@ def _channel_extension_snapshot(
     )
 
     package_id = extension_package_id(ExtensionSource.CHANNEL_PACKAGE, channel_type)
-    target_id = extension_component_id(
-        package_id, ExtensionComponentKind.CHANNEL, instance_id
-    )
-    return (
-        ExtensionSnapshot(
-            packages=(
-                ExtensionPackageDescriptor(
-                    id=package_id,
-                    name=channel_type,
-                    display_name=channel_type.title(),
-                    source=ExtensionSource.CHANNEL_PACKAGE,
-                    trust=ExtensionTrust.FIRST_PARTY,
-                    execution=ExtensionExecution.IN_PROCESS,
-                    lifecycle=ExtensionLifecycle.DISABLED,
-                    components=(
-                        ExtensionComponentDescriptor(
-                            id=target_id,
-                            package_id=package_id,
-                            kind=ExtensionComponentKind.CHANNEL,
-                            name=instance_id,
-                            display_name=instance_id,
-                            execution=ExtensionExecution.IN_PROCESS,
-                            lifecycle=ExtensionLifecycle.DISABLED,
-                            revision=revision,
-                            actions=frozenset({ExtensionAction.ENABLE}),
+    return ExtensionSnapshot(
+        packages=(
+            ExtensionPackageDescriptor(
+                id=package_id,
+                name=channel_type,
+                display_name=display_name,
+                source=ExtensionSource.CHANNEL_PACKAGE,
+                trust=ExtensionTrust.FIRST_PARTY,
+                execution=ExtensionExecution.IN_PROCESS,
+                lifecycle=ExtensionLifecycle.DISABLED,
+                components=tuple(
+                    ExtensionComponentDescriptor(
+                        id=extension_component_id(
+                            package_id, ExtensionComponentKind.CHANNEL, instance_id
                         ),
-                    ),
+                        package_id=package_id,
+                        kind=ExtensionComponentKind.CHANNEL,
+                        name=instance_id,
+                        display_name=instance_id,
+                        execution=ExtensionExecution.IN_PROCESS,
+                        lifecycle=ExtensionLifecycle(lifecycle),
+                        revision=f"{instance_id}-revision",
+                        actions=frozenset({ExtensionAction.ENABLE}),
+                    )
+                    for instance_id, lifecycle in instances
                 ),
-            )
-        ),
-        target_id,
+            ),
+        )
     )
 
 
-async def _create_channel_pairing(
+def _install_registry(handler: GatewayHTTPHandler, snapshot: Any) -> Any:
+    registry = SimpleNamespace(snapshot=MagicMock(return_value=snapshot))
+    handler.settings = SimpleNamespace(extensions=registry)
+    return registry
+
+
+async def _identity(handler: GatewayHTTPHandler, connection: Any) -> dict[str, Any]:
+    index = await handler.dispatch(connection, connection.request)
+    assert index is not None and index.status_code == 200
+    return _json(index)
+
+
+async def _create_pairing(
     handler: GatewayHTTPHandler,
     connection: Any,
     *,
+    project_id: str,
     channel_type: str,
     instance_id: str,
-) -> tuple[str, str, str]:
+    assignee_user_id: str | None = None,
+) -> tuple[str, str]:
     """Create a pairing challenge through the WebUI mutation boundary."""
-    index = await handler.dispatch(connection, connection.request)
-    assert index is not None and index.status_code == 200
-    actor_id = _json(index)["user"]["id"]
-    bot = (await handler.collaboration.list_bots(actor_id))[0]
-
     response = await handler.dispatch_webui_mutation(
         connection,
         "collaboration.pairing.create",
         {
-            "purpose": PairingPurpose.CLAIM_CHANNEL.value,
-            "organization_id": bot.organization_id,
-            "bot_id": bot.id,
+            "project_id": project_id,
             "channel_type": channel_type,
             "instance_id": instance_id,
-            "channel_revision": "client-controlled-revision",
+            **({"assignee_user_id": assignee_user_id} if assignee_user_id else {}),
         },
     )
-
-    assert response.status_code == 200
+    assert response.status_code == 200, response.body
     pairing = _json(response)["pairing"]
-    return actor_id, pairing["id"], pairing["code"]
-
-
-async def _verify_channel_pairing(
-    handler: GatewayHTTPHandler,
-    code: str,
-    *,
-    channel_type: str,
-    instance_id: str,
-    channel_revision: str,
-) -> None:
-    await handler.collaboration.verify_pairing_challenge(
-        code,
-        channel_type=channel_type,
-        instance_id=instance_id,
-        sender_id=f"{instance_id}-sender",
-        channel_revision=channel_revision,
-    )
+    return pairing["id"], pairing["code"]
 
 
 def _save_webui_session(
@@ -222,6 +208,7 @@ def _save_webui_session(
     session.add_message("user", f"{title} history")
     sessions.save(session)
 
+
 @pytest.mark.asyncio
 async def test_local_websocket_handshake_auth_authorizes_collaboration_mutation_without_http_token(
     tmp_path,
@@ -236,220 +223,75 @@ async def test_local_websocket_handshake_auth_authorizes_collaboration_mutation_
 
     response = await handler.dispatch_webui_mutation(
         connection,
-        "collaboration.task_list.create",
-        {"project_id": project.id, "name": "Inbox", "user_id": owner.id},
+        "collaboration.project.update",
+        {"project_id": project.id, "name": "Renamed"},
     )
 
     assert response.status_code == 200
-    assert [
-        item.name
-        for item in await handler.collaboration.list_task_lists(owner.id, project.id)
-    ] == ["Inbox"]
-
+    assert (await handler.collaboration.get_project(owner.id, project.id)).name == "Renamed"
 
 
 @pytest.mark.asyncio
-async def test_local_owner_uses_authenticated_mutation_dispatcher_without_secret_descriptors(
-    tmp_path,
-) -> None:
-    """Authenticated local WebUI mutations create one owner's project surface only."""
+async def test_local_owner_is_administrator_and_sees_every_project(tmp_path) -> None:
+    """The local owner administers the host: every project is listed and manageable."""
     handler = await _handler(tmp_path)
     handler._collaboration_available = lambda: {
         "skills": [{"id": "research"}],
         "mcp_servers": [{"id": "docs"}],
     }
     connection = _local_connection()
-    owner, _ = await handler.collaboration.ensure_identity_user(
-        "websocket", "webui-http", handler.skills_workspace_path, local_owner=True
+    alice = _proxy_connection("alice")
+    alice_id = (await _identity(handler, alice))["user"]["id"]
+    alice_project = await handler.dispatch_webui_mutation(
+        alice, "collaboration.project.create", {"name": "Alice private"}
     )
-    other, _ = await handler.collaboration.ensure_identity_user(
-        "websocket", "other-client", handler.skills_workspace_path, local_owner=False
-    )
+    alice_project_id = _json(alice_project)["project"]["id"]
 
-    project_response = await handler.dispatch_webui_mutation(
-        connection,
-        "collaboration.project.create",
-        {"name": "Owner project", "user_id": other.id},
-    )
-    assert project_response.status_code == 200
-    project_id = _json(project_response)["project"]["id"]
-    assert await handler.collaboration.get_project(owner.id, project_id) is not None
-    assert await handler.collaboration.get_project(other.id, project_id) is None
+    index = await _identity(handler, _local_connection("/api/collaboration"))
+    assert index["is_admin"] is True
+    assert alice_project_id in {project["id"] for project in index["projects"]}
 
-    task_list_response = await handler.dispatch_webui_mutation(
+    capabilities = await handler.dispatch_webui_mutation(
         connection,
-        "collaboration.task_list.create",
-        {"project_id": project_id, "name": "Inbox", "user_id": other.id},
-    )
-    task_list_id = _json(task_list_response)["task_list"]["id"]
-    task_response = await handler.dispatch_webui_mutation(
-        connection,
-        "collaboration.task.create",
+        "collaboration.project.update",
         {
-            "project_id": project_id,
-            "task_list_id": task_list_id,
-            "title": "Keep this task private",
-            "user_id": other.id,
+            "project_id": alice_project_id,
+            "capabilities": {"allowed_skills": ["research"], "allowed_mcp_servers": ["docs"]},
         },
     )
-    assert task_response.status_code == 200
+    assert capabilities.status_code == 200
+    assert _json(capabilities)["project"]["allowed_skills"] == ["research"]
 
-    source_response = await handler.dispatch_webui_mutation(
+    rejected = await handler.dispatch_webui_mutation(
         connection,
-        "collaboration.context_source.create",
-        {
-            "project_id": project_id,
-            "name": "Private notes",
-            "kind": "custom",
-            "config": {"path": "notes.md", "token": "must-not-leak"},
-            "user_id": other.id,
-        },
+        "collaboration.project.update",
+        {"project_id": alice_project_id, "capabilities": {"plugins": ["reviewer"]}},
     )
-    assert source_response.status_code == 200
-
+    assert rejected.status_code == 400
 
     details_request = _request(
-        f"/api/collaboration/projects/{project_id}", {"Authorization": "Bearer local-token"}
+        f"/api/collaboration/projects/{alice_project_id}", {"Authorization": "Bearer local-token"}
     )
     details = await handler.dispatch(_connection(details_request), details_request)
-    assert details is not None
-    assert details.status_code == 200
+    assert details is not None and details.status_code == 200
     payload = _json(details)
-    assert payload["tasks"][0]["title"] == "Keep this task private"
-    assert payload["context_sources"][0]["config"] == {"path": "notes.md"}
+    assert payload["can_manage"] is True
     assert "workspace_path" not in payload["project"]
+    assert payload["project"]["allowed_mcp_servers"] == ["docs"]
+    assert await handler.collaboration.get_project(alice_id, alice_project_id) is not None
 
-    profile_response = await handler.dispatch_webui_mutation(
-        connection,
-        "collaboration.extensions.update",
-        {
-            "project_id": project_id,
-            "revision": 0,
-            "settings": {"skills": ["research"], "mcpServers": ["docs"]},
-        },
-    )
-    assert profile_response.status_code == 200
-    assert _json(profile_response)["extension_profile"]["revision"] == 1
-
-    stale_profile_response = await handler.dispatch_webui_mutation(
-        connection,
-        "collaboration.extensions.update",
-        {"project_id": project_id, "revision": 0, "settings": {}},
-    )
     raw_mutation_request = _request(
         "/api/collaboration/mutations/project/create", {"Authorization": "Bearer local-token"}
     )
     raw_mutation_response = await handler.dispatch(
         _connection(raw_mutation_request), raw_mutation_request
     )
-    assert raw_mutation_response is not None
-    assert raw_mutation_response.status_code == 405
-    assert stale_profile_response.status_code == 409
+    assert raw_mutation_response is not None and raw_mutation_response.status_code == 405
     unauthenticated = _connection(_request("/", {}))
     unauthenticated_response = await handler.dispatch_webui_mutation(
-        unauthenticated,
-        "collaboration.project.create",
-        {"name": "Unauthorized"},
+        unauthenticated, "collaboration.project.create", {"name": "Unauthorized"}
     )
     assert unauthenticated_response.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_collaboration_extension_profile_rejects_plugins_and_accepts_available_selections(
-    tmp_path,
-) -> None:
-    """Extension profiles reject plugins but retain selected available skills and MCP servers."""
-    handler = await _handler(tmp_path)
-    handler._collaboration_available = lambda: {
-        "skills": [{"id": "research"}],
-        "mcp_servers": [{"id": "docs"}],
-    }
-    connection = _local_connection()
-    project_response = await handler.dispatch_webui_mutation(
-        connection, "collaboration.project.create", {"name": "Extensions"}
-    )
-    project_id = _json(project_response)["project"]["id"]
-
-    rejected = await handler.dispatch_webui_mutation(
-        connection,
-        "collaboration.extensions.update",
-        {
-            "project_id": project_id,
-            "revision": 0,
-            "settings": {"plugins": ["reviewer"]},
-        },
-    )
-    assert rejected.status_code == 400
-
-    accepted = await handler.dispatch_webui_mutation(
-        connection,
-        "collaboration.extensions.update",
-        {
-            "project_id": project_id,
-            "revision": 0,
-            "settings": {"skills": ["research"], "mcpServers": ["docs"]},
-        },
-    )
-    assert accepted.status_code == 200
-    assert _json(accepted)["extension_profile"] == {
-        "revision": 1,
-        "settings": {"skills": ["research"], "mcpServers": ["docs"]},
-    }
-
-    details_request = _request(
-        f"/api/collaboration/projects/{project_id}", {"Authorization": "Bearer local-token"}
-    )
-    details = await handler.dispatch(_connection(details_request), details_request)
-    assert details is not None
-    assert _json(details)["extension_profile"] == {
-        "revision": 1,
-        "settings": {"skills": ["research"], "mcpServers": ["docs"]},
-    }
-
-
-@pytest.mark.asyncio
-async def test_collaboration_http_exposes_selected_bot_summary_detail_and_owner_mutations(tmp_path) -> None:
-    """The authenticated owner can select a created bot while another user cannot discover its detail."""
-    handler = await _handler(tmp_path)
-    owner = _local_connection()
-    index_request = _request("/api/collaboration", {"Authorization": "Bearer local-token"})
-    index = await handler.dispatch(_connection(index_request), index_request)
-    assert index is not None and index.status_code == 200
-    organization_id = _json(index)["organizations"][0]["id"]
-
-    created = await handler.dispatch_webui_mutation(
-        owner, "collaboration.bot.create",
-        {"organization_id": organization_id, "name": "Release bot"},
-    )
-    assert created.status_code == 200
-    bot = _json(created)["bot"]
-    selected = await handler.dispatch_webui_mutation(
-        owner, "collaboration.user.defaults",
-        {"organization_id": organization_id, "bot_id": bot["id"], "project_id": None},
-    )
-    assert selected.status_code == 200
-    assert _json(selected)["user"]["default_bot_id"] == bot["id"]
-
-    refreshed_request = _request("/api/collaboration", {"Authorization": "Bearer local-token"})
-    refreshed = await handler.dispatch(_connection(refreshed_request), refreshed_request)
-    assert refreshed is not None and refreshed.status_code == 200
-    summary = _json(refreshed)
-    assert summary["active_bot_id"] == bot["id"]
-    assert {item["id"] for item in summary["bots"]} >= {bot["id"]}
-
-    detail_request = _request(
-        f"/api/collaboration/bots/{bot['id']}", {"Authorization": "Bearer local-token"}
-    )
-    detail = await handler.dispatch(_connection(detail_request), detail_request)
-    assert detail is not None and detail.status_code == 200
-    assert _json(detail)["bot"] == bot
-    assert _json(detail)["channels"] == []
-    assert _json(detail)["projects"] == []
-
-    foreign = _proxy_connection("unrelated-user", f"/api/collaboration/bots/{bot['id']}")
-    hidden = await handler.dispatch(foreign, foreign.request)
-    assert hidden is not None and hidden.status_code == 404
-
 
 
 @pytest.mark.asyncio
@@ -458,85 +300,32 @@ async def test_proxy_user_cannot_read_or_mutate_foreign_collaboration_resources(
     handler = await _handler(tmp_path)
     alice = _proxy_connection("alice")
     bob = _proxy_connection("bob")
-
-    alice_index = await handler.dispatch(alice, alice.request)
-    bob_index = await handler.dispatch(bob, bob.request)
-    assert alice_index is not None and bob_index is not None
-    alice_id = _json(alice_index)["user"]["id"]
-    bob_id = _json(bob_index)["user"]["id"]
+    alice_index = await _identity(handler, alice)
+    bob_index = await _identity(handler, bob)
+    alice_id = alice_index["user"]["id"]
+    bob_id = bob_index["user"]["id"]
+    assert alice_index["is_admin"] is False
 
     alice_project = await handler.dispatch_webui_mutation(
         alice, "collaboration.project.create", {"name": "Alice private", "user_id": bob_id}
     )
     project_id = _json(alice_project)["project"]["id"]
-    task_list = await handler.dispatch_webui_mutation(
-        alice,
-        "collaboration.task_list.create",
-        {"project_id": project_id, "name": "Private list"},
-    )
-    task_list_id = _json(task_list)["task_list"]["id"]
-    task = await handler.dispatch_webui_mutation(
-        alice,
-        "collaboration.task.create",
-        {"project_id": project_id, "task_list_id": task_list_id, "title": "Alice task"},
-    )
-    task_id = _json(task)["task"]["id"]
-    source = await handler.dispatch_webui_mutation(
-        alice,
-        "collaboration.context_source.create",
-        {"project_id": project_id, "name": "Alice source", "kind": "custom"},
-    )
-    source_id = _json(source)["context_source"]["id"]
 
     foreign_details = _request(f"/api/collaboration/projects/{project_id}", bob.request.headers)
     foreign_response = await handler.dispatch(_connection(foreign_details), foreign_details)
-    assert foreign_response is not None
-    assert foreign_response.status_code == 404
+    assert foreign_response is not None and foreign_response.status_code == 404
 
-    rejected = await handler.dispatch_webui_mutation(
-        bob,
-        "collaboration.task.create",
-        {
-            "project_id": project_id,
-            "task_list_id": task_list_id,
-            "title": "Injected task",
-            "user_id": alice_id,
-        },
-    )
-    assert rejected.status_code == 404
     for action, payload in (
-        (
-            "collaboration.task.update",
-            {
-                "project_id": project_id,
-                "task_id": task_id,
-                "values": {"title": "stolen"},
-                "user_id": alice_id,
-            },
-        ),
-        (
-            "collaboration.context_source.update",
-            {
-                "project_id": project_id,
-                "source_id": source_id,
-                "values": {"name": "stolen"},
-                "user_id": alice_id,
-            },
-        ),
-        (
-            "collaboration.context_source.delete",
-            {"project_id": project_id, "source_id": source_id, "user_id": alice_id},
-        ),
-        (
-            "collaboration.task.delete",
-            {"project_id": project_id, "task_id": task_id, "user_id": alice_id},
-        ),
+        ("collaboration.project.update", {"project_id": project_id, "name": "stolen", "user_id": alice_id}),
+        ("collaboration.project.member.add", {"project_id": project_id, "member_user_id": bob_id}),
+        ("collaboration.project.delete", {"project_id": project_id}),
     ):
         response = await handler.dispatch_webui_mutation(bob, action, payload)
-        assert response.status_code == 404
+        assert response.status_code == 404, action
 
-    assert (await handler.collaboration.get_task(alice_id, task_id)).title == "Alice task"
-    assert (await handler.collaboration.get_context_source(alice_id, source_id)).name == "Alice source"
+    bob_index_after = await _identity(handler, _proxy_connection("bob"))
+    assert project_id not in {project["id"] for project in bob_index_after["projects"]}
+    assert (await handler.collaboration.get_project(alice_id, project_id)).name == "Alice private"
 
 
 @pytest.mark.asyncio
@@ -545,11 +334,8 @@ async def test_proxy_session_boundary_hides_foreign_legacy_and_automation_resour
     handler = await _handler(tmp_path)
     alice = _proxy_connection("alice")
     bob = _proxy_connection("bob")
-    alice_index = await handler.dispatch(alice, alice.request)
-    bob_index = await handler.dispatch(bob, bob.request)
-    assert alice_index is not None and bob_index is not None
-    alice_id = _json(alice_index)["user"]["id"]
-    bob_id = _json(bob_index)["user"]["id"]
+    alice_id = (await _identity(handler, alice))["user"]["id"]
+    bob_id = (await _identity(handler, bob))["user"]["id"]
     await handler.collaboration.ensure_identity_user(
         "websocket", "webui-http", handler.skills_workspace_path, local_owner=True
     )
@@ -656,38 +442,29 @@ async def test_proxy_session_boundary_hides_foreign_legacy_and_automation_resour
     fork_host.attach_webui_fork.assert_not_awaited()
 
 
-async def _claim_channel_instance(
+async def _assign_instance(
     handler: GatewayHTTPHandler, connection: Any, instance_id: str
-) -> None:
-    """Claim one channel instance through the local repository's pairing flow."""
-    index = await handler.dispatch(connection, connection.request)
-    assert index is not None and index.status_code == 200
-    actor_id = _json(index)["user"]["id"]
-    bot = (await handler.collaboration.list_bots(actor_id))[0]
+) -> tuple[str, str]:
+    """Assign one instance to the caller's default project through the pairing flow."""
+    identity = await _identity(handler, connection)
+    actor_id = identity["user"]["id"]
+    project_id = identity["active_project_id"]
+    await handler.collaboration.record_channel_provision(
+        actor_id, channel_type="weixin", instance_id=instance_id
+    )
     challenge, code = await handler.collaboration.create_pairing_challenge(
-        actor_id,
-        purpose=PairingPurpose.CLAIM_CHANNEL,
-        organization_id=bot.organization_id,
-        bot_id=bot.id,
-        channel_type="weixin",
-        instance_id=instance_id,
-        channel_revision="claimed-channel-revision",
+        actor_id, project_id=project_id, channel_type="weixin", instance_id=instance_id
     )
     await handler.collaboration.verify_pairing_challenge(
-        code,
-        channel_type="weixin",
-        instance_id=instance_id,
-        sender_id=f"{instance_id}-sender",
-        channel_revision="claimed-channel-revision",
+        code, channel_type="weixin", instance_id=instance_id, sender_id=f"{instance_id}-sender"
     )
-    await handler.collaboration.consume_pairing_challenge(
-        actor_id, challenge.id, channel_revision="claimed-channel-revision"
-    )
+    await handler.collaboration.consume_pairing_challenge(actor_id, challenge.id)
+    return actor_id, project_id
 
 
 @pytest.mark.asyncio
-async def test_ordinary_claimed_channel_owner_can_use_channel_control_mutation(tmp_path) -> None:
-    """A claimed channel owner may reach channel control without system-admin privileges."""
+async def test_assigned_channel_owner_can_use_channel_control_mutation(tmp_path) -> None:
+    """The member an instance was handed to may reach channel control without host admin."""
     handler = await _handler(tmp_path)
     connection = _proxy_connection("ordinary-channel-owner")
     seen: list[tuple[object, object]] = []
@@ -706,7 +483,7 @@ async def test_ordinary_claimed_channel_owner_can_use_channel_control_mutation(t
         is_mutation_path=lambda _path: False,
     )
 
-    await _claim_channel_instance(handler, connection, "claimed")
+    await _assign_instance(handler, connection, "claimed")
     response = await handler.dispatch_webui_mutation(
         connection,
         "settings.channel.configure",
@@ -714,9 +491,6 @@ async def test_ordinary_claimed_channel_owner_can_use_channel_control_mutation(t
     )
 
     assert response.status_code == 200
-    # The elevation resolves before dispatch, so the domain sees a server-derived
-    # administrator with an actor. This is what lets the channel handlers repeat the
-    # authorization check beside their effect without refusing a legitimate owner.
     assert len(seen) == 1
     system_admin, actor_user_id = seen[0]
     assert system_admin is True
@@ -724,12 +498,13 @@ async def test_ordinary_claimed_channel_owner_can_use_channel_control_mutation(t
 
 
 @pytest.mark.asyncio
-async def test_ordinary_user_cannot_use_channel_control_mutation_for_unclaimed_instance(
+async def test_ordinary_user_cannot_use_channel_control_mutation_for_unassigned_instance(
     tmp_path,
 ) -> None:
-    """An ordinary collaboration user cannot mutate an unclaimed channel instance."""
+    """An ordinary collaboration user cannot mutate an instance nobody handed to them."""
     handler = await _handler(tmp_path)
     connection = _proxy_connection("ordinary-channel-user")
+
     async def settings_dispatch(_connection, _request, path):
         if path == "/api/settings/channels/configure":
             return http_json_response({"status": "unexpected"})
@@ -740,8 +515,7 @@ async def test_ordinary_user_cannot_use_channel_control_mutation_for_unclaimed_i
         is_mutation_path=lambda _path: False,
     )
 
-    index = await handler.dispatch(connection, connection.request)
-    assert index is not None and index.status_code == 200
+    await _identity(handler, connection)
     response = await handler.dispatch_webui_mutation(
         connection,
         "settings.channel.configure",
@@ -761,12 +535,7 @@ async def test_features_read_derives_administration_only_for_the_local_owner(
     proxy_subject: str | None,
     expected_admin: bool,
 ) -> None:
-    """The host inventory read is not channel control, so it derives identity and nothing more.
-
-    With no OIDC configured the local owner still resolves as an administrator, which is
-    what keeps single-user installs whole. A proxy-authenticated member resolves with an
-    actor but no administration, which is what the domain gate refuses.
-    """
+    """The host inventory read derives identity and administration, nothing more."""
     handler = await _handler(tmp_path)
     path = "/api/settings/nanobot-features"
     connection = (
@@ -798,72 +567,10 @@ async def test_features_read_derives_administration_only_for_the_local_owner(
 
 
 @pytest.mark.asyncio
-async def test_pairing_create_persists_only_server_derived_channel_revision(tmp_path) -> None:
-    """A client cannot make a pairing challenge bind to a chosen channel revision."""
-    handler = await _handler(tmp_path)
-    snapshot, _ = _channel_extension_snapshot("weixin", "default", "server-revision")
-    handler.settings = SimpleNamespace(
-        extensions=SimpleNamespace(snapshot=MagicMock(return_value=snapshot))
-    )
-
-    actor_id, challenge_id, _ = await _create_channel_pairing(
-        handler,
-        _proxy_connection("pairing-owner"),
-        channel_type="weixin",
-        instance_id="default",
-    )
-
-    stored = await handler.collaboration.get_pairing_challenge(actor_id, challenge_id)
-    assert stored is not None
-    assert stored.channel_revision == "server-revision"
-
-
-@pytest.mark.asyncio
-async def test_pairing_consume_rejects_replaced_binding_without_activation(
+async def test_pairing_create_requires_a_known_instance_and_consume_activates_it(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Credential or marker revision replacement leaves a verified challenge unconsumed."""
-    from nanobot.webui.nanobot_features_api import execute_nanobot_extension_action
-
-    handler = await _handler(tmp_path)
-    initial_snapshot, _ = _channel_extension_snapshot("weixin", "default", "before-replacement")
-    registry = SimpleNamespace(snapshot=MagicMock(return_value=initial_snapshot))
-    handler.settings = SimpleNamespace(extensions=registry)
-    actor_id, challenge_id, code = await _create_channel_pairing(
-        handler,
-        _proxy_connection("pairing-owner"),
-        channel_type="weixin",
-        instance_id="default",
-    )
-    await _verify_channel_pairing(
-        handler,
-        code,
-        channel_type="weixin",
-        instance_id="default",
-        channel_revision="before-replacement",
-    )
-    replaced_snapshot, _ = _channel_extension_snapshot("weixin", "default", "after-replacement")
-    registry.snapshot.return_value = replaced_snapshot
-    activation = AsyncMock(wraps=execute_nanobot_extension_action)
-    monkeypatch.setattr("nanobot.webui.nanobot_features_api.execute_nanobot_extension_action", activation)
-
-    response = await handler.dispatch_webui_mutation(
-        _proxy_connection("pairing-owner"),
-        "collaboration.pairing.consume",
-        {"challenge_id": challenge_id},
-    )
-
-    assert response.status_code == 409
-    stored = await handler.collaboration.get_pairing_challenge(actor_id, challenge_id)
-    assert stored is not None and stored.consumed_at_ms is None
-    activation.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_pairing_consume_activates_exact_current_target_once(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A matching bound challenge consumes once and enables its exact component."""
+    """A Pair Code targets an instance the runtime knows; consuming it enables that instance."""
     from nanobot.extensions.contracts import (
         ExtensionAction,
         ExtensionActionResult,
@@ -871,28 +578,48 @@ async def test_pairing_consume_activates_exact_current_target_once(
     )
 
     handler = await _handler(tmp_path)
-    snapshot, target_id = _channel_extension_snapshot("weixin", "default", "current-revision")
-    registry = SimpleNamespace(snapshot=MagicMock(return_value=snapshot))
-    handler.settings = SimpleNamespace(extensions=registry)
-    actor_id, challenge_id, code = await _create_channel_pairing(
-        handler,
-        _proxy_connection("pairing-owner"),
-        channel_type="weixin",
-        instance_id="default",
+    registry = _install_registry(
+        handler, _channel_instances_snapshot("weixin", "WeChat", (("default", "disabled"),))
     )
-    await _verify_channel_pairing(
-        handler,
-        code,
-        channel_type="weixin",
-        instance_id="default",
-        channel_revision="current-revision",
+    owner = _proxy_connection("pairing-owner")
+    identity = await _identity(handler, owner)
+    project_id = identity["active_project_id"]
+
+    unknown = await handler.dispatch_webui_mutation(
+        owner,
+        "collaboration.pairing.create",
+        {"project_id": project_id, "channel_type": "weixin", "instance_id": "ghost"},
+    )
+    assert unknown.status_code == 409
+
+    # A member may only pair an instance they connected themselves.
+    forbidden = await handler.dispatch_webui_mutation(
+        owner,
+        "collaboration.pairing.create",
+        {"project_id": project_id, "channel_type": "weixin", "instance_id": "default"},
+    )
+    assert forbidden.status_code == 404
+    await handler.collaboration.record_channel_provision(
+        identity["user"]["id"], channel_type="weixin", instance_id="default"
+    )
+    challenge_id, code = await _create_pairing(
+        handler, owner, project_id=project_id, channel_type="weixin", instance_id="default"
+    )
+
+    pending = await handler.dispatch_webui_mutation(
+        owner, "collaboration.pairing.consume", {"challenge_id": challenge_id}
+    )
+    assert pending.status_code == 409
+
+    await handler.collaboration.verify_pairing_challenge(
+        code, channel_type="weixin", instance_id="default", sender_id="default-sender"
     )
     activation = AsyncMock(
         return_value=ExtensionActionResult(
             ok=True,
             action=ExtensionAction.ENABLE,
             package_id="ext:channel_package:weixin",
-            target_id=target_id,
+            target_id="ext:channel_package:weixin/channel:default",
             lifecycle=ExtensionLifecycle.ENABLED,
             message="Channel enabled.",
         )
@@ -900,87 +627,102 @@ async def test_pairing_consume_activates_exact_current_target_once(
     monkeypatch.setattr("nanobot.webui.nanobot_features_api.execute_nanobot_extension_action", activation)
 
     response = await handler.dispatch_webui_mutation(
-        _proxy_connection("pairing-owner"),
-        "collaboration.pairing.consume",
-        {"challenge_id": challenge_id},
+        owner, "collaboration.pairing.consume", {"challenge_id": challenge_id}
     )
 
     assert response.status_code == 200
-    assert _json(response)["channel_activation"] == {
-        "ok": True,
-        "action": "enable",
-        "package_id": "ext:channel_package:weixin",
-        "target_id": target_id,
-        "lifecycle": "enabled",
-        "message": "Channel enabled.",
-    }
-    stored = await handler.collaboration.get_pairing_challenge(actor_id, challenge_id)
-    assert stored is not None and stored.consumed_at_ms is not None
-    activation.assert_awaited_once_with(
-        registry,
-        action=ExtensionAction.ENABLE,
-        name="weixin",
-        instance_id="default",
-        extension_id=target_id,
-        expected_revision="current-revision",
-        risk_acknowledged=True,
-        actor_id=actor_id,
-        is_system_admin=True,
-        package_install_allowed=False,
-        channel_pairing_completed=True,
-    )
+    assert _json(response)["channel_activation"]["ok"] is True
+    assert _json(response)["pairing"]["consumed"] is True
+    activation.assert_awaited_once()
+    assert activation.await_args.kwargs["instance_id"] == "default"
+    assert activation.await_args.kwargs["expected_revision"] == "default-revision"
+    assignment = await handler.collaboration.resolve_channel_assignment("weixin", "default")
+    assert assignment is not None and assignment.project_id == project_id
+    registry.snapshot.assert_called()
+
+    index = await _identity(handler, _proxy_connection("pairing-owner"))
+    assert [item["instance_id"] for item in index["assignments"]] == ["default"]
 
 
-def _channel_instances_snapshot(
-    channel_type: str,
-    display_name: str,
-    instances: tuple[tuple[str, str], ...],
-) -> Any:
-    """Build one channel package exposing several named instances with a lifecycle."""
-    from nanobot.extensions.contracts import (
-        ExtensionAction,
-        ExtensionComponentDescriptor,
-        ExtensionComponentKind,
-        ExtensionExecution,
-        ExtensionLifecycle,
-        ExtensionPackageDescriptor,
-        ExtensionSnapshot,
-        ExtensionSource,
-        ExtensionTrust,
-        extension_component_id,
-        extension_package_id,
+@pytest.mark.asyncio
+async def test_administrator_can_hand_any_known_instance_to_a_member(tmp_path) -> None:
+    """The host administrator assigns an instance nobody provisioned to another member's project."""
+    handler = await _handler(tmp_path)
+    _install_registry(
+        handler,
+        _channel_instances_snapshot("weixin", "WeChat", (("legacy", "enabled"), ("spare", "disabled"))),
     )
+    admin = _local_connection()
+    member = _proxy_connection("member")
+    member_id = (await _identity(handler, member))["user"]["id"]
+    shared = await handler.dispatch_webui_mutation(
+        admin, "collaboration.project.create", {"name": "Shared"}
+    )
+    member_project = _json(shared)["project"]["id"]
+    added = await handler.dispatch_webui_mutation(
+        admin,
+        "collaboration.project.member.add",
+        {"project_id": member_project, "member_user_id": member_id},
+    )
+    assert added.status_code == 200
 
-    package_id = extension_package_id(ExtensionSource.CHANNEL_PACKAGE, channel_type)
-    return ExtensionSnapshot(
-        packages=(
-            ExtensionPackageDescriptor(
-                id=package_id,
-                name=channel_type,
-                display_name=display_name,
-                source=ExtensionSource.CHANNEL_PACKAGE,
-                trust=ExtensionTrust.FIRST_PARTY,
-                execution=ExtensionExecution.IN_PROCESS,
-                lifecycle=ExtensionLifecycle.DISABLED,
-                components=tuple(
-                    ExtensionComponentDescriptor(
-                        id=extension_component_id(
-                            package_id, ExtensionComponentKind.CHANNEL, instance_id
-                        ),
-                        package_id=package_id,
-                        kind=ExtensionComponentKind.CHANNEL,
-                        name=instance_id,
-                        display_name=instance_id,
-                        execution=ExtensionExecution.IN_PROCESS,
-                        lifecycle=ExtensionLifecycle(lifecycle),
-                        revision=f"{instance_id}-revision",
-                        actions=frozenset({ExtensionAction.ENABLE}),
-                    )
-                    for instance_id, lifecycle in instances
-                ),
-            ),
-        )
+    claimable_request = _request(
+        "/api/collaboration/claimable-channels", {"Authorization": "Bearer local-token"}
     )
+    claimable = await handler.dispatch(_connection(claimable_request), claimable_request)
+    assert claimable is not None and claimable.status_code == 200
+    assert [item["instance_id"] for item in _json(claimable)["channels"]] == ["legacy", "spare"]
+
+    member_claimable_request = _request(
+        "/api/collaboration/claimable-channels", dict(member.request.headers)
+    )
+    member_claimable = await handler.dispatch(_connection(member_claimable_request), member_claimable_request)
+    assert member_claimable is not None and _json(member_claimable)["channels"] == []
+
+    challenge_id, code = await _create_pairing(
+        handler, admin, project_id=member_project, channel_type="weixin",
+        instance_id="spare", assignee_user_id=member_id,
+    )
+    await handler.collaboration.verify_pairing_challenge(
+        code, channel_type="weixin", instance_id="spare", sender_id="member-sender"
+    )
+    handler.settings = SimpleNamespace(extensions=None)
+    response = await handler.dispatch_webui_mutation(
+        admin, "collaboration.pairing.consume", {"challenge_id": challenge_id}
+    )
+    assert response.status_code == 503
+
+    _install_registry(
+        handler,
+        _channel_instances_snapshot("weixin", "WeChat", (("legacy", "enabled"), ("spare", "disabled"))),
+    )
+    response = await handler.dispatch_webui_mutation(
+        admin, "collaboration.pairing.consume", {"challenge_id": challenge_id}
+    )
+    assert response.status_code == 200
+    assignment = await handler.collaboration.resolve_channel_assignment("weixin", "spare")
+    assert assignment is not None
+    assert (assignment.project_id, assignment.assignee_user_id) == (member_project, member_id)
+    assert (await handler.collaboration.resolve_identity("weixin.spare", "member-sender")).id == member_id
+
+    disabled = await handler.dispatch_webui_mutation(
+        admin,
+        "collaboration.assignment.update",
+        {"channel_type": "weixin", "instance_id": "spare", "enabled": False},
+    )
+    assert disabled.status_code == 200 and _json(disabled)["assignment"]["enabled"] is False
+    member_attempt = await handler.dispatch_webui_mutation(
+        member,
+        "collaboration.assignment.delete",
+        {"channel_type": "weixin", "instance_id": "spare"},
+    )
+    assert member_attempt.status_code == 404
+    removed = await handler.dispatch_webui_mutation(
+        admin,
+        "collaboration.assignment.delete",
+        {"channel_type": "weixin", "instance_id": "spare"},
+    )
+    assert removed.status_code == 200 and _json(removed)["deleted"] is True
 
 
 def _connect_settings_dispatch(sessions: dict[str, str]) -> Any:
@@ -1022,8 +764,7 @@ async def _provision_channel_instance(
     outcome: str = "succeeded",
 ) -> None:
     """Run one member-owned create-mode connect session through the mutation boundary."""
-    index = await handler.dispatch(connection, connection.request)
-    assert index is not None and index.status_code == 200
+    await _identity(handler, connection)
     start = await handler.dispatch_webui_mutation(
         connection,
         "settings.channel.connect.start",
@@ -1044,18 +785,13 @@ async def _provision_channel_instance(
 async def test_self_service_connect_makes_only_the_provisioner_instance_claimable(
     tmp_path,
 ) -> None:
-    """A member claims the instance they connected, and never a colleague's instance."""
+    """A member pairs the instance they connected, and never a colleague's instance."""
     handler = await _handler(tmp_path)
-    handler.settings = SimpleNamespace(
-        extensions=SimpleNamespace(
-            snapshot=MagicMock(
-                return_value=_channel_instances_snapshot(
-                    "weixin",
-                    "WeChat",
-                    (("wechat-aaa111", "enabled"), ("wechat-bbb222", "disabled")),
-                )
-            )
-        )
+    _install_registry(
+        handler,
+        _channel_instances_snapshot(
+            "weixin", "WeChat", (("wechat-aaa111", "enabled"), ("wechat-bbb222", "disabled")),
+        ),
     )
     sessions: dict[str, str] = {}
     handler.settings_routes = SimpleNamespace(
@@ -1088,25 +824,18 @@ async def test_self_service_connect_makes_only_the_provisioner_instance_claimabl
 
 
 @pytest.mark.asyncio
-async def test_claimable_channels_omit_unattributed_abandoned_and_claimed_instances(
+async def test_claimable_channels_omit_unattributed_abandoned_and_assigned_instances(
     tmp_path,
 ) -> None:
-    """Only a completed, still-present, still-unclaimed, self-provisioned instance is offered."""
+    """Only a completed, still-present, still-unassigned, self-provisioned instance is offered."""
     handler = await _handler(tmp_path)
-    registry = SimpleNamespace(
-        snapshot=MagicMock(
-            return_value=_channel_instances_snapshot(
-                "weixin",
-                "WeChat",
-                (
-                    ("legacy", "enabled"),
-                    ("wechat-aaa111", "enabled"),
-                    ("wechat-ccc333", "disabled"),
-                ),
-            )
-        )
+    registry = _install_registry(
+        handler,
+        _channel_instances_snapshot(
+            "weixin", "WeChat",
+            (("legacy", "enabled"), ("wechat-aaa111", "enabled"), ("wechat-ccc333", "disabled")),
+        ),
     )
-    handler.settings = SimpleNamespace(extensions=registry)
     sessions: dict[str, str] = {}
     handler.settings_routes = SimpleNamespace(
         dispatch=_connect_settings_dispatch(sessions),
@@ -1134,7 +863,7 @@ async def test_claimable_channels_omit_unattributed_abandoned_and_claimed_instan
     registry.snapshot.return_value = _channel_instances_snapshot(
         "weixin", "WeChat", (("legacy", "enabled"), ("wechat-aaa111", "enabled"))
     )
-    await _claim_channel_instance(handler, connection, "wechat-aaa111")
+    await _assign_instance(handler, connection, "wechat-aaa111")
     after = await handler.dispatch(_connection(request), request)
 
     assert after is not None and after.status_code == 200
@@ -1145,14 +874,8 @@ async def test_claimable_channels_omit_unattributed_abandoned_and_claimed_instan
 async def test_claimable_channels_do_not_reopen_the_host_inventory_read(tmp_path) -> None:
     """The member listing is additive: the features read still derives no administration."""
     handler = await _handler(tmp_path)
-    handler.settings = SimpleNamespace(
-        extensions=SimpleNamespace(
-            snapshot=MagicMock(
-                return_value=_channel_instances_snapshot(
-                    "weixin", "WeChat", (("wechat-aaa111", "enabled"),)
-                )
-            )
-        )
+    _install_registry(
+        handler, _channel_instances_snapshot("weixin", "WeChat", (("wechat-aaa111", "enabled"),))
     )
     sessions: dict[str, str] = {}
     connect_dispatch = _connect_settings_dispatch(sessions)
@@ -1191,20 +914,10 @@ async def test_claimable_channels_do_not_reopen_the_host_inventory_read(tmp_path
 
 @pytest.mark.asyncio
 async def test_another_member_cannot_take_over_a_connect_session_provenance(tmp_path) -> None:
-    """Provenance follows the member who opened the session, not whoever polls it.
-
-    The intruder belongs to the organization the session was opened in, so nothing
-    but the session-owner check stands between them and a stolen claimable instance.
-    """
+    """Provenance follows the member who opened the session, not whoever polls it."""
     handler = await _handler(tmp_path)
-    handler.settings = SimpleNamespace(
-        extensions=SimpleNamespace(
-            snapshot=MagicMock(
-                return_value=_channel_instances_snapshot(
-                    "weixin", "WeChat", (("wechat-aaa111", "enabled"),)
-                )
-            )
-        )
+    _install_registry(
+        handler, _channel_instances_snapshot("weixin", "WeChat", (("wechat-aaa111", "enabled"),))
     )
     sessions: dict[str, str] = {}
     handler.settings_routes = SimpleNamespace(
@@ -1213,17 +926,8 @@ async def test_another_member_cannot_take_over_a_connect_session_provenance(tmp_
     )
     owner = _proxy_connection("connect-member-one")
     intruder = _proxy_connection("connect-member-two")
-    identities: dict[str, str] = {}
-    organizations: dict[str, str] = {}
-    for label, connection in (("owner", owner), ("intruder", intruder)):
-        index = await handler.dispatch(connection, connection.request)
-        assert index is not None and index.status_code == 200
-        identities[label] = _json(index)["user"]["id"]
-        organizations[label] = _json(index)["active_organization_id"]
-    await handler.collaboration.add_organization_member(
-        organizations["owner"], identities["owner"], identities["intruder"],
-        OrganizationRole.MEMBER,
-    )
+    for connection in (owner, intruder):
+        await _identity(handler, connection)
 
     start = await handler.dispatch_webui_mutation(
         owner,

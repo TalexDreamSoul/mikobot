@@ -1,4 +1,4 @@
-"""Purpose-bound Pair Code helpers shared by collaboration backends."""
+"""Pair Code helpers shared by the collaboration store and channel runtimes."""
 
 from __future__ import annotations
 
@@ -6,7 +6,10 @@ import hashlib
 import secrets
 
 _PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY = "_bot_project_route_required"
+# Channels that only serve assigned instances (Feishu, Weixin) set this inbound
+# metadata flag so an unassigned instance is denied instead of falling back to
+# the sender's personal default project.
+CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY = "_channel_assignment_required"
 
 
 def runtime_channel_key(channel_type: str, instance_id: str) -> str:

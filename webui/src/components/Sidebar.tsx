@@ -30,20 +30,12 @@ import {
 import { Button } from "@/components/ui/button";
 import type {
   ChatSummary,
-  CollaborationBot,
-  CollaborationOrganization,
   SidebarViewState,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface SidebarProps {
   sessions: ChatSummary[];
-  organizations?: CollaborationOrganization[];
-  bots?: CollaborationBot[];
-  activeOrganizationId?: string | null;
-  activeBotId?: string | null;
-  onSelectOrganization?: (organizationId: string) => void;
-  onSelectBot?: (botId: string) => void;
   temporarySessions?: ChatSummary[];
   activeKey: string | null;
   loading: boolean;
@@ -147,7 +139,7 @@ export function Sidebar(props: SidebarProps) {
           collapsed ? "w-14 justify-start" : "justify-between gap-2",
         )}
       >
-        <div className={cn("flex min-w-0 items-center", !collapsed && "flex-1 gap-2")}>
+        <div className={cn("flex min-w-0 items-center", !collapsed && "gap-2")}>
           <button
             type="button"
             aria-label={collapsed ? toggleLabel : undefined}
@@ -169,29 +161,6 @@ export function Sidebar(props: SidebarProps) {
               draggable={false}
             />
           </button>
-          {!collapsed ? (
-            <label className="min-w-0 flex-1">
-              <span className="sr-only">{t("sidebar.botSwitcher")}</span>
-              <select
-                value={props.activeBotId ?? ""}
-                onChange={(event) => props.onSelectBot?.(event.target.value)}
-                disabled={!props.bots?.length}
-                aria-label={t("sidebar.botSwitcher")}
-                className="h-9 w-full truncate rounded-lg border border-sidebar-border/60 bg-sidebar-accent/35 px-2 text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {!props.bots?.length ? (
-                  <option value="">{t("sidebar.noBots")}</option>
-                ) : null}
-                {(props.bots ?? [])
-                  .filter((bot) => !props.activeOrganizationId || bot.organization_id === props.activeOrganizationId)
-                  .map((bot) => (
-                    <option key={bot.id} value={bot.id}>
-                      {bot.name === "Personal bot" ? t("projects.bots.defaultName") : bot.name}
-                    </option>
-                  ))}
-              </select>
-            </label>
-          ) : null}
         </div>
         {!collapsed && !props.hostChromeInset && (
           <Button
@@ -335,29 +304,6 @@ export function Sidebar(props: SidebarProps) {
           collapsed && "w-14 px-0",
         )}
       >
-        {!collapsed ? (
-          <label className="block">
-            <span className="sr-only">{t("sidebar.organizationSwitcher")}</span>
-            <select
-              value={props.activeOrganizationId ?? ""}
-              onChange={(event) => props.onSelectOrganization?.(event.target.value)}
-              disabled={!props.organizations?.length}
-              aria-label={t("sidebar.organizationSwitcher")}
-              className="h-10 w-full truncate rounded-lg border border-sidebar-border/60 bg-sidebar-accent/35 px-2.5 text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {!props.organizations?.length ? (
-                <option value="">{t("sidebar.noOrganizations")}</option>
-              ) : null}
-              {(props.organizations ?? []).map((organization) => (
-                <option key={organization.id} value={organization.id}>
-                  {organization.is_personal
-                    ? t("sidebar.personalOrganization", { name: organization.name })
-                    : organization.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
         <div className={cn("flex items-center gap-1", collapsed && "flex-col")}>
           <SidebarActionButton
             collapsed={collapsed}

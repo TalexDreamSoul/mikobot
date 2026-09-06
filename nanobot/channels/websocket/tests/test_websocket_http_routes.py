@@ -1645,7 +1645,7 @@ async def test_uppercase_create_cannot_bypass_victim_channel_authorization(
     )
 
     async def non_admin_identity(_request: Any) -> tuple[Any, bool]:
-        user = type("User", (), {"id": "attacker", "default_organization_id": None})()
+        user = type("User", (), {"id": "attacker", "is_admin": False})()
         return user, False
 
     monkeypatch.setattr(channel.gateway.http, "_collaboration_identity", non_admin_identity)

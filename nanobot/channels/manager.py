@@ -285,29 +285,16 @@ class ChannelManager:
         from nanobot.collaboration import CollaborationConflictError
         from nanobot.collaboration.pairing import normalize_assignment_code
         from nanobot.collaboration.store import CollaborationNotFoundError
-        from nanobot.extensions.contracts import ExtensionSource
-        from nanobot.extensions.targets import resolve_extension_feature_target
 
         repository = self._collaboration_repository
-        registry = self._webui_extension_registry
-        if repository is None or registry is None:
+        if repository is None:
             return False
         try:
-            target = resolve_extension_feature_target(
-                registry.snapshot(), channel_type, instance_id
-            )
-            if (
-                target is None
-                or target.source is not ExtensionSource.CHANNEL_PACKAGE
-                or not target.revision
-            ):
-                return False
             code = normalize_assignment_code(content)
             await repository.verify_pairing_challenge(
                 code,
                 channel_type=channel_type,
                 instance_id=instance_id,
-                channel_revision=target.revision,
                 sender_id=sender_id,
             )
         except (CollaborationConflictError, CollaborationNotFoundError, ValueError):
@@ -323,33 +310,21 @@ class ChannelManager:
         instance_id: str,
         sender_id: str,
     ) -> bool:
-        from nanobot.collaboration.models import BotState
+        """Whether *sender_id* is a member of the project this instance is assigned to."""
         from nanobot.collaboration.pairing import runtime_channel_key
 
         repository = self._collaboration_repository
         if repository is None:
+            return False
+        assignment = await repository.resolve_channel_assignment(channel_type, instance_id)
+        if assignment is None or not assignment.enabled:
             return False
         user = await repository.resolve_identity(
             runtime_channel_key(channel_type, instance_id), sender_id
         )
         if user is None:
             return False
-        if user.default_project_id is None:
-            return False
-        for bot in await repository.list_bots(user.id):
-            if bot.state is not BotState.ACTIVE:
-                continue
-            routes = await repository.list_bot_project_channels(
-                user.id, bot.id, user.default_project_id
-            )
-            if any(
-                route.enabled
-                and route.channel_type == channel_type
-                and route.instance_id == instance_id
-                for route in routes
-            ):
-                return True
-        return False
+        return await repository.get_project(user.id, assignment.project_id) is not None
 
     async def _authorize_assignment_conversation(
         self,
@@ -358,33 +333,21 @@ class ChannelManager:
         sender_id: str,
         conversation_id: str,
     ) -> bool:
-        from nanobot.collaboration.models import BotState
+        """Whether a group conversation is bound to the project this instance serves."""
         from nanobot.collaboration.pairing import runtime_channel_key
 
         repository = self._collaboration_repository
         if repository is None:
+            return False
+        assignment = await repository.resolve_channel_assignment(channel_type, instance_id)
+        if assignment is None or not assignment.enabled:
             return False
         channel = runtime_channel_key(channel_type, instance_id)
         user = await repository.resolve_identity(channel, sender_id)
         if user is None:
             return False
         binding = await repository.resolve_binding(channel, conversation_id, user.id)
-        if binding is None:
-            return False
-        for bot in await repository.list_bots(user.id):
-            if bot.state is not BotState.ACTIVE:
-                continue
-            routes = await repository.list_bot_project_channels(
-                user.id, bot.id, binding.project_id
-            )
-            if any(
-                route.enabled
-                and route.channel_type == channel_type
-                and route.instance_id == instance_id
-                for route in routes
-            ):
-                return True
-        return False
+        return binding is not None and binding.project_id == assignment.project_id
 
     def _init_channels(self) -> None:
         """Initialize enabled runtimes from dependency-free channel descriptors."""

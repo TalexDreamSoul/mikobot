@@ -354,12 +354,12 @@ export function ChannelQrConnectFlow({
       {succeeded && !suppressSucceeded && pairingRequired ? (
         <div className="rounded-control border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-[12px] text-amber-900 dark:text-amber-100">
           <p className="font-semibold">
-            {tx("settings.channels.pairingRequiredTitle", "Connected — bot assignment required")}
+            {tx("settings.channels.pairingRequiredTitle", "Connected — project assignment required")}
           </p>
           <p className="mt-1 leading-5">
             {tx(
               "settings.channels.pairingRequiredDescription",
-              "Assign instance {{instance}} to a bot with a one-time Pair Code before it can receive messages.",
+              "Assign instance {{instance}} to a project with a one-time Pair Code before it can receive messages.",
             ).replace("{{instance}}", connect?.instance_id ?? "default")}
           </p>
           <Button
@@ -367,9 +367,9 @@ export function ChannelQrConnectFlow({
             size="sm"
             variant="outline"
             className="mt-3 h-8 rounded-full px-3 text-[12px] font-semibold"
-            onClick={() => { window.location.hash = "#/projects?section=bots"; }}
+            onClick={() => { window.location.hash = "#/projects?section=channels"; }}
           >
-            {tx("settings.channels.manageBots", "Open bot management")}
+            {tx("settings.channels.manageBots", "Open project channels")}
           </Button>
         </div>
       ) : null}

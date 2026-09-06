@@ -11,7 +11,7 @@ from loguru import logger
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.collaboration.pairing import BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY
+from nanobot.collaboration.pairing import CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY
 from nanobot.pairing import (
     PAIRING_CODE_META_KEY,
     format_pairing_reply,
@@ -378,7 +378,7 @@ class BaseChannel(ABC):
         if is_dm:
             meta["is_direct"] = True
         if self.require_assignment_authorization:
-            meta[BOT_PROJECT_ROUTE_REQUIRED_METADATA_KEY] = True
+            meta[CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY] = True
         if self.supports_streaming:
             meta["_wants_stream"] = True
 

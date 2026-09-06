@@ -6,7 +6,7 @@
 
 ## Overview
 
-nanobot is a single Python package, `nanobot/`, containing 26 subpackages. There is no
+nanobot is a single Python package, `nanobot/`, containing 25 subpackages. There is no
 `src/` layout, no `routes/services/repositories` split, and no per-feature vertical slicing.
 Organization follows **runtime role**: each subpackage owns one stage of the message
 lifecycle or one cross-cutting service.
@@ -49,7 +49,7 @@ nanobot/
 ├── bus/                MessageBus, InboundMessage/OutboundMessage, progress + runtime events
 ├── channels/           One self-contained package per platform (see below)
 ├── cli/                Typer CLI: commands.py, gateway.py, agent.py, onboard.py, entry.py
-├── collaboration/      Multi-tenant control plane over a local JSON store
+├── collaboration/      Users, projects, channel assignments, and Pair Codes (local JSON store)
 ├── command/            Slash command router + built-in handlers
 ├── config/             Pydantic schema, loader/saver, path helpers, file watcher
 ├── cron/               Cron service, job store, scheduled-turn delivery
@@ -57,10 +57,9 @@ nanobot/
 ├── gateway/            Background gateway runtime + service lifecycle
 ├── llm_usage/          Content-free LLM usage accounting
 ├── pairing/            DM sender approval store and pairing codes
-├── personal/           Personal-assistant services scoped to user vaults
 ├── providers/          LLM provider implementations on a common base
 ├── sdk/                Internals for the public Python SDK facade
-├── security/           SSRF guards, workspace access/policy, vault media
+├── security/           SSRF guards, workspace access/policy, private media
 ├── session/            Session history, compaction, goal state, WebUI turn coordination
 ├── skills/             Built-in skills as markdown + YAML frontmatter (no .py)
 ├── templates/          Jinja2 prompt templates (identity.md, SOUL.md, HEARTBEAT.md, ...)

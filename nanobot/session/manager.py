@@ -28,6 +28,7 @@ from nanobot.runtime_context import (
     public_history_message,
 )
 from nanobot.session.model_selection import SESSION_MODEL_PRESET_METADATA_KEY
+from nanobot.session.privacy import user_scoped_session_key
 from nanobot.utils.helpers import (
     content_with_media_breadcrumbs,
     ensure_dir,
@@ -690,6 +691,7 @@ class JsonlSessionStore:
             )
             with self._session_files_lock:
                 self._migrate_from_workspace(canonical_workspace)
+                self._migrate_vault_scoped_keys()
 
     @contextmanager
     def locked_session_files(self) -> Generator[Path, None, None]:
@@ -1067,6 +1069,40 @@ class JsonlSessionStore:
                     )
             except OSError as exc:
                 logger.warning("Failed to migrate session {}: {}", src, exc)
+
+    def _migrate_vault_scoped_keys(self) -> None:
+        """Rename sessions keyed by the retired per-user vault to plain user scope.
+
+        ``vault:<user>:<vault>:<rest>`` becomes ``user:<user>:<rest>`` and
+        ``unified:<user>:<vault>`` becomes ``unified:<user>``. A target that already
+        exists is left alone and the vault-keyed file is kept so nothing is lost.
+        """
+        for path in list(self.sessions_dir.glob("*.jsonl")):
+            key = self.session_key_from_path(path)
+            if key is None:
+                continue
+            new_key = user_scoped_session_key(key)
+            if new_key is None:
+                continue
+            target = self.get_session_path(new_key)
+            if target.exists():
+                logger.warning(
+                    "Keeping vault-scoped session {} because {} already exists", key, new_key
+                )
+                continue
+            try:
+                session = self._load_unlocked(key)
+                if session is None:
+                    continue
+                session.key = new_key
+                self._save_unlocked(session, fsync=True)
+                path.unlink()
+                checkpoint = self.sessions_dir / f"{path.stem}{_RUNTIME_CHECKPOINT_SUFFIX}"
+                if checkpoint.is_file():
+                    checkpoint.unlink()
+                logger.info("Migrated session key {} -> {}", key, new_key)
+            except (OSError, ValueError, TypeError) as exc:
+                logger.warning("Failed to migrate vault-scoped session {}: {}", key, exc)
 
     def restore_to_workspace(self) -> SessionRestoreResult:
         """Copy canonical sessions back for an explicit downgrade or rollback."""

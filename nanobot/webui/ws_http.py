@@ -33,25 +33,11 @@ from nanobot.collaboration import (
     CollaborationRepository,
     CollaborationStoreError,
 )
-from nanobot.collaboration.models import (
-    BotState,
-    ContextSource,
-    MembershipRole,
-    OrganizationRole,
-    PairingPurpose,
-    PersonalTask,
-    SharePermission,
-    Task,
-    TaskReviewState,
-    TaskStatus,
-    User,
-    VaultKind,
-)
+from nanobot.collaboration.models import ChannelProvision, MembershipRole, User
 from nanobot.command.builtin import builtin_command_palette
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.cron.session_turns import is_bound_cron_job
 from nanobot.cron.types import CronJob, CronSchedule
-from nanobot.personal.ics import export_tasks_ics
 from nanobot.security.workspace_access import WorkspaceScope
 from nanobot.session.manager import SessionManager
 from nanobot.session.recovery import RecoveryActionError
@@ -60,34 +46,15 @@ from nanobot.session.session_handles import (
 )
 from nanobot.triggers.local_types import LocalTrigger
 from nanobot.webui.collaboration_api import (
-    bot_capability_payload,
-    bot_channel_payload,
-    bot_payload,
-    bot_project_channel_payload,
-    bot_project_payload,
+    capability_allowlists,
+    channel_assignment_payload,
     claimable_channel_payload,
-    context_source_payload,
-    create_assignee,
-    extension_profile_payload,
-    optional_config,
     optional_enabled,
-    optional_nonnegative_int,
-    optional_position,
-    optional_source_kind,
-    optional_status,
     optional_string,
-    organization_member_payload,
-    organization_payload,
     pairing_challenge_payload,
-    personal_task_payload,
-    profile_settings,
     project_member_payload,
     project_payload,
-    required_source_kind,
     required_string,
-    task_list_payload,
-    task_payload,
-    update_assignee,
     user_payload,
 )
 from nanobot.webui.file_preview import (
@@ -200,7 +167,6 @@ _SLOW_WEBUI_HTTP_LOG_MS = 1_000
 _WEBUI_MUTATION_PAYLOAD_ATTR = "_nanobot_webui_mutation_payload"
 _WEBUI_MUTATION_REQUEST_ATTR = "_nanobot_webui_mutation_request"
 _SETTINGS_ACTOR_USER_ATTR = "_nanobot_settings_actor_user_id"
-_SETTINGS_ACTOR_ORG_ATTR = "_nanobot_settings_actor_organization_id"
 _SETTINGS_ADMIN_ATTR = "_nanobot_settings_system_admin"
 # Whether the caller administers the host. `_SETTINGS_ADMIN_ATTR` is raised to True for a
 # member acting on a channel instance they own, which authorizes that action but must not
@@ -266,38 +232,16 @@ _WEBUI_MUTATION_PATHS = {
     "settings.mcp.oauth_complete": "/api/settings/mcp-oauth/complete",
     "settings.mcp.oauth_cancel": "/api/settings/mcp-oauth/cancel",
     "settings.extension.action": "/api/settings/extensions/action",
-    "collaboration.organization.create": "/api/collaboration/mutations/organization/create",
-    "collaboration.organization.update": "/api/collaboration/mutations/organization/update",
-    "collaboration.organization.delete": "/api/collaboration/mutations/organization/delete",
-    "collaboration.organization.member.add": "/api/collaboration/mutations/organization/member/add",
-    "collaboration.organization.member.remove": "/api/collaboration/mutations/organization/member/remove",
     "collaboration.user.defaults": "/api/collaboration/mutations/user/defaults",
-    "collaboration.bot.create": "/api/collaboration/mutations/bot/create",
-    "collaboration.bot.update": "/api/collaboration/mutations/bot/update",
-    "collaboration.bot.delete": "/api/collaboration/mutations/bot/delete",
-    "collaboration.bot.capabilities.update": "/api/collaboration/mutations/bot/capabilities/update",
     "collaboration.pairing.create": "/api/collaboration/mutations/pairing/create",
     "collaboration.pairing.consume": "/api/collaboration/mutations/pairing/consume",
     "collaboration.project.create": "/api/collaboration/mutations/project/create",
+    "collaboration.project.update": "/api/collaboration/mutations/project/update",
+    "collaboration.project.delete": "/api/collaboration/mutations/project/delete",
     "collaboration.project.member.add": "/api/collaboration/mutations/project/member/add",
     "collaboration.project.member.remove": "/api/collaboration/mutations/project/member/remove",
-    "collaboration.task_list.create": "/api/collaboration/mutations/task-list/create",
-    "collaboration.task.create": "/api/collaboration/mutations/task/create",
-    "collaboration.task.update": "/api/collaboration/mutations/task/update",
-    "collaboration.task.delete": "/api/collaboration/mutations/task/delete",
-    "collaboration.extensions.update": "/api/collaboration/mutations/extensions/update",
-    "collaboration.context_source.create": "/api/collaboration/mutations/context-source/create",
-    "collaboration.context_source.update": "/api/collaboration/mutations/context-source/update",
-    "collaboration.context_source.delete": "/api/collaboration/mutations/context-source/delete",
-    "personal.vault.create": "/api/personal/mutations/vault/create",
-    "personal.vault.default": "/api/personal/mutations/vault/default",
-    "personal.persona.create": "/api/personal/mutations/persona/create",
-    "personal.persona.default": "/api/personal/mutations/persona/default",
-    "personal.task.create": "/api/personal/mutations/task/create",
-    "personal.task.update": "/api/personal/mutations/task/update",
-    "personal.task.delete": "/api/personal/mutations/task/delete",
-    "personal.share.create": "/api/personal/mutations/share/create",
-    "personal.share.revoke": "/api/personal/mutations/share/revoke",
+    "collaboration.assignment.update": "/api/collaboration/mutations/assignment/update",
+    "collaboration.assignment.delete": "/api/collaboration/mutations/assignment/delete",
 }
 
 _WEBUI_CHANNEL_CONNECT_ACTIONS = {
@@ -363,6 +307,26 @@ def _is_string_dict(value: object) -> TypeGuard[dict[str, object]]:
         return False
     mapping = cast(dict[object, object], value)
     return all(isinstance(key, str) for key in mapping)
+
+
+def _channel_instances_in_snapshot(snapshot: object) -> list[tuple[str, str]]:
+    """Return every (channel_type, instance_id) the registry currently exposes."""
+    from nanobot.extensions.contracts import (
+        ExtensionComponentKind,
+        ExtensionSnapshot,
+        ExtensionSource,
+    )
+
+    if not isinstance(snapshot, ExtensionSnapshot):
+        return []
+    instances: list[tuple[str, str]] = []
+    for package in snapshot.packages:
+        if package.source is not ExtensionSource.CHANNEL_PACKAGE:
+            continue
+        for component in package.components:
+            if component.kind is ExtensionComponentKind.CHANNEL:
+                instances.append((package.name, component.name))
+    return instances
 
 
 def _claimable_channel_presentation(
@@ -541,7 +505,7 @@ class GatewayHTTPHandler:
         self._collaboration_init_lock = asyncio.Lock()
         self._collaboration_initialized = False
         self._collaboration_closed = False
-        self._member_connect_sessions: dict[str, tuple[str, str, str]] = {}
+        self._member_connect_sessions: dict[str, tuple[str, str]] = {}
         self._webui_connections = webui_connections
         self.static_dist_path = static_dist_path
         self.runtime_model_name = runtime_model_name
@@ -697,6 +661,9 @@ class GatewayHTTPHandler:
                 "oidc", oidc_principal, self.skills_workspace_path, local_owner=False
             )
             await self.collaboration.bind_identity("websocket", oidc_principal, user.id)
+            is_admin = oidc_principal in self.config.oidc_auth.admin_subjects
+            if user.is_admin != is_admin:
+                user = await self.collaboration.update_user_admin(user.id, is_admin)
             return user, False
 
         source_request = getattr(connection, "request", None)
@@ -716,7 +683,7 @@ class GatewayHTTPHandler:
             identity = await self._collaboration_identity(request)
         except (CollaborationStoreError, ValueError):
             identity = None
-        if identity is not None and identity[1]:
+        if identity is not None and (identity[1] or identity[0].is_admin):
             return True
         session = self.oidc.session(request.headers) if self.oidc.enabled else None
         return bool(
@@ -726,45 +693,19 @@ class GatewayHTTPHandler:
     async def _can_manage_channel_instance(
         self, request: WsRequest, channel_type: str, instance_id: str
     ) -> bool:
-        """Return whether the authenticated user owns or administers one claimed instance."""
+        """Return whether the authenticated user was handed this claimed instance."""
         actor_user_id = getattr(request, _SETTINGS_ACTOR_USER_ATTR, None)
         if not isinstance(actor_user_id, str) or not actor_user_id:
             return False
         channel_type = channel_type.strip()
         instance_id = instance_id.strip() or "default"
         try:
-            bots = await self.collaboration.list_bots(actor_user_id)
-            checked_organizations: set[str] = set()
-            admin_organizations: set[str] = set()
-            for bot in bots:
-                assignments = await self.collaboration.list_bot_channels(
-                    actor_user_id, bot.id
-                )
-                for assignment in assignments:
-                    if (
-                        assignment.channel_type != channel_type
-                        or assignment.instance_id != instance_id
-                    ):
-                        continue
-                    if assignment.claimed_by_user_id == actor_user_id:
-                        return True
-                    if bot.organization_id in checked_organizations:
-                        continue
-                    checked_organizations.add(bot.organization_id)
-                    members = await self.collaboration.list_organization_members(
-                        bot.organization_id, actor_user_id
-                    )
-                    if any(
-                        member.user_id == actor_user_id
-                        and member.role in {OrganizationRole.OWNER, OrganizationRole.ADMIN}
-                        for member in members
-                    ):
-                        admin_organizations.add(bot.organization_id)
-                    if bot.organization_id in admin_organizations:
-                        return True
+            assignment = await self.collaboration.resolve_channel_assignment(
+                channel_type, instance_id
+            )
         except (CollaborationStoreError, ValueError):
             return False
-        return False
+        return assignment is not None and assignment.assignee_user_id == actor_user_id
 
     async def _track_member_connect_session(
         self,
@@ -809,18 +750,11 @@ class GatewayHTTPHandler:
         instance_id: str,
     ) -> None:
         """Remember one create-mode session so its later success can be attributed."""
-        organization_id = getattr(request, _SETTINGS_ACTOR_ORG_ATTR, None)
+        del request
         if not instance_id:
             return
-        if not isinstance(organization_id, str) or not organization_id:
-            self._log.warning(
-                "skipping channel provenance for a member without an organization"
-            )
-            return
         if status == "succeeded":
-            await self._record_channel_provision(
-                actor_user_id, channel_type, instance_id, organization_id
-            )
+            await self._record_channel_provision(actor_user_id, channel_type, instance_id)
             return
         if not session_id:
             return
@@ -828,9 +762,7 @@ class GatewayHTTPHandler:
             self._member_connect_sessions.pop(
                 next(iter(self._member_connect_sessions)), None
             )
-        self._member_connect_sessions[session_id] = (
-            actor_user_id, channel_type, organization_id
-        )
+        self._member_connect_sessions[session_id] = (actor_user_id, channel_type)
 
     async def _finish_member_connect_session(
         self,
@@ -846,24 +778,21 @@ class GatewayHTTPHandler:
             return
         if status in _CONNECT_TERMINAL_STATUSES:
             del self._member_connect_sessions[session_id]
-        tracked_actor, tracked_channel_type, organization_id = tracked
+        tracked_actor, tracked_channel_type = tracked
         if status != "succeeded" or not instance_id:
             return
         if tracked_actor != actor_user_id or tracked_channel_type != channel_type:
             return
-        await self._record_channel_provision(
-            actor_user_id, channel_type, instance_id, organization_id
-        )
+        await self._record_channel_provision(actor_user_id, channel_type, instance_id)
 
     async def _record_channel_provision(
-        self, actor_user_id: str, channel_type: str, instance_id: str, organization_id: str
+        self, actor_user_id: str, channel_type: str, instance_id: str
     ) -> None:
         try:
             await self.collaboration.record_channel_provision(
                 actor_user_id,
                 channel_type=channel_type,
                 instance_id=instance_id,
-                organization_id=organization_id,
             )
         except (CollaborationStoreError, ValueError):
             self._log.exception("unable to record channel instance provenance")
@@ -1086,7 +1015,7 @@ class GatewayHTTPHandler:
             return True
         if re.match(r"^/api/webui/automations/(enable|disable|delete|run|update)$", path):
             return True
-        if path.startswith("/api/collaboration/mutations/") or path.startswith("/api/personal/mutations/"):
+        if path.startswith("/api/collaboration/mutations/"):
             return True
         if path in {"/api/webui/recovery/continue", "/api/webui/recovery/dismiss"}:
             return True
@@ -1155,7 +1084,6 @@ class GatewayHTTPHandler:
             if identity is not None:
                 user, _local_owner = identity
                 setattr(request, _SETTINGS_ACTOR_USER_ATTR, user.id)
-                setattr(request, _SETTINGS_ACTOR_ORG_ATTR, user.default_organization_id)
                 host_admin = await self._is_system_admin(request)
                 setattr(request, _SETTINGS_ADMIN_ATTR, host_admin)
                 setattr(request, _SETTINGS_HOST_ADMIN_ATTR, host_admin)
@@ -1256,32 +1184,17 @@ class GatewayHTTPHandler:
     ) -> Response | None:
         if path == "/api/collaboration":
             return await self._handle_collaboration_index(request)
-        if path == "/api/personal":
-            return await self._handle_personal_index(request)
-        if path == "/api/personal/ics":
-            return await self._handle_personal_ics(request)
-        if path == "/api/collaboration/organizations":
-            return await self._handle_collaboration_organizations(request)
         if path == "/api/collaboration/claimable-channels":
             return await self._handle_collaboration_claimable_channels(request)
-        match = re.fullmatch(r"/api/collaboration/organizations/([^/]+)", path)
-        if match is not None:
-            return await self._handle_collaboration_organization(request, unquote(match.group(1)))
-        match = re.fullmatch(r"/api/collaboration/bots/([^/]+)", path)
-        if match is not None:
-            return await self._handle_collaboration_bot(request, unquote(match.group(1)))
         match = re.fullmatch(r"/api/collaboration/pairing/([^/]+)", path)
-        if match is not None:
+        if match:
             return await self._handle_collaboration_pairing(request, unquote(match.group(1)))
         match = re.fullmatch(r"/api/collaboration/projects/([^/]+)", path)
-        if match is not None:
+        if match:
             return await self._handle_collaboration_project(request, unquote(match.group(1)))
         match = re.fullmatch(r"/api/collaboration/mutations/(.+)", path)
-        if match is not None:
+        if match:
             return await self._handle_collaboration_mutation(request, match.group(1))
-        match = re.fullmatch(r"/api/personal/mutations/(.+)", path)
-        if match is not None:
-            return await self._handle_personal_mutation(request, match.group(1))
         return None
 
     async def _collaboration_user_or_error(
@@ -1297,71 +1210,50 @@ class GatewayHTTPHandler:
             return _http_error(401, "Unauthorized")
         return identity
 
+    @staticmethod
+    def _is_admin_identity(identity: tuple[User, bool]) -> bool:
+        user, local_owner = identity
+        return local_owner or user.is_admin
+
     async def _handle_collaboration_index(self, request: WsRequest) -> Response:
+        """Return the caller's projects and channel assignments.
+
+        An administrator sees every project and every assignment; a member sees the
+        projects they belong to and the instances handed to them or their projects.
+        """
         identity = await self._collaboration_user_or_error(request)
         if isinstance(identity, Response):
             return identity
         user, _local_owner = identity
+        admin = self._is_admin_identity(identity)
         try:
-            projects = (await self.collaboration.list_projects(user.id))[:256]
-            organizations = (await self.collaboration.list_organizations(user.id))[:256]
-            bots = (await self.collaboration.list_bots(user.id))[:256]
+            projects = (
+                await self.collaboration.list_all_projects(user.id)
+                if admin else await self.collaboration.list_projects(user.id)
+            )[:256]
+            assignments = (await self.collaboration.list_channel_assignments(user.id))[:256]
         except (CollaborationStoreError, ValueError):
             return _http_error(503, "collaboration service unavailable")
-        active_organization_id = user.default_organization_id
-        if active_organization_id not in {item.id for item in organizations}:
-            active_organization_id = organizations[0].id if organizations else None
-        active_bot_id = user.default_bot_id
-        if active_bot_id not in {bot.id for bot in bots}:
-            active_bot_id = next(
-                (bot.id for bot in bots if bot.organization_id == active_organization_id),
-                bots[0].id if bots else None,
-            )
         active_project_id = user.default_project_id
         if active_project_id not in {project.id for project in projects}:
-            active_project_id = next(
-                (
-                    project.id
-                    for project in projects
-                    if project.organization_id == active_organization_id
-                ),
-                projects[0].id if projects else None,
-            )
+            active_project_id = projects[0].id if projects else None
         return _http_json_response(
             {
                 "user": user_payload(user),
+                "is_admin": admin,
                 "projects": [project_payload(project) for project in projects],
-                "organizations": [organization_payload(item) for item in organizations],
-                "bots": [bot_payload(bot) for bot in bots],
-                "active_organization_id": active_organization_id,
-                "active_bot_id": active_bot_id,
+                "assignments": [channel_assignment_payload(item) for item in assignments],
                 "active_project_id": active_project_id,
             },
             extra_headers=_NO_STORE_HEADERS,
         )
 
-    async def _handle_collaboration_organizations(
-        self, request: WsRequest
-    ) -> Response:
-        identity = await self._collaboration_user_or_error(request)
-        if isinstance(identity, Response):
-            return identity
-        user, _local_owner = identity
-        try:
-            organizations = (await self.collaboration.list_organizations(user.id))[:256]
-        except (CollaborationStoreError, ValueError):
-            return _http_error(503, "collaboration service unavailable")
-        return _http_json_response(
-            {"organizations": [organization_payload(item) for item in organizations]},
-            extra_headers=_NO_STORE_HEADERS,
-        )
-
     async def _handle_collaboration_claimable_channels(self, request: WsRequest) -> Response:
-        """List only the unclaimed instances this member provisioned for themselves.
+        """List the instances the caller may pair into a project.
 
-        This replaces the host inventory the claim dropdown used to read.  It answers one
-        member's own question and cannot enumerate another tenant's instances, so it stays
-        additive to — never a reopening of — the closed `nanobot-features` read scope.
+        A member sees only the unassigned instances they connected themselves. An
+        administrator sees every unassigned instance the runtime knows about, which is
+        what lets them hand an instance to someone else.
         """
         identity = await self._collaboration_user_or_error(request)
         if isinstance(identity, Response):
@@ -1371,194 +1263,44 @@ class GatewayHTTPHandler:
         if registry is None:
             return _http_error(503, "channel registry is unavailable")
         try:
-            provisions = (await self.collaboration.list_claimable_channels(user.id))[:256]
-        except (CollaborationStoreError, ValueError):
-            return _http_error(503, "collaboration service unavailable")
-        try:
             snapshot = registry.snapshot()
         except Exception:
             self._log.exception("unable to read the channel registry snapshot")
             return _http_error(503, "channel registry is unavailable")
+        try:
+            if self._is_admin_identity(identity):
+                assigned = {
+                    (item.channel_type, item.instance_id)
+                    for item in await self.collaboration.list_channel_assignments(user.id)
+                }
+                candidates = [
+                    candidate for candidate in _channel_instances_in_snapshot(snapshot)
+                    if candidate not in assigned
+                ][:256]
+            else:
+                candidates = [
+                    (provision.channel_type, provision.instance_id)
+                    for provision in (
+                        await self.collaboration.list_claimable_channels(user.id)
+                    )[:256]
+                ]
+        except (CollaborationStoreError, ValueError):
+            return _http_error(503, "collaboration service unavailable")
         channels: list[dict[str, object]] = []
-        for provision in provisions:
-            presentation = _claimable_channel_presentation(
-                snapshot, provision.channel_type, provision.instance_id
-            )
+        for channel_type, instance_id in candidates:
+            presentation = _claimable_channel_presentation(snapshot, channel_type, instance_id)
             if presentation is None:
                 continue
             channel_display_name, instance_display_name, status = presentation
             channels.append(
                 claimable_channel_payload(
-                    provision,
+                    ChannelProvision(channel_type, instance_id, user.id, 0),
                     channel_display_name=channel_display_name,
                     instance_display_name=instance_display_name,
                     status=status,
                 )
             )
         return _http_json_response({"channels": channels}, extra_headers=_NO_STORE_HEADERS)
-
-    async def _handle_collaboration_organization(
-        self, request: WsRequest, organization_id: str
-    ) -> Response:
-        identity = await self._collaboration_user_or_error(request)
-        if isinstance(identity, Response):
-            return identity
-        user, _local_owner = identity
-        try:
-            organization = await self.collaboration.get_organization(user.id, organization_id)
-            if organization is None:
-                return _http_error(404, "organization not found")
-            members = await self.collaboration.list_organization_members(
-                organization.id, user.id
-            )
-        except (CollaborationStoreError, ValueError):
-            return _http_error(404, "organization not found")
-        return _http_json_response(
-            {
-                "organization": organization_payload(organization),
-                "members": [organization_member_payload(member) for member in members],
-            },
-            extra_headers=_NO_STORE_HEADERS,
-        )
-
-    async def _handle_personal_index(self, request: WsRequest) -> Response:
-        identity = await self._collaboration_user_or_error(request)
-        if isinstance(identity, Response):
-            return identity
-        user, _local_owner = identity
-        try:
-            vaults = await self.collaboration.list_vaults(user.id)
-            tasks: list[PersonalTask] = []
-            for vault in vaults:
-                tasks.extend(await self.collaboration.list_personal_tasks(user.id, vault.id))
-            personas = (await self.collaboration.list_personas(user.id))[:128]
-        except (CollaborationStoreError, ValueError):
-            return _http_error(503, "personal assistant service unavailable")
-        return _http_json_response(
-            {
-                "user": user_payload(user),
-                "default_vault_id": user.default_vault_id,
-                "default_persona_id": user.default_persona_id,
-                "vaults": [
-                    {
-                        "id": vault.id, "name": vault.name, "kind": vault.kind.value,
-                        "created_at_ms": vault.created_at_ms, "updated_at_ms": vault.updated_at_ms,
-                    }
-                    for vault in vaults
-                ],
-                "personas": [
-                    {
-                        "id": persona.id, "name": persona.name,
-                        "default_vault_id": persona.default_vault_id,
-                        "instructions": persona.instructions,
-                    }
-                    for persona in personas
-                ],
-                "tasks": [personal_task_payload(task) for task in tasks[:1_000]],
-            },
-            extra_headers=_NO_STORE_HEADERS,
-        )
-
-    async def _handle_personal_ics(self, request: WsRequest) -> Response:
-        identity = await self._collaboration_user_or_error(request)
-        if isinstance(identity, Response):
-            return identity
-        user, _local_owner = identity
-        try:
-            tasks: list[PersonalTask] = []
-            for vault in await self.collaboration.list_vaults(user.id):
-                tasks.extend(await self.collaboration.list_personal_tasks(user.id, vault.id))
-        except (CollaborationStoreError, ValueError):
-            return _http_error(503, "personal assistant service unavailable")
-        return _http_json_response(
-            {"ics": export_tasks_ics(tasks, calendar_name=f"{user.display_name} — Nanobot")},
-            extra_headers=_NO_STORE_HEADERS,
-        )
-
-    async def _handle_personal_mutation(
-        self, request: WsRequest, operation: str
-    ) -> Response:
-        if not getattr(request, _WEBUI_MUTATION_REQUEST_ATTR, False):
-            return _http_error(405, "personal assistant mutations require an authenticated WebSocket")
-        payload = _mutation_payload(request)
-        if payload is None:
-            return _http_error(400, "invalid personal assistant payload")
-        identity = await self._collaboration_user_or_error(request)
-        if isinstance(identity, Response):
-            return identity
-        user, _local_owner = identity
-        try:
-            if operation == "vault/create":
-                raw_kind = payload.get("kind", VaultKind.PRIVATE.value)
-                vault = await self.collaboration.create_vault(
-                    user.id, required_string(payload, "name"), kind=VaultKind(str(raw_kind))
-                )
-                return _http_json_response({"vault": {"id": vault.id, "name": vault.name, "kind": vault.kind.value}})
-            if operation == "vault/default":
-                updated = await self.collaboration.update_user_default_vault(
-                    user.id, required_string(payload, "vault_id")
-                )
-                return _http_json_response({"default_vault_id": updated.default_vault_id})
-            if operation == "persona/create":
-                persona = await self.collaboration.create_persona(
-                    user.id, required_string(payload, "name"), required_string(payload, "vault_id"),
-                    instructions=optional_string(payload, "instructions") or "",
-                )
-                return _http_json_response({"persona": {"id": persona.id, "name": persona.name, "default_vault_id": persona.default_vault_id}})
-            if operation == "persona/default":
-                updated = await self.collaboration.update_user_default_persona(
-                    user.id, required_string(payload, "persona_id")
-                )
-                return _http_json_response({"default_persona_id": updated.default_persona_id})
-            if operation == "task/create":
-                priority = payload.get("priority", 0)
-                due_at_ms = payload.get("due_at_ms")
-                if isinstance(priority, bool) or not isinstance(priority, int):
-                    raise ValueError("priority must be an integer")
-                if due_at_ms is not None and (isinstance(due_at_ms, bool) or not isinstance(due_at_ms, int)):
-                    raise ValueError("due_at_ms must be an integer")
-                task = await self.collaboration.create_personal_task(
-                    user.id, required_string(payload, "vault_id"), required_string(payload, "title"),
-                    note=optional_string(payload, "note") or "", priority=priority, due_at_ms=due_at_ms,
-                    timezone=optional_string(payload, "timezone"),
-                    recurrence_rule=optional_string(payload, "recurrence_rule"),
-                    source_type=optional_string(payload, "source_type") or "user",
-                    review_state=TaskReviewState(str(payload.get("review_state", TaskReviewState.CONFIRMED.value))),
-                )
-                return _http_json_response({"task": personal_task_payload(task)})
-            if operation == "task/update":
-                raw_status = payload.get("status")
-                raw_review = payload.get("review_state")
-                raw_priority = payload.get("priority")
-                priority = raw_priority if isinstance(raw_priority, int) and not isinstance(raw_priority, bool) else None
-                raw_due_at_ms = payload.get("due_at_ms")
-                due_at_ms = raw_due_at_ms if isinstance(raw_due_at_ms, int) and not isinstance(raw_due_at_ms, bool) else None
-                task = await self.collaboration.update_personal_task(
-                    user.id, required_string(payload, "task_id"),
-                    title=optional_string(payload, "title"), note=optional_string(payload, "note"),
-                    status=TaskStatus(str(raw_status)) if raw_status is not None else None,
-                    priority=priority, due_at_ms=due_at_ms,
-                    review_state=TaskReviewState(str(raw_review)) if raw_review is not None else None,
-                )
-                return _http_json_response({"task": personal_task_payload(task)})
-            if operation == "task/delete":
-                deleted = await self.collaboration.delete_personal_task(user.id, required_string(payload, "task_id"))
-                return _http_json_response({"deleted": deleted})
-            if operation == "share/create":
-                raw_permission = payload.get("permission", SharePermission.READ.value)
-                grant = await self.collaboration.create_share_grant(
-                    user.id, required_string(payload, "vault_id"), required_string(payload, "grantee_user_id"),
-                    resource_type=required_string(payload, "resource_type"),
-                    resource_id=optional_string(payload, "resource_id"),
-                    permission=SharePermission(str(raw_permission)),
-                )
-                return _http_json_response({"share_grant": {"id": grant.id, "permission": grant.permission.value}})
-            if operation == "share/revoke":
-                grant = await self.collaboration.revoke_share_grant(user.id, required_string(payload, "grant_id"))
-                return _http_json_response({"share_grant": {"id": grant.id, "revoked_at_ms": grant.revoked_at_ms}})
-        except (ValueError, CollaborationStoreError):
-            return _http_error(400, "invalid or unauthorized personal assistant request")
-        return _http_error(404, "unknown personal assistant mutation")
 
     async def _handle_collaboration_project(
         self, request: WsRequest, project_id: str
@@ -1571,110 +1313,26 @@ class GatewayHTTPHandler:
             project = await self.collaboration.get_project(user.id, project_id)
             if project is None:
                 return _http_error(404, "project not found")
-            profile = await self.collaboration.get_extension_profile(user.id, project.id)
-            task_lists = await self.collaboration.list_task_lists(user.id, project.id)
-            tasks = await self.collaboration.list_tasks(user.id, project.id)
-            context_sources = await self.collaboration.list_context_sources(user.id, project.id)
             members = await self.collaboration.list_members(project.id, user.id)
-            project_bots: list[dict[str, object]] = []
-            if project.organization_id is not None:
-                for bot in (await self.collaboration.list_bots(
-                    user.id, organization_id=project.organization_id
-                ))[:256]:
-                    assignments = await self.collaboration.list_bot_projects(user.id, bot.id)
-                    assignment = next(
-                        (item for item in assignments if item.project_id == project.id), None
-                    )
-                    if assignment is None:
-                        continue
-                    project_bots.append(
-                        {
-                            "bot": bot_payload(bot),
-                            "assignment": bot_project_payload(assignment),
-                            "channels": [
-                                bot_project_channel_payload(route)
-                                for route in await self.collaboration.list_bot_project_channels(
-                                    user.id, bot.id, project.id
-                                )
-                            ],
-                        }
-                    )
+            assignments = [
+                item for item in await self.collaboration.list_channel_assignments(user.id)
+                if item.project_id == project.id
+            ]
             return _http_json_response(
                 {
                     "project": project_payload(project),
                     "members": [project_member_payload(member) for member in members[:256]],
-                    "bots": project_bots,
-                    "task_lists": [task_list_payload(item) for item in task_lists[:256]],
-                    "tasks": [task_payload(item) for item in tasks[:1_000]],
-                    "extension_profile": extension_profile_payload(profile),
+                    "assignments": [channel_assignment_payload(item) for item in assignments[:256]],
                     "available": self._collaboration_available(),
-                    "context_sources": [context_source_payload(item) for item in context_sources[:256]],
+                    "can_manage": self._is_admin_identity(identity) or any(
+                        member.user_id == user.id and member.role is MembershipRole.OWNER
+                        for member in members
+                    ),
                 },
                 extra_headers=_NO_STORE_HEADERS,
             )
         except (CollaborationStoreError, ValueError):
             return _http_error(404, "project not found")
-
-
-    async def _handle_collaboration_bot(
-        self, request: WsRequest, bot_id: str
-    ) -> Response:
-        identity = await self._collaboration_user_or_error(request)
-        if isinstance(identity, Response):
-            return identity
-        user, _local_owner = identity
-        try:
-            bot = await self.collaboration.get_bot(user.id, bot_id)
-            if bot is None:
-                return _http_error(404, "bot not found")
-            assignments = await self.collaboration.list_bot_projects(user.id, bot.id)
-            channels = await self.collaboration.list_bot_channels(user.id, bot.id)
-            visible_projects = {
-                project.id: project
-                for project in await self.collaboration.list_projects(user.id)
-            }
-            project_payloads: list[dict[str, object]] = []
-            routes: list[dict[str, object]] = []
-            capabilities: list[dict[str, object]] = [
-                bot_capability_payload(
-                    await self.collaboration.get_bot_capability_profile(user.id, bot.id)
-                )
-            ]
-            for assignment in assignments[:256]:
-                project = visible_projects.get(assignment.project_id)
-                if project is None:
-                    continue
-                project_payloads.append(
-                    {
-                        "assignment": bot_project_payload(assignment),
-                        "project": project_payload(project),
-                    }
-                )
-                routes.extend(
-                    bot_project_channel_payload(route)
-                    for route in await self.collaboration.list_bot_project_channels(
-                        user.id, bot.id, project.id
-                    )
-                )
-                capabilities.append(
-                    bot_capability_payload(
-                        await self.collaboration.get_bot_capability_profile(
-                            user.id, bot.id, project_id=project.id
-                        )
-                    )
-                )
-            return _http_json_response(
-                {
-                    "bot": bot_payload(bot),
-                    "projects": project_payloads,
-                    "channels": [bot_channel_payload(item) for item in channels[:256]],
-                    "project_channels": routes[:512],
-                    "capability_profiles": capabilities[:257],
-                },
-                extra_headers=_NO_STORE_HEADERS,
-            )
-        except (CollaborationStoreError, ValueError):
-            return _http_error(404, "bot not found")
 
     async def _handle_collaboration_pairing(
         self, request: WsRequest, challenge_id: str
@@ -1736,183 +1394,24 @@ class GatewayHTTPHandler:
             return identity
         user, _local_owner = identity
         try:
-            if operation == "organization/create":
-                organization = await self.collaboration.create_organization(user.id, required_string(payload, "name"))
-                return _http_json_response({"organization": organization_payload(organization)})
-            if operation == "organization/update":
-                organization = await self.collaboration.update_organization(
-                    required_string(payload, "organization_id"), user.id, name=required_string(payload, "name")
-                )
-                return _http_json_response({"organization": organization_payload(organization)})
-            if operation == "organization/delete":
-                deleted = await self.collaboration.delete_organization(
-                    required_string(payload, "organization_id"), user.id
-                )
-                return _http_json_response({"deleted": deleted})
-            if operation == "organization/member/add":
-                raw_role = payload.get("role", OrganizationRole.MEMBER.value)
-                member = await self.collaboration.add_organization_member(
-                    required_string(payload, "organization_id"), user.id,
-                    required_string(payload, "member_user_id"), OrganizationRole(str(raw_role)),
-                )
-                return _http_json_response({"member": organization_member_payload(member)})
-            if operation == "organization/member/remove":
-                deleted = await self.collaboration.remove_organization_member(
-                    required_string(payload, "organization_id"), user.id,
-                    required_string(payload, "member_user_id"),
-                )
-                return _http_json_response({"deleted": deleted})
             if operation == "user/defaults":
-                updated = await self.collaboration.update_user_defaults(
-                    user.id,
-                    organization_id=required_string(payload, "organization_id"),
-                    bot_id=required_string(payload, "bot_id"),
-                    project_id=optional_string(payload, "project_id"),
+                updated = await self.collaboration.update_user_default_project(
+                    user.id, optional_string(payload, "project_id")
                 )
                 return _http_json_response({"user": user_payload(updated)})
-            if operation == "bot/create":
-                bot = await self.collaboration.create_bot(
-                    user.id,
-                    required_string(payload, "organization_id"),
-                    required_string(payload, "name"),
-                    avatar_url=optional_string(payload, "avatar_url"),
-                    persona_id=optional_string(payload, "persona_id"),
-                )
-                return _http_json_response({"bot": bot_payload(bot)})
-            if operation == "bot/update":
-                raw_state = optional_string(payload, "state")
-                bot = await self.collaboration.update_bot(
-                    required_string(payload, "bot_id"),
-                    user.id,
-                    name=optional_string(payload, "name"),
-                    avatar_url=optional_string(payload, "avatar_url"),
-                    persona_id=optional_string(payload, "persona_id"),
-                    state_value=BotState(raw_state) if raw_state is not None else None,
-                )
-                return _http_json_response({"bot": bot_payload(bot)})
-            if operation == "bot/delete":
-                deleted = await self.collaboration.delete_bot(
-                    required_string(payload, "bot_id"), user.id
-                )
-                return _http_json_response({"deleted": deleted})
-            if operation == "bot/capabilities/update":
-                settings = payload.get("settings")
-                if not isinstance(settings, Mapping):
-                    raise ValueError("settings must be an object")
-                profile = await self.collaboration.update_bot_capability_profile(
-                    user.id,
-                    required_string(payload, "bot_id"),
-                    cast(Mapping[str, object], settings),
-                    project_id=optional_string(payload, "project_id"),
-                    expected_revision=optional_nonnegative_int(payload, "revision"),
-                )
-                return _http_json_response(
-                    {"capability_profile": bot_capability_payload(profile)}
-                )
             if operation == "pairing/create":
-                channel_type = required_string(payload, "channel_type")
-                instance_id = required_string(payload, "instance_id")
-                registry = self.settings.extensions
-                if registry is None:
-                    return _http_error(503, "extension registry is unavailable")
-                from nanobot.extensions.contracts import ExtensionSource
-                from nanobot.extensions.targets import resolve_extension_feature_target
-
-                try:
-                    target = resolve_extension_feature_target(
-                        registry.snapshot(), channel_type, instance_id
-                    )
-                except Exception:
-                    self._log.exception("unable to resolve pairing challenge target")
-                    return _http_error(500, "pairing challenge target is unavailable")
-                if (
-                    target is None
-                    or target.source is not ExtensionSource.CHANNEL_PACKAGE
-                    or not target.revision
-                ):
-                    return _http_error(409, "pairing challenge target is unavailable")
-                challenge, code = await self.collaboration.create_pairing_challenge(
-                    user.id,
-                    purpose=PairingPurpose(required_string(payload, "purpose")),
-                    organization_id=required_string(payload, "organization_id"),
-                    bot_id=required_string(payload, "bot_id"),
-                    channel_type=channel_type,
-                    instance_id=instance_id,
-                    channel_revision=target.revision,
-                    project_id=optional_string(payload, "project_id"),
-                )
-                return _http_json_response(
-                    {"pairing": pairing_challenge_payload(challenge, code=code)}
-                )
+                return await self._create_collaboration_pairing(user, payload)
             if operation == "pairing/consume":
-                challenge_id = required_string(payload, "challenge_id")
-                challenge = await self.collaboration.get_pairing_challenge(
-                    user.id, challenge_id
-                )
-                if challenge is None:
-                    return _http_error(404, "pairing challenge not found")
-                registry = self.settings.extensions
-                if registry is None:
-                    return _http_error(503, "extension registry is unavailable")
-                from nanobot.extensions.contracts import ExtensionAction, ExtensionSource
-                from nanobot.extensions.targets import resolve_extension_feature_target
-                from nanobot.webui.nanobot_features_api import (
-                    execute_nanobot_extension_action,
-                )
-
-                try:
-                    target = resolve_extension_feature_target(
-                        registry.snapshot(), challenge.channel_type, challenge.instance_id
-                    )
-                except Exception:
-                    self._log.exception("unable to resolve pairing challenge target")
-                    return _http_error(500, "pairing challenge target is unavailable")
-                if (
-                    target is None
-                    or target.source is not ExtensionSource.CHANNEL_PACKAGE
-                    or not target.revision
-                ):
-                    return _http_error(409, "pairing challenge target is unavailable")
-                challenge = await self.collaboration.consume_pairing_challenge(
-                    user.id, challenge_id, channel_revision=target.revision
-                )
-                activation: dict[str, object] = {
-                    "ok": False,
-                    "message": "Channel activation could not be completed.",
-                }
-                try:
-                    result = await execute_nanobot_extension_action(
-                        registry,
-                        action=ExtensionAction.ENABLE,
-                        name=challenge.channel_type,
-                        instance_id=challenge.instance_id,
-                        extension_id=target.target_id,
-                        expected_revision=target.revision,
-                        risk_acknowledged=True,
-                        actor_id=user.id,
-                        is_system_admin=True,
-                        package_install_allowed=False,
-                        channel_pairing_completed=True,
-                    )
-                except Exception:
-                    result = None
-                if result is not None and result.ok:
-                    activation = {
-                        "ok": True,
-                        "action": result.action.value,
-                        "package_id": result.package_id,
-                        "target_id": result.target_id,
-                        "lifecycle": result.lifecycle.value if result.lifecycle else None,
-                        "message": result.message,
-                    }
-                return _http_json_response(
-                    {
-                        "pairing": pairing_challenge_payload(challenge),
-                        "channel_activation": activation,
-                    }
-                )
+                return await self._consume_collaboration_pairing(user, payload)
             if operation == "project/create":
                 return await self._create_collaboration_project(user, payload)
+            if operation == "project/update":
+                return await self._update_collaboration_project(user, payload)
+            if operation == "project/delete":
+                deleted = await self.collaboration.delete_project(
+                    required_string(payload, "project_id"), user.id
+                )
+                return _http_json_response({"deleted": deleted})
             if operation == "project/member/add":
                 raw_role = payload.get("role", MembershipRole.MEMBER.value)
                 member = await self.collaboration.add_member(
@@ -1929,40 +1428,21 @@ class GatewayHTTPHandler:
                     required_string(payload, "member_user_id"),
                 )
                 return _http_json_response({"deleted": deleted})
-            if operation == "task-list/create":
-                project_id = required_string(payload, "project_id")
-                item = await self.collaboration.create_task_list(
-                    project_id, user.id, required_string(payload, "name"), position=optional_position(payload)
+            if operation == "assignment/update":
+                assignment = await self.collaboration.update_channel_assignment(
+                    user.id,
+                    channel_type=required_string(payload, "channel_type"),
+                    instance_id=required_string(payload, "instance_id"),
+                    enabled=optional_enabled(payload),
                 )
-                return _http_json_response({"task_list": task_list_payload(item)})
-            if operation == "task/create":
-                task = await self.collaboration.create_task(
-                    required_string(payload, "project_id"), required_string(payload, "task_list_id"),
-                    user.id, required_string(payload, "title"),
-                    description=optional_string(payload, "description") or "",
-                    assignee_user_id=create_assignee(payload),
-                    status=optional_status(payload) or TaskStatus.TODO,
-                    position=optional_position(payload),
+                return _http_json_response({"assignment": channel_assignment_payload(assignment)})
+            if operation == "assignment/delete":
+                deleted = await self.collaboration.delete_channel_assignment(
+                    user.id,
+                    channel_type=required_string(payload, "channel_type"),
+                    instance_id=required_string(payload, "instance_id"),
                 )
-                return _http_json_response({"task": task_payload(task)})
-            if operation == "task/update":
-                return await self._update_collaboration_task(user, payload)
-            if operation == "task/delete":
-                return await self._delete_collaboration_task(user, payload)
-            if operation == "extensions/update":
-                return await self._update_collaboration_extensions(user, payload)
-            if operation == "context-source/create":
-                enabled = optional_enabled(payload)
-                source = await self.collaboration.create_context_source(
-                    required_string(payload, "project_id"), user.id, required_string(payload, "name"),
-                    required_source_kind(payload), config=optional_config(payload) or {},
-                    enabled=True if enabled is None else enabled,
-                )
-                return _http_json_response({"context_source": context_source_payload(source)})
-            if operation == "context-source/update":
-                return await self._update_collaboration_context_source(user, payload)
-            if operation == "context-source/delete":
-                return await self._delete_collaboration_context_source(user, payload)
+                return _http_json_response({"deleted": deleted})
         except CollaborationConflictError:
             return _http_error(409, "collaboration revision conflict")
         except ValueError:
@@ -1970,6 +1450,94 @@ class GatewayHTTPHandler:
         except CollaborationStoreError:
             return _http_error(404, "collaboration resource not found")
         return _http_error(404, "unknown collaboration mutation")
+
+    async def _create_collaboration_pairing(
+        self, user: User, payload: Mapping[str, object]
+    ) -> Response:
+        channel_type = required_string(payload, "channel_type")
+        instance_id = required_string(payload, "instance_id")
+        registry = self.settings.extensions
+        if registry is None:
+            return _http_error(503, "extension registry is unavailable")
+        try:
+            snapshot = registry.snapshot()
+        except Exception:
+            self._log.exception("unable to resolve pairing challenge target")
+            return _http_error(500, "pairing challenge target is unavailable")
+        if (channel_type, instance_id) not in set(_channel_instances_in_snapshot(snapshot)):
+            return _http_error(409, "pairing challenge target is unavailable")
+        challenge, code = await self.collaboration.create_pairing_challenge(
+            user.id,
+            project_id=required_string(payload, "project_id"),
+            channel_type=channel_type,
+            instance_id=instance_id,
+            assignee_user_id=optional_string(payload, "assignee_user_id"),
+        )
+        return _http_json_response({"pairing": pairing_challenge_payload(challenge, code=code)})
+
+    async def _consume_collaboration_pairing(
+        self, user: User, payload: Mapping[str, object]
+    ) -> Response:
+        challenge_id = required_string(payload, "challenge_id")
+        challenge = await self.collaboration.get_pairing_challenge(user.id, challenge_id)
+        if challenge is None:
+            return _http_error(404, "pairing challenge not found")
+        registry = self.settings.extensions
+        if registry is None:
+            return _http_error(503, "extension registry is unavailable")
+        from nanobot.extensions.contracts import ExtensionAction, ExtensionSource
+        from nanobot.extensions.targets import resolve_extension_feature_target
+        from nanobot.webui.nanobot_features_api import execute_nanobot_extension_action
+
+        try:
+            target = resolve_extension_feature_target(
+                registry.snapshot(), challenge.channel_type, challenge.instance_id
+            )
+        except Exception:
+            self._log.exception("unable to resolve pairing challenge target")
+            return _http_error(500, "pairing challenge target is unavailable")
+        if (
+            target is None
+            or target.source is not ExtensionSource.CHANNEL_PACKAGE
+            or not target.revision
+        ):
+            return _http_error(409, "pairing challenge target is unavailable")
+        challenge = await self.collaboration.consume_pairing_challenge(user.id, challenge_id)
+        activation: dict[str, object] = {
+            "ok": False,
+            "message": "Channel activation could not be completed.",
+        }
+        try:
+            result = await execute_nanobot_extension_action(
+                registry,
+                action=ExtensionAction.ENABLE,
+                name=challenge.channel_type,
+                instance_id=challenge.instance_id,
+                extension_id=target.target_id,
+                expected_revision=target.revision,
+                risk_acknowledged=True,
+                actor_id=user.id,
+                is_system_admin=True,
+                package_install_allowed=False,
+                channel_pairing_completed=True,
+            )
+        except Exception:
+            result = None
+        if result is not None and result.ok:
+            activation = {
+                "ok": True,
+                "action": result.action.value,
+                "package_id": result.package_id,
+                "target_id": result.target_id,
+                "lifecycle": result.lifecycle.value if result.lifecycle else None,
+                "message": result.message,
+            }
+        return _http_json_response(
+            {
+                "pairing": pairing_challenge_payload(challenge),
+                "channel_activation": activation,
+            }
+        )
 
     async def _create_collaboration_project(
         self, user: User, payload: Mapping[str, object]
@@ -1987,101 +1555,33 @@ class GatewayHTTPHandler:
 
         await asyncio.to_thread(create_workspace)
         try:
-            project = await self.collaboration.create_project(
-                user.id, name, workspace,
-                organization_id=optional_string(payload, "organization_id"),
-            )
+            project = await self.collaboration.create_project(user.id, name, workspace)
         except Exception:
             await asyncio.to_thread(workspace.rmdir)
             raise
         return _http_json_response({"project": project_payload(project)})
 
-    async def _project_task(self, user: User, payload: Mapping[str, object]) -> Task:
-        task = await self.collaboration.get_task(user.id, required_string(payload, "task_id"))
-        if task is None or task.project_id != required_string(payload, "project_id"):
-            raise CollaborationStoreError("task is unavailable")
-        return task
-
-    async def _update_collaboration_task(
-        self, user: User, payload: Mapping[str, object]
-    ) -> Response:
-        task = await self._project_task(user, payload)
-        values = payload.get("values")
-        if not isinstance(values, Mapping):
-            raise ValueError("values must be an object")
-        task_values: dict[str, object] = {}
-        for key, value in cast(Mapping[object, object], values).items():
-            if not isinstance(key, str):
-                raise ValueError("values must be an object")
-            task_values[key] = value
-        updated = await self.collaboration.update_task(
-            task.id, user.id, title=optional_string(task_values, "title"),
-            description=optional_string(task_values, "description"), status=optional_status(task_values),
-            assignee_user_id=update_assignee(task_values), position=optional_position(task_values),
-        )
-        return _http_json_response({"task": task_payload(updated)})
-
-    async def _delete_collaboration_task(
-        self, user: User, payload: Mapping[str, object]
-    ) -> Response:
-        task = await self._project_task(user, payload)
-        await self.collaboration.delete_task(task.id, user.id)
-        return _http_json_response({"deleted": True})
-
-    async def _update_collaboration_extensions(
+    async def _update_collaboration_project(
         self, user: User, payload: Mapping[str, object]
     ) -> Response:
         project_id = required_string(payload, "project_id")
-        available = self._collaboration_available()
-        revision = payload.get("revision")
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
-            raise ValueError("revision must be a non-negative integer")
-        profile = await self.collaboration.update_extension_profile(
-            user.id, project_id,
-            profile_settings(
-                payload.get("settings"),
+        name = optional_string(payload, "name")
+        allowlists: dict[str, list[str] | None] = {}
+        if "capabilities" in payload:
+            available = self._collaboration_available()
+            allowlists = capability_allowlists(
+                payload.get("capabilities"),
                 available_skill_ids={item["id"] for item in available["skills"]},
                 available_mcp_ids={item["id"] for item in available["mcp_servers"]},
-            ),
-            expected_revision=revision,
+            )
+        project = await self.collaboration.update_project(
+            project_id,
+            user.id,
+            name=name,
+            allowed_skills=allowlists.get("allowed_skills", ...),
+            allowed_mcp_servers=allowlists.get("allowed_mcp_servers", ...),
         )
-        return _http_json_response({"extension_profile": extension_profile_payload(profile)})
-
-    async def _project_context_source(
-        self, user: User, payload: Mapping[str, object]
-    ) -> ContextSource:
-        source = await self.collaboration.get_context_source(
-            user.id, required_string(payload, "source_id")
-        )
-        if source is None or source.project_id != required_string(payload, "project_id"):
-            raise CollaborationStoreError("context source is unavailable")
-        return source
-
-    async def _update_collaboration_context_source(
-        self, user: User, payload: Mapping[str, object]
-    ) -> Response:
-        source = await self._project_context_source(user, payload)
-        values = payload.get("values")
-        if not isinstance(values, Mapping):
-            raise ValueError("values must be an object")
-        source_values: dict[str, object] = {}
-        for key, value in cast(Mapping[object, object], values).items():
-            if not isinstance(key, str):
-                raise ValueError("values must be an object")
-            source_values[key] = value
-        updated = await self.collaboration.update_context_source(
-            source.id, user.id, name=optional_string(source_values, "name"),
-            kind=optional_source_kind(source_values), config=optional_config(source_values),
-            enabled=optional_enabled(source_values),
-        )
-        return _http_json_response({"context_source": context_source_payload(updated)})
-
-    async def _delete_collaboration_context_source(
-        self, user: User, payload: Mapping[str, object]
-    ) -> Response:
-        source = await self._project_context_source(user, payload)
-        await self.collaboration.delete_context_source(source.id, user.id)
-        return _http_json_response({"deleted": True})
+        return _http_json_response({"project": project_payload(project)})
 
     def _log_slow_http(self, path: str, response: Any | None, started: float) -> None:
         elapsed_ms = int((time.perf_counter() - started) * 1000)

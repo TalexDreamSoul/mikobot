@@ -230,7 +230,7 @@ class SendSessionMessageTool(Tool):
         if source is None:
             raise SessionMessageError("source session was not found")
         if not same_privacy_scope(source.session_key, target.session_key):
-            raise SessionMessageError("cross-vault session messaging is not authorized")
+            raise SessionMessageError("cross-user session messaging is not authorized")
         envelope: SessionMessageEnvelope = {
             "message_id": uuid4().hex,
             "created_at_ms": int(time.time() * 1000),

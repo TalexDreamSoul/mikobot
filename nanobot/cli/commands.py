@@ -814,38 +814,6 @@ def mcp_import_codex(
         raise typer.Exit(1) from exc
     typer.echo(json.dumps(imported, indent=2, ensure_ascii=False))
 
-@mcp_app.command("serve")
-def mcp_serve(
-    project_id: str | None = typer.Option(
-        None,
-        "--project-id",
-        help="Local-owner project id to expose; defaults to the owner's default project",
-    ),
-    config: str | None = typer.Option(None, "--config", "-c", help="Path to nanobot config file"),
-) -> None:
-    """Serve project tasks and bounded context to local MCP clients over stdio."""
-    from nanobot.collaboration import build_collaboration_repository
-    from nanobot.collaboration.mcp_server import run_collaboration_mcp
-    from nanobot.config.loader import load_config, set_config_path
-
-    if config:
-        set_config_path(Path(config).expanduser().resolve(strict=False))
-    loaded = load_config()
-    collaboration = build_collaboration_repository()
-
-    async def _serve() -> None:
-        try:
-            await collaboration.initialize()
-            await run_collaboration_mcp(
-                collaboration,
-                workspace_path=loaded.workspace_path,
-                project_id=project_id,
-            )
-        finally:
-            await collaboration.aclose()
-
-    asyncio.run(_serve())
-
 
 # ============================================================================
 # Status Commands

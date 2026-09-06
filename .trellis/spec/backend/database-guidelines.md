@@ -185,18 +185,25 @@ new store needs the same bound.
 
 ### 1. Scope / Trigger
 
-This contract applies to cross-layer changes involving organizations, projects, deployable bots,
-channel instances, Pairing Challenges, OIDC settings, or collaboration state.
-The boundary is security-sensitive: a transport credential is kept in server-owned configuration,
+This contract applies to cross-layer changes involving projects, project membership, channel
+instances, channel assignments, Pairing Challenges, OIDC settings, or collaboration state. The
+boundary is security-sensitive: a transport credential is kept in server-owned configuration,
 while collaboration persistence stores ownership and assignment references.
+
+Authorization has two levels. A **system administrator** is the local owner or an OIDC subject
+listed in `admin_subjects`; the gateway records that on `User.is_admin` from the authenticated
+principal, never from a payload. A **project owner** manages one project's members and
+assignments. Everyone else is a member of the projects they were added to.
 
 ### 2. Signatures
 
-- `CollaborationRepository.create_pairing_challenge(actor_user_id, *, purpose,
-  organization_id, bot_id, channel_type, instance_id, project_id=None, ttl_seconds=600)`
+- `CollaborationRepository.create_pairing_challenge(actor_user_id, *, project_id,
+  channel_type, instance_id, assignee_user_id=None, ttl_seconds=600)`
 - `CollaborationRepository.verify_pairing_challenge(code, *, channel_type, instance_id,
   sender_id)`
 - `CollaborationRepository.consume_pairing_challenge(actor_user_id, challenge_id)`
+- `CollaborationRepository.resolve_channel_assignment(channel_type, instance_id)` is the
+  runtime lookup channels use; it takes no actor because the instance is the subject.
 - `WebUISettingsConfig.update(mutation)` performs a path-scoped read-modify-write under the
   config file lock.
 - QR credential writers (`save_registration_result` in `nanobot/channels/feishu/runtime.py` and
@@ -205,32 +212,45 @@ while collaboration persistence stores ownership and assignment references.
 
 ### 3. Contracts (request / response / database)
 
-- Pairing purposes are exactly `claim_channel` and `assign_bot_project`.
+- A Pair Code hands one channel instance to one project on behalf of one member (the
+  assignee). A project owner or administrator may name any assignee; a member may only pair an
+  instance they connected themselves, into a project they belong to, for themselves.
 - A challenge is one-time, stores only `code_digest`, expires in 60–900 seconds, and binds one
-  organization, bot, channel type, instance ID, and optional project ID.
+  project, assignee, channel type, and instance ID.
 - Verification requires the exact channel type, instance ID, and external sender. It binds the
-  sender identity only after the digest and lifetime checks pass.
-- Consumption is actor-bound and atomically creates the claim or project route. A channel claim
-  is globally unique by `(channel_type, instance_id)`.
+  sender identity to the assignee only after the digest and lifetime checks pass.
+- Consumption is actor-bound and atomically writes the `ChannelAssignment`, which is globally
+  unique by `(channel_type, instance_id)`. The assignee becomes a project member if they were
+  not one already.
+- `resolve_scope` routes an assigned instance's direct messages to the assigned project and
+  admits only that project's members; an unassigned instance on a channel that requires
+  assignment (`CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY`) is denied, never routed to the
+  sender's personal default project.
+- Project capability allowlists (`allowed_skills`, `allowed_mcp_servers`) are the only
+  per-project runtime restrictions. `None` means unrestricted.
 - Successful QR login persists `enabled=false` and `pairingRequired=true`; activation clears the
   marker only after the collaboration Pairing Challenge is consumed.
 - Public channel projections may include `pairing_only=true`, configured-field names, and
   non-secret values. They must not include secrets, tokens, environment values, or absolute
   host paths.
-- Schema migration must preserve legacy projects, personas, shared defaults, and profile scope.
+- The v9 migration collapses the retired organization/bot/vault document: users, identities,
+  projects, memberships, provenance, and bindings survive; bot channel claims become
+  assignments; everything else is dropped and counted in the log, with a `.v<N>.bak.json`
+  copy written first.
 
 ### 4. Validation and error matrix
 
 | Condition | Required result |
 | --- | --- |
-| Wrong instance, purpose, sender, expired, or reused code | Not found/conflict; no assignment |
+| Wrong instance, sender, expired, or reused code | Not found/conflict; no assignment |
 | Code verified by a second sender | Conflict; first verification remains authoritative |
-| Unclaimed channel control by an ordinary user | HTTP 403 |
-| Claimed channel control by its owner or organization admin | Allowed after repository visibility check |
+| Member pairs an instance they did not connect, or for someone else | Permission error |
+| Unassigned channel control by an ordinary user | HTTP 403 |
+| Channel control by the instance's assignee or an administrator | Allowed |
 | OIDC update with a stale snapshot | HTTP 409; current secret/config remains unchanged |
 | Invalid OIDC discovery or redirect | HTTP 400 with field errors; no write |
-| Project deletion | Remove project-scoped bot routes/profiles/challenges; retain global bot profile |
-| Shared bot used by another member | Resolve that member's own persona/vault; never owner's persona vault |
+| Project deletion | Remove memberships, assignments, challenges, and bindings for it |
+| Message on an assigned instance from a non-member | Isolated scope with `route_denied` |
 
 ### 5. Good / Base / Bad cases
 
@@ -238,18 +258,19 @@ while collaboration persistence stores ownership and assignment references.
   and activation occurs only after verified consumption.
 - **Base**: Existing flat single-instance configuration is normalized to `default` without
   changing credentials or state location.
-- **Bad**: Trusting a browser-supplied actor ID, enabling an unclaimed instance, copying every
-  legacy profile into a bot, or writing a stale full config snapshot over a newer OIDC secret.
+- **Bad**: Trusting a browser-supplied actor ID or admin flag, enabling an unassigned
+  instance, or writing a stale full config snapshot over a newer OIDC secret.
 
 ### 6. Tests required
 
-- Local migration tests assert schema upgrade, shared default preservation, and profile scope.
-- Pairing tests assert exact target matching, expiry, reuse, competing senders, claim uniqueness,
-  route denial, and disabled-bot revocation.
+- Local migration tests assert the v9 collapse keeps users, projects, memberships, and turns
+  claims into assignments.
+- Pairing tests assert exact target matching, expiry, reuse, competing senders, assignment
+  uniqueness, member self-service limits, and route denial.
 - Channel tests assert preflight Pair Code handling before reactions/media/typing and isolated
   Weixin state directories.
-- WebUI tests assert ordinary claimed owners can control their instance while unclaimed users
-  receive 403, and that OIDC reads redact secrets and stale writes return 409.
+- WebUI tests assert an assignee can control their instance while others receive 403, and
+  that OIDC reads redact secrets and stale writes return 409.
 - Run `uv run --no-sync pytest -q`, `uv run ruff check nanobot tests`, and
   `uv run --no-sync basedpyright`.
 
@@ -277,8 +298,6 @@ section, apply only the channel-instance mutation, and save the same path atomic
 
 - Do not expose `client_secret`, channel tokens, or absolute skill/workspace paths in a projection.
 - Do not use a legacy `allowFrom` entry as proof that a protected channel instance was claimed.
-- Do not silently reset a user's valid shared organization/bot selection while repairing personal
-  defaults.
 - Do not add a field to a domain dataclass without updating the codec (`store.py`
   `_<entity>` / `_encode_<entity>`) and `_empty()`. The strict shape check will reject records the
   moment they disagree.

@@ -2648,12 +2648,6 @@ function Shell({
 
   const sidebarProps = {
     sessions: sidebarTopicSessions,
-    organizations: collaboration.summary?.organizations ?? [],
-    bots: collaboration.summary?.bots ?? [],
-    activeOrganizationId: collaboration.organizationId,
-    activeBotId: collaboration.botId,
-    onSelectOrganization: collaboration.selectOrganization,
-    onSelectBot: collaboration.selectBot,
     temporarySessions: temporarySessionList,
     activeKey: view === "chat"
       ? (temporaryChatActive ? activeKey : activeSidebarKey)

@@ -1,85 +1,55 @@
 import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  Bot as BotIcon,
   Brain,
-  Building2,
+  Cable,
   ChevronDown,
-  Files,
   FolderKanban,
-  ListTodo,
   Loader2,
   Menu,
   Plus,
-  Settings2,
+  Trash2,
   Users,
   X,
   type LucideIcon,
 } from "lucide-react";
 
-import { BotManagementPanel } from "@/components/projects/BotManagementPanel";
-import { ContextSourcesPanel } from "@/components/projects/ContextSourcesPanel";
-import { ExtensionsPanel } from "@/components/projects/ExtensionsPanel";
-import { OrganizationManagement } from "@/components/projects/OrganizationManagement";
-import { PersonalTasksPanel } from "@/components/projects/PersonalTasksPanel";
+import { CapabilitiesPanel } from "@/components/projects/CapabilitiesPanel";
+import { ChannelAssignmentsPanel } from "@/components/projects/ChannelAssignmentsPanel";
 import { ProjectMembersPanel } from "@/components/projects/ProjectMembersPanel";
-import { TaskBoard } from "@/components/projects/TaskBoard";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useCollaborationProjects } from "@/hooks/useCollaborationProjects";
-import type { CollaborationOrganization, CollaborationProject } from "@/lib/types";
+import type { CollaborationProjectsController } from "@/hooks/useCollaborationProjects";
+import type { CollaborationProject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type ProjectPanel = "personal" | "tasks" | "bots" | "members" | "extensions" | "context";
+type ProjectPanel = "channels" | "members" | "capabilities";
 
 const PROJECT_PANELS: Array<{
   id: ProjectPanel;
   labelKey: string;
   icon: LucideIcon;
 }> = [
-  { id: "personal", labelKey: "projects.panels.personal", icon: ListTodo },
-  { id: "tasks", labelKey: "projects.panels.tasks", icon: ListTodo },
-  { id: "bots", labelKey: "projects.panels.bots", icon: BotIcon },
+  { id: "channels", labelKey: "projects.panels.channels", icon: Cable },
   { id: "members", labelKey: "projects.panels.members", icon: Users },
-  { id: "extensions", labelKey: "projects.panels.extensions", icon: Brain },
-  { id: "context", labelKey: "projects.panels.context", icon: Files },
+  { id: "capabilities", labelKey: "projects.panels.capabilities", icon: Brain },
 ];
 
-function OrganizationSelector({
-  id,
-  organizations,
-  selectedId,
-  personalOrganizationId,
-  onSelect,
-}: {
-  id: string;
-  organizations: CollaborationOrganization[];
-  selectedId: string | null;
-  personalOrganizationId: string | null;
-  onSelect: (id: string) => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div className="relative min-w-0 flex-1">
-      <label htmlFor={id} className="sr-only">{t("projects.organizationScope")}</label>
-      <select
-        id={id}
-        value={selectedId ?? ""}
-        onChange={(event) => onSelect(event.target.value)}
-        disabled={!organizations.length}
-        className="h-11 w-full appearance-none truncate rounded-control border border-input bg-background py-2 pl-3 pr-9 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
-      >
-        {organizations.map((organization) => (
-          <option key={organization.id} value={organization.id}>
-            {organization.id === personalOrganizationId
-              ? t("projects.personalOrganizationOption", { name: organization.name })
-              : t("projects.sharedOrganizationOption", { name: organization.name })}
-          </option>
-        ))}
-      </select>
-      <ChevronDown className="pointer-events-none absolute right-3 top-3.5 h-4 w-4 text-muted-foreground" aria-hidden />
-    </div>
-  );
+function initialPanel(): ProjectPanel {
+  const hash = window.location.hash;
+  if (hash.includes("section=members")) return "members";
+  if (hash.includes("section=capabilities")) return "capabilities";
+  return "channels";
 }
 
 function ProjectList({
@@ -127,14 +97,10 @@ function ProjectList({
 
 function NewProjectForm({
   busy,
-  organizationName,
-  personal,
   onCancel,
   onCreate,
 }: {
   busy: boolean;
-  organizationName: string;
-  personal: boolean;
   onCancel: () => void;
   onCreate: (name: string) => Promise<unknown>;
 }) {
@@ -163,11 +129,7 @@ function NewProjectForm({
           <span className="sr-only">{t("projects.cancelNewProject")}</span>
         </Button>
       </div>
-      <p className="mt-1 text-xs leading-5 text-muted-foreground">
-        {personal
-          ? t("projects.createInPersonal")
-          : t("projects.createInOrganization", { name: organizationName })}
-      </p>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">{t("projects.createDescription")}</p>
       <div className="mt-3 flex gap-2">
         <Input
           id="new-project-name"
@@ -204,23 +166,28 @@ export function ProjectsView({
   onToggleSidebar,
   hostChromeInset = false,
 }: {
-  projects: ReturnType<typeof useCollaborationProjects>;
+  projects: CollaborationProjectsController;
   onToggleSidebar: () => void;
   hostChromeInset?: boolean;
 }) {
   const { t } = useTranslation();
-  const [panel, setPanel] = useState<ProjectPanel>(() =>
-    window.location.hash.includes("section=bots") ? "bots" : "tasks"
-  );
+  const [panel, setPanel] = useState<ProjectPanel>(initialPanel);
   const [showNewProject, setShowNewProject] = useState(false);
-  const [showOrganizationManagement, setShowOrganizationManagement] = useState(false);
-  const organizations = projects.summary?.organizations ?? [];
-  const selectedOrganization = organizations.find((organization) => organization.id === projects.organizationId) ?? null;
-  const organizationProjects = (projects.summary?.projects ?? []).filter((project) => (
-    project.organization_id === projects.organizationId
-  ));
-  const selectedProject = organizationProjects.find((project) => project.id === projects.projectId) ?? null;
-  const personalScope = selectedOrganization?.id === projects.personalOrganizationId;
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const allProjects = projects.summary?.projects ?? [];
+  const selectedProject = allProjects.find((project) => project.id === projects.projectId) ?? null;
+  const canManage = projects.detail?.can_manage ?? false;
+  const currentUserId = projects.summary?.user.id ?? "";
+
+  const deleteProject = async () => {
+    try {
+      await projects.removeProject();
+    } catch {
+      // The shared project error region reports the failure.
+    } finally {
+      setConfirmDelete(false);
+    }
+  };
 
   return (
     <>
@@ -233,29 +200,14 @@ export function ProjectsView({
             <p className="text-xs font-medium text-muted-foreground">{t("projects.workspaceLabel")}</p>
             <h1 className="mt-1 text-lg font-semibold tracking-tight">{t("projects.title")}</h1>
             {projects.summary?.user.display_name ? (
-              <p className="mt-1 truncate text-xs text-muted-foreground">{projects.summary.user.display_name}</p>
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {projects.summary.user.display_name}
+                {projects.isAdmin ? ` · ${t("projects.administrator")}` : ""}
+              </p>
             ) : null}
           </div>
-          <div className="mb-3 space-y-2">
-            <OrganizationSelector
-              id="desktop-organization-switcher"
-              organizations={organizations}
-              selectedId={projects.organizationId}
-              personalOrganizationId={projects.personalOrganizationId}
-              onSelect={projects.selectOrganization}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setShowOrganizationManagement(true)}
-              className="h-10 w-full justify-start px-3 text-muted-foreground"
-            >
-              <Settings2 className="mr-2 h-4 w-4" aria-hidden />
-              {t("projects.manageOrganizations")}
-            </Button>
-          </div>
           <ProjectList
-            projects={organizationProjects}
+            projects={allProjects}
             selectedId={projects.projectId}
             onSelect={projects.selectProject}
           />
@@ -263,7 +215,6 @@ export function ProjectsView({
             type="button"
             variant="ghost"
             onClick={() => setShowNewProject(true)}
-            disabled={!selectedOrganization}
             className="mt-2 h-10 w-full justify-start px-3 text-muted-foreground"
           >
             <Plus className="mr-2 h-4 w-4" aria-hidden />
@@ -287,32 +238,23 @@ export function ProjectsView({
               >
                 <Menu className="h-5 w-5" aria-hidden />
               </Button>
-              <div className="flex min-w-0 flex-1 gap-2 lg:hidden">
-                <OrganizationSelector
-                  id="mobile-organization-switcher"
-                  organizations={organizations}
-                  selectedId={projects.organizationId}
-                  personalOrganizationId={projects.personalOrganizationId}
-                  onSelect={projects.selectOrganization}
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={() => setShowOrganizationManagement(true)}
-                  aria-label={t("projects.manageOrganizations")}
-                  className="h-11 w-11 shrink-0"
-                >
-                  <Settings2 className="h-4 w-4" aria-hidden />
-                </Button>
-              </div>
-              <div className="hidden min-w-0 flex-1 lg:block">
+              <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2">
-                  <h2 className="truncate text-lg font-semibold tracking-tight">{selectedProject?.name ?? selectedOrganization?.name ?? t("projects.title")}</h2>
-                  {selectedOrganization ? (
-                    <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                      {personalScope ? t("projects.personalLabel") : t("projects.sharedLabel")}
-                    </span>
+                  <h2 className="truncate text-lg font-semibold tracking-tight">
+                    {selectedProject?.name ?? t("projects.title")}
+                  </h2>
+                  {selectedProject && canManage ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setConfirmDelete(true)}
+                      disabled={Boolean(projects.busyKey)}
+                      aria-label={t("projects.deleteProject")}
+                      className="h-9 w-9 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden />
+                    </Button>
                   ) : null}
                 </div>
               </div>
@@ -325,11 +267,11 @@ export function ProjectsView({
                   id="mobile-project-switcher"
                   value={projects.projectId ?? ""}
                   onChange={(event) => projects.selectProject(event.target.value)}
-                  disabled={!organizationProjects.length}
+                  disabled={!allProjects.length}
                   className="h-11 w-full appearance-none truncate rounded-control border border-input bg-background py-2 pl-3 pr-9 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
                 >
-                  {!organizationProjects.length ? <option value="">{t("projects.noProjectsInOrganization")}</option> : null}
-                  {organizationProjects.map((project) => (
+                  {!allProjects.length ? <option value="">{t("projects.noProjectsYet")}</option> : null}
+                  {allProjects.map((project) => (
                     <option key={project.id} value={project.id}>{project.name}</option>
                   ))}
                 </select>
@@ -339,7 +281,6 @@ export function ProjectsView({
                 type="button"
                 variant="outline"
                 onClick={() => setShowNewProject((open) => !open)}
-                disabled={!selectedOrganization}
                 aria-label={t("projects.newProject")}
                 className="h-11 w-11 shrink-0 px-0 sm:w-auto sm:px-3"
               >
@@ -348,9 +289,9 @@ export function ProjectsView({
               </Button>
             </div>
 
-            {selectedOrganization ? (
+            {selectedProject ? (
               <nav aria-label={t("projects.sectionsAria")} className="mt-3 flex gap-1 overflow-x-auto rounded-control bg-muted p-1">
-                {PROJECT_PANELS.filter(({ id }) => selectedProject || id === "bots").map(({ id, labelKey, icon: Icon }) => (
+                {PROJECT_PANELS.map(({ id, labelKey, icon: Icon }) => (
                   <button
                     key={id}
                     type="button"
@@ -387,11 +328,9 @@ export function ProjectsView({
                 </div>
               ) : null}
 
-              {showNewProject && selectedOrganization ? (
+              {showNewProject ? (
                 <NewProjectForm
                   busy={projects.busyKey === "project:create"}
-                  organizationName={selectedOrganization.name}
-                  personal={personalScope}
                   onCancel={() => setShowNewProject(false)}
                   onCreate={projects.createProject}
                 />
@@ -399,28 +338,12 @@ export function ProjectsView({
 
               {projects.loading && !projects.summary ? (
                 <LoadingSurface />
-              ) : !organizations.length ? (
-                <div className="rounded-panel bg-settings-surface px-5 py-10 text-center">
-                  <Building2 className="mx-auto h-6 w-6 text-muted-foreground" aria-hidden />
-                  <h2 className="mt-3 text-base font-semibold">{t("projects.noOrganization")}</h2>
-                  <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
-                    {t("projects.noOrganizationDescription")}
-                  </p>
-                  <Button type="button" onClick={() => setShowOrganizationManagement(true)} className="mt-5">
-                    <Settings2 className="mr-2 h-4 w-4" aria-hidden />
-                    Organization settings
-                  </Button>
-                </div>
-              ) : panel === "bots" ? (
-                <BotManagementPanel projects={projects} />
-              ) : !organizationProjects.length ? (
+              ) : !allProjects.length ? (
                 <div className="rounded-panel bg-settings-surface px-5 py-10 text-center">
                   <FolderKanban className="mx-auto h-6 w-6 text-muted-foreground" aria-hidden />
-                  <h2 className="mt-3 text-base font-semibold">{t("projects.noProjectsNamed", { name: selectedOrganization?.name })}</h2>
+                  <h2 className="mt-3 text-base font-semibold">{t("projects.noProjectsYet")}</h2>
                   <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
-                    {t("projects.noProjectsDescription", {
-                      scope: personalScope ? t("projects.personalLabel") : t("projects.sharedLabel"),
-                    })}
+                    {t("projects.noProjectsDescription")}
                   </p>
                   {!showNewProject ? (
                     <Button type="button" onClick={() => setShowNewProject(true)} className="mt-5">
@@ -441,42 +364,22 @@ export function ProjectsView({
                     {t("common.retry")}
                   </Button>
                 </div>
-              ) : panel === "personal" ? (
-                <PersonalTasksPanel />
-              ) : panel === "tasks" ? (
-                <TaskBoard
-                  detail={projects.detail}
-                  busyKey={projects.busyKey}
-                  onCreateList={projects.createTaskList}
-                  onCreateTask={projects.createTask}
-                  onUpdateTaskStatus={projects.updateTaskStatus}
-                  onDeleteTask={projects.deleteTask}
-                />
+              ) : panel === "channels" ? (
+                <ChannelAssignmentsPanel detail={projects.detail} projects={projects} />
               ) : panel === "members" ? (
                 <ProjectMembersPanel
                   detail={projects.detail}
-                  currentUserId={projects.summary?.user.id ?? ""}
-                  organizationMembers={projects.organizationDetail?.organization.id === projects.detail.project.organization_id
-                    ? projects.organizationDetail.members
-                    : []}
-                  organizationLoading={projects.organizationLoading}
+                  currentUserId={currentUserId}
                   busyKey={projects.busyKey}
                   onAddMember={projects.addProjectMember}
                   onRemoveMember={projects.removeProjectMember}
                 />
-              ) : panel === "extensions" ? (
-                <ExtensionsPanel
-                  detail={projects.detail}
-                  busy={projects.busyKey === "extensions:save"}
-                  onSave={projects.saveExtensions}
-                />
               ) : (
-                <ContextSourcesPanel
+                <CapabilitiesPanel
                   detail={projects.detail}
-                  busyKey={projects.busyKey}
-                  onCreate={projects.createContextSource}
-                  onToggle={projects.toggleContextSource}
-                  onDelete={projects.deleteContextSource}
+                  busy={projects.busyKey === "capabilities:save"}
+                  canManage={canManage}
+                  onSave={projects.saveCapabilities}
                 />
               )}
             </div>
@@ -484,26 +387,25 @@ export function ProjectsView({
         </div>
       </div>
 
-      <OrganizationManagement
-        open={showOrganizationManagement}
-        onOpenChange={setShowOrganizationManagement}
-        organizations={organizations}
-        organizationId={projects.organizationId}
-        detail={projects.organizationDetail}
-        currentUserId={projects.summary?.user.id ?? ""}
-        personalOrganizationId={projects.personalOrganizationId}
-        projectCount={organizationProjects.length}
-        loading={projects.organizationLoading}
-        error={projects.organizationError ?? projects.error}
-        busyKey={projects.busyKey}
-        onSelectOrganization={projects.selectOrganization}
-        onRefresh={projects.refreshOrganization}
-        onCreate={projects.createOrganization}
-        onRename={projects.renameOrganization}
-        onDelete={projects.removeOrganization}
-        onAddMember={projects.addOrganizationMember}
-        onRemoveMember={projects.removeOrganizationMember}
-      />
+      <AlertDialog open={confirmDelete} onOpenChange={(next) => !next && setConfirmDelete(false)}>
+        <AlertDialogContent className="w-[min(calc(100vw-2rem),24rem)]">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("projects.deleteConfirmTitle", { name: selectedProject?.name })}</AlertDialogTitle>
+            <AlertDialogDescription className="break-words">
+              {t("projects.deleteConfirmDescription")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="h-11">{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => void deleteProject()}
+              className="h-11 bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {t("projects.deleteProject")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }
