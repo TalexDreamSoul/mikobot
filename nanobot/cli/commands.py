@@ -831,7 +831,7 @@ def mcp_serve(
     if config:
         set_config_path(Path(config).expanduser().resolve(strict=False))
     loaded = load_config()
-    collaboration = build_collaboration_repository(loaded.collaboration)
+    collaboration = build_collaboration_repository()
 
     async def _serve() -> None:
         try:

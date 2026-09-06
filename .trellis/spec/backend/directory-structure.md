@@ -49,7 +49,7 @@ nanobot/
 ├── bus/                MessageBus, InboundMessage/OutboundMessage, progress + runtime events
 ├── channels/           One self-contained package per platform (see below)
 ├── cli/                Typer CLI: commands.py, gateway.py, agent.py, onboard.py, entry.py
-├── collaboration/      Multi-tenant control plane; dual persistence backends
+├── collaboration/      Multi-tenant control plane over a local JSON store
 ├── command/            Slash command router + built-in handlers
 ├── config/             Pydantic schema, loader/saver, path helpers, file watcher
 ├── cron/               Cron service, job store, scheduled-turn delivery
@@ -213,7 +213,7 @@ over adding new conftest layers.
 |---|---|
 | A complete channel package | `nanobot/channels/feishu/` (manifest, runtime, connect, validation, tests, webui) |
 | A minimal channel manifest | `nanobot/channels/feishu/manifest.py` |
-| Dual-backend persistence behind one Protocol | `nanobot/collaboration/repository.py` + `local_repository.py` + `postgres/` |
+| Persistence behind one Protocol | `nanobot/collaboration/repository.py` + `local_repository.py` + `store.py` |
 | An edge adapter that isolates failures | `nanobot/extensions/adapters/channels.py` |
 | Transport-neutral route results | `nanobot/webui/settings_contracts.py` |
 | Discovery by `pkgutil` + entry points | `nanobot/agent/tools/loader.py`, `nanobot/channels/registry.py` |

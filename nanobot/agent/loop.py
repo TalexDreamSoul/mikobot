@@ -476,9 +476,7 @@ class AgentLoop:
                 sessions_root=data_dir / "sessions" if data_dir is not None else None,
             )
         if "collaboration_repository" not in extra:
-            extra["collaboration_repository"] = build_collaboration_repository(
-                config.collaboration
-            )
+            extra["collaboration_repository"] = build_collaboration_repository()
             extra.setdefault("owns_collaboration_repository", True)
         provider = extra.pop("provider", None) or make_provider(config)
         resolved = config.resolve_preset()

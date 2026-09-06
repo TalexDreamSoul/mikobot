@@ -175,15 +175,9 @@ collected by CI via `testpaths`. Put a channel's test next to its channel.
   write `@pytest.mark.asyncio` explicitly on async tests (2,700+ occurrences). A handful of
   files omit it. **Match the file you are editing.**
 - `pytest.mark.parametrize` is used heavily (~190 sites); prefer it over copy-pasted cases.
-- Integration tests that need external services skip themselves rather than failing. Pattern
-  from `tests/collaboration/test_postgres_repository.py`:
-
-  ```python
-  runtime_dsn = os.getenv("NANOBOT_TEST_POSTGRES_DSN")
-  migration_dsn = os.getenv("NANOBOT_TEST_POSTGRES_MIGRATION_DSN")
-  if not runtime_dsn or not migration_dsn:
-      pytest.skip("requires NANOBOT_TEST_POSTGRES_DSN and NANOBOT_TEST_POSTGRES_MIGRATION_DSN")
-  ```
+- Integration tests that need external services skip themselves rather than failing:
+  read the required setting from the environment and `pytest.skip(...)` with a message that
+  names it when it is absent.
 - Shared fixtures go in the root `conftest.py`. Only two other conftest files exist; do not add
   a third without a strong reason.
 - Tests are excluded from BasedPyright, so they may be looser — but they still pass `ruff`.
@@ -244,7 +238,7 @@ Boundaries:
 - [ ] Path handling goes through the workspace resolver with explicit read/write capability.
 - [ ] Outbound HTTP passes the SSRF guards.
 - [ ] Persistence writes stay atomic and, where shared across processes, hold the file lock.
-- [ ] Local and PostgreSQL collaboration backends still agree. See
+- [ ] Collaboration store changes ship a schema migration that preserves existing data. See
       [`database-guidelines.md`](./database-guidelines.md).
 
 Verification:

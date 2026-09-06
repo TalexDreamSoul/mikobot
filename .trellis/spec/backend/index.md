@@ -55,7 +55,7 @@ Before writing code:
    Do not invent a new shape for a problem the tree already solves.
 4. **Check for a persistence contract.** Any change to configuration, the collaboration store,
    or session/memory files must follow [Database Guidelines](./database-guidelines.md) —
-   especially the local/PostgreSQL equivalence invariant.
+   especially the schema-migration and file-lock rules.
 5. **Plan the test.** Which single regression test would have caught this? Where does it live —
    `tests/`, or the channel's own `nanobot/channels/<name>/tests/`?
 

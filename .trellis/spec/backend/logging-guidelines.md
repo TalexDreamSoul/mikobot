@@ -150,7 +150,7 @@ log names the internal operation, the return names the user-visible outcome.
 
 ### Secrets and credentials
 
-Never log API keys, channel tokens, `client_secret`, OAuth tokens, PostgreSQL DSNs, or
+Never log API keys, channel tokens, `client_secret`, OAuth tokens, or
 `Authorization` headers — not even truncated. Use the existing maskers when a hint is needed:
 `masked_api_secret` / `mask_secret_hint` (`nanobot/webui/settings_capabilities.py`,
 `nanobot/webui/settings_models.py`), `_mask_value` (`nanobot/cli/onboard.py`).

@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from nanobot.config.loader import load_config, save_config
-from nanobot.config.schema import Config, _resolve_tool_config_refs
+from nanobot.config.schema import _resolve_tool_config_refs
 from nanobot.security.network import validate_url_target
 
 # Config may be imported during a circular tool-config import; resolve its
@@ -332,16 +332,25 @@ def test_load_config_accepts_remote_package_install_aliases(tmp_path) -> None:
     assert load_config(snake_path).tools.webui_allow_remote_package_install is True
 
 
-def test_collaboration_postgres_dsns_load_from_environment_and_stay_private(monkeypatch) -> None:
-    runtime_dsn = "postgresql://runtime.invalid/collaboration"
-    migration_dsn = "postgresql://migration.invalid/collaboration"
-    monkeypatch.setenv("NANOBOT_COLLABORATION_POSTGRES_DSN", runtime_dsn)
-    monkeypatch.setenv("NANOBOT_COLLABORATION_POSTGRES_MIGRATION_DSN", migration_dsn)
+def test_load_config_ignores_removed_collaboration_section(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "collaboration": {
+                    "backend": "postgres",
+                    "postgresDsn": "postgresql://db.invalid/collaboration",
+                },
+                "gateway": {"port": 18791},
+            }
+        ),
+        encoding="utf-8",
+    )
 
-    config = Config.model_validate({"collaboration": {"backend": "postgres"}})
+    config = load_config(config_path)
+    save_config(config, config_path)
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
 
-    assert config.collaboration.postgres_dsn == runtime_dsn, "runtime DSN was not loaded from its environment variable"
-    assert config.collaboration.postgres_migration_dsn == migration_dsn, "migration DSN was not loaded from its environment variable"
-    serialized_collaboration = config.model_dump(mode="json")["collaboration"]
-    assert "postgres_dsn" not in serialized_collaboration
-    assert "postgres_migration_dsn" not in serialized_collaboration
+    assert config.gateway.port == 18791
+    assert not hasattr(config, "collaboration")
+    assert "collaboration" not in saved

@@ -1140,7 +1140,7 @@ class CollaborationStore:
 
         Organization membership needs no filter here: ``_references`` refuses to load a
         provision whose provisioner left, and both membership-removal paths delete the
-        row, exactly as the PostgreSQL foreign key cascades it.
+        row.
         """
         actor_user_id = _id(actor_user_id, "actor_user_id")
         with self._state() as state:

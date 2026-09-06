@@ -1,12 +1,10 @@
-"""Asynchronous boundary for collaboration persistence backends."""
+"""Asynchronous boundary for the collaboration persistence store."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol, runtime_checkable
-
-from nanobot.config.schema import CollaborationConfig
 
 from .local_repository import AsyncLocalCollaborationRepository
 from .models import (
@@ -430,14 +428,7 @@ class CollaborationRepository(Protocol):
 
 
 def build_collaboration_repository(
-    config: CollaborationConfig,
     local_store: CollaborationStore | None = None,
 ) -> CollaborationRepository:
-    """Create the configured asynchronous collaboration persistence backend."""
-    if config.backend == "local":
-        return AsyncLocalCollaborationRepository(local_store)
-
-    from .postgres.repository import PostgresCollaborationRepository
-    from .postgres.session import PostgresSession
-
-    return PostgresCollaborationRepository(PostgresSession(config))
+    """Create the asynchronous collaboration repository over the local JSON store."""
+    return AsyncLocalCollaborationRepository(local_store)

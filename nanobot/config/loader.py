@@ -346,6 +346,11 @@ def _env_replace(match: re.Match[str]) -> str:
 
 def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:
     """Migrate old config formats to current."""
+    # The removed `collaboration` section only selected a persistence backend. The
+    # local JSON store is the single backend now, so drop the stale key rather than
+    # rejecting a config.json written by an earlier release.
+    data.pop("collaboration", None)
+
     # Move tools.exec.restrictToWorkspace → tools.restrictToWorkspace
     tools_value = data.get("tools", {})
     if not isinstance(tools_value, dict):

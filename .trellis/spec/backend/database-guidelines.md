@@ -6,8 +6,9 @@
 
 ## There is no ORM
 
-nanobot uses **no SQLAlchemy, no Django ORM, no Alembic**. There is no model base class that
-maps to tables, no session/unit-of-work, and no query builder. Do not introduce one.
+nanobot uses **no SQLAlchemy, no Django ORM, no Alembic**, and no database server. There is no
+model base class that maps to tables, no session/unit-of-work, and no query builder. Do not
+introduce one.
 
 Persistence is three separate, deliberately different layers, each with its own durability and
 migration story:
@@ -15,11 +16,8 @@ migration story:
 | Layer | Where | Format | Migration |
 |---|---|---|---|
 | Configuration | `nanobot/config/` → `~/.nanobot/config.json` | Pydantic models, camelCase JSON | `_migrate_config` (key moves) |
-| Collaboration control plane | `nanobot/collaboration/` | local JSON store **or** PostgreSQL | `_migrate_vN` chain / `MIGRATIONS` tuple |
+| Collaboration control plane | `nanobot/collaboration/` | local JSON store | `_migrate_vN` chain |
 | Agent state | `nanobot/agent/memory.py`, `nanobot/session/`, `nanobot/cron/`, `nanobot/triggers/` | JSONL / JSON / markdown | ad hoc, tolerant decoding |
-
-PostgreSQL access is raw `psycopg` 3 async with parameterized SQL. `psycopg[binary,pool]` is a
-required dependency, but the PostgreSQL backend is opt-in via configuration.
 
 ---
 
@@ -44,77 +42,44 @@ Rules:
   not in the consumer.
 - Secrets that live in dedicated token stores are **excluded** from the saved config.
   `save_config` re-projects `openaiCodex` and `xaiGrok` down to `{"proxy", "extra_body"}` only.
-- `NANOBOT_COLLABORATION_POSTGRES_DSN` and `NANOBOT_COLLABORATION_POSTGRES_MIGRATION_DSN` are
-  read from the environment into the model but never serialized back to JSON.
 - `${VAR}` references are resolved at load time and **raise** when the variable is missing —
   this is not shell default-value syntax (see [`.agent/gotchas.md`](../../../.agent/gotchas.md)).
 
 Config format changes go in `_migrate_config` (`nanobot/config/loader.py`), which moves keys
 into their new home in place and is idempotent. It is a plain dict transform with no version
-counter — it must remain safe to run on already-migrated data.
+counter — it must remain safe to run on already-migrated data. When a whole section is removed
+from the schema, `_migrate_config` drops the stale key so an existing `config.json` keeps
+loading; add a regression test that loads and re-saves a file carrying the old section.
 
 ---
 
-## Layer 2 — Collaboration control plane (dual backend)
+## Layer 2 — Collaboration control plane
 
-`nanobot/collaboration/` is the only subsystem with two interchangeable persistence backends,
-selected by `build_collaboration_repository(config)` in `nanobot/collaboration/repository.py`:
-
-```python
-if config.backend == "local":
-    return AsyncLocalCollaborationRepository(local_store)
-from .postgres.repository import PostgresCollaborationRepository
-from .postgres.session import PostgresSession
-return PostgresCollaborationRepository(PostgresSession(config))
-```
+`nanobot/collaboration/` persists users, projects, memberships, channel assignments, pairing
+challenges, and conversation bindings in one JSON document under
+`get_runtime_subdir("collaboration") / "collaboration.json"`. `build_collaboration_repository()`
+in `nanobot/collaboration/repository.py` wraps the synchronous `CollaborationStore` in
+`AsyncLocalCollaborationRepository`, which runs each complete store operation in a worker
+thread so the event loop never blocks on file I/O.
 
 The contract is a `@runtime_checkable Protocol`, `CollaborationRepository`, not a base class.
-`PostgresCollaborationRepository` proves conformance statically via a no-op assertion function
-so BasedPyright fails the build if the Protocol drifts:
-
-```python
-def _assert_collaboration_repository_implementation(
-    implementation: type[CollaborationRepository],
-) -> None:
-    """Make protocol conformance a static type-checking requirement."""
-
-_assert_collaboration_repository_implementation(PostgresCollaborationRepository)
-```
-
-### The equivalence invariant
-
-**Local and PostgreSQL must be semantically equivalent.** Any behavior change to one is
-incomplete until the other matches:
-
-- The same operation raises the same exception type in both backends
-  (`CollaborationNotFoundError`, `CollaborationPermissionError`, `CollaborationConflictError`,
-  `CollaborationStoreFormatError`).
-- The same uniqueness constraints hold — for example a channel claim is globally unique by
-  `(channel_type, instance_id)` in both.
-- The same authorization outcome. In PostgreSQL that is enforced twice: once by application
-  logic and again by row-level security. In local mode only the application layer exists, so
-  the application check is not optional.
-- Adding a Protocol method means implementing it in **both** `local_repository.py` /
-  `store.py` and the PostgreSQL mixins.
+Callers (`AgentLoop`, `ChannelManager`, the WebUI handler, the CLI) depend on the Protocol only.
+Adding a Protocol method means implementing it in `store.py` and exposing it through
+`local_repository.py`; the store method owns validation and authorization, the async wrapper
+owns nothing but the thread hop.
 
 ### Domain models
 
 Entities in `nanobot/collaboration/models.py` are `@dataclass(frozen=True, slots=True)` with
-`StrEnum` for closed value sets (`OrganizationRole`, `MembershipRole`, `TaskStatus`,
-`VaultKind`, `PairingPurpose`, ...). Timestamps are integer epoch milliseconds named
-`created_at_ms` / `updated_at_ms`. IDs are application-generated strings, never database
-sequences.
+`StrEnum` for closed value sets (`MembershipRole`, `TaskStatus`, `PairingPurpose`, ...).
+Timestamps are integer epoch milliseconds named `created_at_ms` / `updated_at_ms`. IDs are
+application-generated strings.
 
-Each backend owns its own row/record codec against those models:
-
-| Direction | Local JSON | PostgreSQL |
-|---|---|---|
-| decode | `_user(data)` in `store.py` (camelCase keys) | `decode_user_row(row)` in `postgres/rows.py` (snake_case columns) |
-| encode | `_encode_user(x)` in `store.py` | inline parameterized `INSERT`/`UPDATE` |
-
-Decoders are **strict**: `_user` rejects a record whose key set is not within the supported
-field set, raising `CollaborationStoreFormatError("record has unsupported shape")`. Do not make
-a decoder lenient to accept unknown keys — that is how corrupt state spreads.
+The store owns the record codec against those models: `_user(data)` decodes a camelCase record
+and `_encode_user(x)` encodes one. Decoders are **strict**: `_user` rejects a record whose key
+set is not within the supported field set, raising
+`CollaborationStoreFormatError("record has unsupported shape")`. Do not make a decoder lenient
+to accept unknown keys — that is how corrupt state spreads.
 
 ---
 
@@ -156,103 +121,12 @@ To add a schema version:
 Migrations must **preserve, not reset**. `_migrate_v1` docstring: "Upgrade the original
 project-only store without dropping user data." `_migrate_v6`: "Mark existing challenges
 unbound rather than rebinding credentials." When a new field cannot be derived, write an
-explicit legacy sentinel (`_LEGACY_UNBOUND_CHANNEL_REVISION`) rather than guessing.
+explicit legacy sentinel (`_LEGACY_UNBOUND_CHANNEL_REVISION`) rather than guessing. A migration
+that drops whole collections must write a backup of the previous document next to the store
+before rewriting it and log how many records it discarded.
 
 `_load` re-saves the file whenever the on-disk version differs from `_SCHEMA`, so migration is
 lazy and happens on first read.
-
-### PostgreSQL — append-only `MIGRATIONS` tuple
-
-`nanobot/collaboration/postgres/ddl.py` holds the DDL as string constants and one ordered
-tuple:
-
-```python
-MIGRATIONS: tuple[tuple[int, str], ...] = (
-    (1, INITIAL_SCHEMA_DDL),
-    (2, MIGRATION_2_DDL),
-    ...
-    (6, MIGRATION_6_DDL),
-)
-```
-
-`migrate(connection, runtime_role)` in `postgres/migrations.py` applies every unapplied version
-inside **one transaction** guarded by `pg_advisory_xact_lock`, recording each in
-`collaboration_schema_migrations`.
-
-Rules:
-
-- **Append only.** Never edit an already-released `MIGRATION_N_DDL` or renumber. Add a new
-  entry.
-- **Additive and idempotent DDL.** Use `ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT
-  EXISTS`, `DROP POLICY IF EXISTS` before `CREATE POLICY`. A new `NOT NULL` column needs a
-  `DEFAULT`, exactly as `MIGRATION_6_DDL` does:
-
-  ```sql
-  ALTER TABLE nanobot_collaboration.collaboration_pairing_challenges
-      ADD COLUMN IF NOT EXISTS channel_revision varchar(256) NOT NULL DEFAULT 'legacy-unbound';
-  ```
-- **A new table needs the full treatment in the same migration**: `ENABLE ROW LEVEL SECURITY`,
-  `FORCE ROW LEVEL SECURITY`, one policy per `SELECT`/`INSERT`/`UPDATE`/`DELETE`, and an entry
-  in `_RUNTIME_BUSINESS_GRANTS`. A table without policies under `FORCE ROW LEVEL SECURITY` is
-  invisible to the runtime role; a table without `FORCE` is a tenancy hole.
-- **Two roles, never one.** `migrate` refuses to run when the migration role equals the runtime
-  role, and refuses a runtime role that is `rolsuper`, `rolbypassrls`, or a member of
-  `nanobot_collaboration_policy_owner`. Keep those guards.
-- Migration and runtime use separate DSNs (`postgres_migration_dsn` / `postgres_dsn`).
-
----
-
-## PostgreSQL Conventions
-
-Read `nanobot/collaboration/postgres/ddl.py` before writing any DDL. The house style:
-
-- **Schema qualified.** Everything lives in `nanobot_collaboration`, with
-  `REVOKE CREATE ON SCHEMA nanobot_collaboration FROM PUBLIC`.
-- **Table names**: `collaboration_<plural_noun>`, snake_case
-  (`collaboration_organization_memberships`, `collaboration_bot_channel_assignments`).
-- **Column names**: snake_case, matching the dataclass field names
-  (`created_by_user_id`, `default_vault_id`, `created_at_ms`).
-- **IDs**: `varchar(128) PRIMARY KEY`, application-generated. No `serial`, no `uuid` column
-  type.
-- **Timestamps**: `created_at_ms` / `updated_at_ms` as `bigint` epoch milliseconds, not
-  `timestamptz`. The only `timestamptz` is `collaboration_schema_migrations.applied_at`.
-- **Every column is bounded and checked.** Explicit `varchar(n)`; `CHECK (length(btrim(x)) > 0)`
-  for required text; `CHECK (role IN ('owner','admin','member'))` mirroring the `StrEnum`;
-  `CHECK (updated_at_ms >= created_at_ms)`.
-- **Tenancy is enforced by referential integrity**, not only by queries: org-scoped tables
-  carry `organization_id` and use a composite foreign key into
-  `collaboration_organization_memberships (organization_id, user_id)`. `ON DELETE CASCADE` for
-  org-owned children, `ON DELETE RESTRICT` where a dangling reference would lose ownership.
-- **Helper functions** are `nanobot_<predicate>` in the same schema, declared
-  `LANGUAGE sql STABLE SET search_path = pg_catalog`, and executable only by the runtime role
-  via `_RUNTIME_HELPER_GRANTS`. Policies call these instead of embedding recursive subqueries.
-- **All SQL is parameterized** (`%s` placeholders). Identifiers that must be interpolated go
-  through `psycopg.sql.Identifier`, never f-strings. String-literal DDL is `cast(LiteralString, ...)`.
-
-### RLS and the request context
-
-Tenant identity is set **per transaction**, never per connection, in
-`nanobot/collaboration/postgres/session.py`:
-
-```python
-async with connection.transaction():
-    await self._set_local(connection, "search_path", "pg_catalog")
-    await self._set_local(connection, "nanobot.user_id", user_id)
-    await self._set_local(connection, "statement_timeout", f"{self._command_timeout_ms}ms")
-    ...
-# _set_local -> SELECT pg_catalog.set_config(%s, %s, true)   # is_local=True
-```
-
-Policies read it through `nanobot_current_user_id()`. Because settings are transaction-local,
-a pooled connection can never leak one tenant's identity into another's query.
-
-`identity_transaction(channel, sender_id)` is the deliberate bootstrap hole: it sets
-`nanobot.user_id` to `""` and exposes only the `collaboration_identities` lookup policy for the
-exact `(channel, sender_id)` pair. Do not widen it.
-
-**RLS is a backstop, not the authorization design.** The application-layer permission check
-must produce the same answer; RLS exists so a missed check fails closed instead of leaking. If
-you change one, change both, and test both.
 
 ---
 
@@ -301,10 +175,9 @@ unrelated change (see [`quality-guidelines.md`](./quality-guidelines.md)).
 
 ### Bounds
 
-Stores enforce a maximum document size before parsing and before writing
-(`_MAX_FILE_BYTES` in `store.py`, `_MAX_JSON_BYTES` in `postgres/rows.py`), raising
-`CollaborationStoreFormatError` rather than loading unbounded input. Any new store needs the
-same bound.
+Stores enforce a maximum document size before parsing and before writing (`_MAX_FILE_BYTES` in
+`store.py`), raising `CollaborationStoreFormatError` rather than loading unbounded input. Any
+new store needs the same bound.
 
 ---
 
@@ -313,7 +186,7 @@ same bound.
 ### 1. Scope / Trigger
 
 This contract applies to cross-layer changes involving organizations, projects, deployable bots,
-channel instances, Pairing Challenges, OIDC settings, or local/PostgreSQL collaboration state.
+channel instances, Pairing Challenges, OIDC settings, or collaboration state.
 The boundary is security-sensitive: a transport credential is kept in server-owned configuration,
 while collaboration persistence stores ownership and assignment references.
 
@@ -344,12 +217,7 @@ while collaboration persistence stores ownership and assignment references.
 - Public channel projections may include `pairing_only=true`, configured-field names, and
   non-secret values. They must not include secrets, tokens, environment values, or absolute
   host paths.
-- PostgreSQL uses additive migrations and forced RLS. Local JSON schema migration must preserve
-  legacy projects, personas, shared defaults, and profile scope.
-- `NANOBOT_COLLABORATION_POSTGRES_DSN` and
-  `NANOBOT_COLLABORATION_POSTGRES_MIGRATION_DSN` may provide excluded DSN fields for
-  container deployments. They are loaded into the model but never serialized to WebUI-saved
-  JSON configuration.
+- Schema migration must preserve legacy projects, personas, shared defaults, and profile scope.
 
 ### 4. Validation and error matrix
 
@@ -383,8 +251,7 @@ while collaboration persistence stores ownership and assignment references.
 - WebUI tests assert ordinary claimed owners can control their instance while unclaimed users
   receive 403, and that OIDC reads redact secrets and stale writes return 409.
 - Run `uv run --no-sync pytest -q`, `uv run ruff check nanobot tests`, and
-  `uv run --no-sync basedpyright`; PostgreSQL integration requires separate runtime and
-  migration DSNs.
+  `uv run --no-sync basedpyright`.
 
 ### 7. Wrong vs correct
 
@@ -398,21 +265,9 @@ section, apply only the channel-instance mutation, and save the same path atomic
 
 ## Testing persistence changes
 
-- Local-backend tests run everywhere and are the baseline:
-  `tests/collaboration/test_collaboration.py`.
-- PostgreSQL tests **skip** unless two DSNs are exported, because they need a restricted runtime
-  role and a separate migration admin role (`tests/collaboration/test_postgres_repository.py`):
-
-  ```bash
-  export NANOBOT_TEST_POSTGRES_DSN=...           # restricted runtime role
-  export NANOBOT_TEST_POSTGRES_MIGRATION_DSN=... # migration/admin role
-  ```
-
-  Because they skip silently in CI, **run them locally** for any change to `postgres/`. A green
-  CI run does not mean the PostgreSQL backend was exercised.
-- Any behavior change to the repository Protocol needs a test in both backends.
-- RLS changes need a negative test — assert the restricted role gets `InsufficientPrivilege` or
-  an empty result, not just that the happy path works.
+- Store tests run everywhere and are the baseline: `tests/collaboration/test_collaboration.py`.
+- Any behavior change to the repository Protocol needs a store-level test, not only a WebUI or
+  loop test that happens to pass through it.
 - Schema migration changes need a test that loads the *previous* shape and asserts existing data
   survives.
 
@@ -424,14 +279,9 @@ section, apply only the channel-instance mutation, and save the same path atomic
 - Do not use a legacy `allowFrom` entry as proof that a protected channel instance was claimed.
 - Do not silently reset a user's valid shared organization/bot selection while repairing personal
   defaults.
-- Do not add a field to a domain dataclass without updating **both** codecs (`store.py`
-  `_<entity>` / `_encode_<entity>` and `postgres/rows.py` `decode_<entity>_row`) plus the DDL.
-  The strict shape check will reject records the moment the two disagree.
-- Do not edit a released `MIGRATION_N_DDL` in place, and do not renumber `MIGRATIONS`.
-- Do not add a PostgreSQL table without RLS enabled, forced, policied, and granted.
-- Do not set `nanobot.user_id` outside a transaction or with `is_local=False`; pooled
-  connections would leak tenant identity.
+- Do not add a field to a domain dataclass without updating the codec (`store.py`
+  `_<entity>` / `_encode_<entity>`) and `_empty()`. The strict shape check will reject records the
+  moment they disagree.
 - Do not load-then-save configuration outside the file lock.
 - Do not make a decoder lenient to "just accept" an unknown key; raise
   `CollaborationStoreFormatError`.
-- Do not assume CI covered PostgreSQL — those tests skip without DSNs.
