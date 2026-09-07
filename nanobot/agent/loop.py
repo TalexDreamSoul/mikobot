@@ -1147,6 +1147,11 @@ class AgentLoop:
             # a per-user key here would answer into a different conversation.
             return msg.session_key
         scope = await self._conversation_scope_for_message(msg)
+        if scope is not None and scope.is_local_owner:
+            # The host owner reaching in over a chat channel is the same person
+            # as the host owner at the CLI. Namespacing their own conversation
+            # against themselves would strand its history under the old key.
+            return UNIFIED_SESSION_KEY if self._unified_session else msg.session_key
         if scope is not None and scope.user_id and scope.project_id is not None:
             if self._unified_session:
                 return f"unified:{scope.user_id}"
@@ -2074,7 +2079,12 @@ class AgentLoop:
 
         if ctx.kind is TurnKind.USER and msg.sender_id != "subagent" and msg.media:
             media_scope = await self._conversation_scope_for_message(msg)
-            if media_scope is not None and media_scope.user_id and media_scope.project_id is not None:
+            if (
+                media_scope is not None
+                and media_scope.user_id
+                and media_scope.project_id is not None
+                and not media_scope.is_local_owner
+            ):
                 managed_media_root = await asyncio.to_thread(
                     lambda: get_media_dir().resolve(strict=False)
                 )

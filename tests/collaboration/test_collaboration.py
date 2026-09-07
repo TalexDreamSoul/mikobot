@@ -565,6 +565,39 @@ async def test_agent_loop_session_keys_are_user_scoped_for_channel_senders(
     assert local == "websocket:local-chat"
 
 
+@pytest.mark.asyncio
+async def test_the_host_owner_keeps_one_conversation_across_their_own_channels(
+    tmp_path: Path,
+    local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
+) -> None:
+    """The owner reaching in over a chat channel is not a tenant of their own host."""
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    store, repository = local_collaboration_repository
+    owner, _project = store.ensure_local_owner(workspace)
+    store.bind_identity("weixin", "owner-wechat-id", owner.id)
+    loop = _scope_loop(workspace, repository, _provider())
+    message = InboundMessage(
+        "weixin", "owner-wechat-id", "owner-wechat-id", "what is on my list today?",
+        metadata={"direct": True},
+    )
+
+    scope = await loop._conversation_scope_for_message(message)
+    key = await loop._effective_session_key(message)
+
+    assert scope is not None and scope.is_local_owner is True
+    assert scope.project_id is not None
+    # Their history stays where every earlier turn wrote it, rather than moving
+    # to a per-user namespace that holds nothing.
+    assert key == "weixin:owner-wechat-id"
+
+    stranger, _ = store.ensure_identity_user("weixin", "someone-else", workspace)
+    stranger_key = await loop._effective_session_key(
+        InboundMessage("weixin", "someone-else", "someone-else", "hello", metadata={"direct": True})
+    )
+    assert stranger_key == f"user:{stranger.id}:weixin:someone-else"
+
+
 def test_legacy_multi_tenant_store_collapses_to_projects_and_assignments(tmp_path: Path) -> None:
     """A v8 document keeps users, projects, and claims; bot, org, and vault state is dropped."""
     root = tmp_path / "collaboration"

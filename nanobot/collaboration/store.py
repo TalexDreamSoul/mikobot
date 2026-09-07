@@ -887,6 +887,7 @@ class CollaborationStore:
             return self._project_scope(
                 ConversationScopeKind.DIRECT, _user(user_value), _project(project_value),
                 None, assignment, _scope_suffix(channel, chat_id, thread_id),
+                state["localOwnerId"] == user_id,
             )
 
     def resolve_scope(self, channel: str, sender_id: str, chat_id: str,
@@ -933,14 +934,16 @@ class CollaborationStore:
                     return denied
                 return self._project_scope(
                     ConversationScopeKind.BOUND, user,
-                    _project(state["projects"][binding.project_id]), binding, active, suffix)
+                    _project(state["projects"][binding.project_id]), binding, active, suffix,
+                    state["localOwnerId"] == user.id)
             if _is_direct(chat_id, sender_id, metadata) and user is not None:
                 if active is not None:
                     if not self._is_member(state, active.project_id, user.id):
                         return denied
                     return self._project_scope(
                         ConversationScopeKind.DIRECT, user,
-                        _project(state["projects"][active.project_id]), None, active, suffix)
+                        _project(state["projects"][active.project_id]), None, active, suffix,
+                        state["localOwnerId"] == user.id)
                 if (
                     user.default_project_id is not None
                     and user.default_project_id in state["projects"]
@@ -948,7 +951,8 @@ class CollaborationStore:
                 ):
                     return self._project_scope(
                         ConversationScopeKind.DIRECT, user,
-                        _project(state["projects"][user.default_project_id]), None, None, suffix)
+                        _project(state["projects"][user.default_project_id]), None, None, suffix,
+                        state["localOwnerId"] == user.id)
             # validates the injected default without using it for isolation
             _workspace(default_workspace)
             return ConversationScope(
@@ -966,10 +970,11 @@ class CollaborationStore:
         binding: ConversationBinding | None,
         assignment: ChannelAssignment | None,
         suffix: str,
+        local_owner: bool = False,
     ) -> ConversationScope:
         return ConversationScope(
             kind, user.id, project.id, user, project, binding, assignment,
-            project.workspace_path, suffix,
+            project.workspace_path, suffix, is_local_owner=local_owner,
         )
 
     @staticmethod

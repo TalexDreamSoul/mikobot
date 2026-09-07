@@ -158,6 +158,9 @@ class ConversationScope:
     workspace_path: str | None
     session_suffix: str
     route_denied: bool = False
+    # True when the resolved user is the host's own owner. They are one person,
+    # not a tenant, so their conversations keep their original session keys.
+    is_local_owner: bool = False
 
     @property
     def is_isolated(self) -> bool:
