@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Brain, Check, Loader2, Server } from "lucide-react";
+import { Brain, Loader2, Server } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import type {
   CollaborationCapabilities,
   CollaborationProjectPayload,
@@ -34,21 +35,13 @@ function SelectionRow({
       "transition-colors hover:bg-muted/35",
       disabled && "cursor-default opacity-60",
     )}>
-      <input
-        type="checkbox"
+      <Checkbox
         name={id}
         checked={selected}
         disabled={disabled}
         onChange={(event) => onChange(event.target.checked)}
-        className="peer sr-only"
+        className="mt-0.5"
       />
-      <span className={cn(
-        "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-mark border border-input bg-background",
-        "peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2",
-        selected && "border-primary bg-primary text-primary-foreground",
-      )} aria-hidden>
-        {selected ? <Check className="h-3.5 w-3.5" strokeWidth={3} /> : null}
-      </span>
       <span className="min-w-0">
         <span className="block text-sm font-medium leading-5">{name}</span>
         {description ? (
@@ -88,8 +81,7 @@ function CapabilityGroup({
           <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">{description}</p>
         </div>
         <label className="flex shrink-0 items-center gap-2 text-xs">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={unrestricted}
             disabled={disabled}
             onChange={(event) => onToggleUnrestricted(event.target.checked)}

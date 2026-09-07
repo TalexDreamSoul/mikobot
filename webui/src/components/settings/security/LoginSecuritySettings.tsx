@@ -3,7 +3,9 @@ import { KeyRound, Loader2, Save, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { fetchLoginSecurity, updateLoginSecurity } from "@/lib/api";
 import type { LoginSecuritySettings } from "@/lib/types";
 import { useClient } from "@/providers/ClientProvider";
@@ -105,11 +107,9 @@ export function LoginSecuritySettingsPanel() {
             <span className="block text-sm font-medium">{t("settings.loginSecurity.enable")}</span>
             <span className="text-xs text-muted-foreground">{t("settings.loginSecurity.enableHelp")}</span>
           </span>
-          <input
-            type="checkbox"
+          <Checkbox
             checked={form.enabled}
             onChange={(event) => update("enabled", event.target.checked)}
-            className="h-5 w-5 accent-primary"
           />
         </label>
       </section>
@@ -136,18 +136,18 @@ export function LoginSecuritySettingsPanel() {
           />
         </Field>
         <Field label={t("settings.loginSecurity.authMethod")}>
-          <select
+          <Select
             value={form.token_endpoint_auth_method}
             onChange={(event) => update(
               "token_endpoint_auth_method",
               event.target.value as LoginSecuritySettings["token_endpoint_auth_method"],
             )}
-            className="h-11 w-full rounded-control border border-input bg-background px-3 text-sm"
+            className="h-11"
           >
             <option value="none">none (PKCE public client)</option>
             <option value="client_secret_basic">client_secret_basic</option>
             <option value="client_secret_post">client_secret_post</option>
-          </select>
+          </Select>
         </Field>
         <Field label={t("settings.loginSecurity.scopes")}>
           <Input

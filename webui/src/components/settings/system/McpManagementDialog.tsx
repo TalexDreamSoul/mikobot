@@ -13,6 +13,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -451,26 +452,12 @@ function ToolsPanel({
               key={toolName}
               className="flex min-h-11 cursor-pointer items-center gap-3 border-b border-border/45 px-3.5 py-2.5 transition-colors last:border-b-0 hover:bg-muted/35 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-inset has-[:focus-visible]:ring-ring"
             >
-              <span className="relative h-5 w-5 shrink-0">
-                <input
-                  type="checkbox"
-                  checked={selected}
-                  disabled={toolsBusy}
-                  onChange={() => onToggleTool(toolName)}
-                  className="peer absolute inset-0 z-10 h-5 w-5 cursor-pointer opacity-0 disabled:cursor-not-allowed"
-                />
-                <span
-                  aria-hidden
-                  className={cn(
-                    "pointer-events-none absolute inset-0 grid place-items-center rounded-compact border transition-colors",
-                    selected
-                      ? "border-foreground bg-foreground text-background"
-                      : "border-border bg-background text-transparent",
-                  )}
-                >
-                  <Check className="h-3 w-3" strokeWidth={2.75} />
-                </span>
-              </span>
+              <Checkbox
+                checked={selected}
+                disabled={toolsBusy}
+                onChange={() => onToggleTool(toolName)}
+                boxClassName="rounded-compact"
+              />
               <code className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
                 {displayToolName(toolName, preset.name)}
               </code>

@@ -41,14 +41,9 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import type { ExtensionDiagnostic, ExtensionPackage } from "@/lib/types";
 import { cn } from "@/lib/utils";
-
-const FILTER_SELECT_CLASS = cn(
-  "h-9 w-full min-w-0 rounded-control border border-border/45 bg-settings-surface px-2.5",
-  "text-[12.5px] text-foreground transition-colors hover:border-border/70",
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-auto",
-);
 
 function FilterSelect<T extends string>({
   label,
@@ -70,10 +65,11 @@ function FilterSelect<T extends string>({
       <label htmlFor={id} className="sr-only">
         {label}
       </label>
-      <select
+      <Select
         id={id}
         aria-label={label}
-        className={FILTER_SELECT_CLASS}
+        containerClassName="sm:w-auto"
+        className="h-9 border-border/45 bg-settings-surface pl-2.5 text-[12.5px] text-foreground transition-colors hover:border-border/70"
         value={value}
         onChange={(event) => onChange(event.target.value as T | typeof ANY_FILTER)}
       >
@@ -88,7 +84,7 @@ function FilterSelect<T extends string>({
             {optionLabel(option)}
           </option>
         ))}
-      </select>
+      </Select>
     </div>
   );
 }

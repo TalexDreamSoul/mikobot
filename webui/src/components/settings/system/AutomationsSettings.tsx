@@ -35,8 +35,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { formControlFocusClassName } from "@/components/ui/form-control";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Textarea } from "@/components/ui/textarea";
 import { copyTextToClipboard } from "@/lib/clipboard";
@@ -826,7 +826,7 @@ export function AutomationEditDialog({
                     <span className="text-[12px] font-medium text-muted-foreground">
                       {tx("settings.automations.fields.unit", "Unit")}
                     </span>
-                    <select
+                    <Select
                       value={draft.everyUnit}
                       onChange={(event) =>
                         setDraft((prev) => ({
@@ -834,17 +834,14 @@ export function AutomationEditDialog({
                           everyUnit: event.target.value as AutomationEveryUnit,
                         }))
                       }
-                      className={cn(
-                        "h-10 w-full rounded-control border border-input bg-background px-3 text-[13px] text-foreground transition-colors",
-                        formControlFocusClassName,
-                      )}
+                      className="text-[13px] text-foreground transition-colors"
                     >
                       {AUTOMATION_EVERY_UNITS.map((unit) => (
                         <option key={unit.value} value={unit.value}>
                           {unitLabels[unit.value]}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                   </label>
                 </div>
               ) : null}
