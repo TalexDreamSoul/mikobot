@@ -441,6 +441,10 @@ export interface CollaborationChannelAssignment {
   created_by_user_id: string;
   created_at_ms: number;
   updated_at_ms: number;
+  /** Present when the runtime still exposes the instance. */
+  channel_display_name?: string;
+  display_name?: string;
+  status?: ChannelRuntimeStatus;
 }
 
 export interface CollaborationPairingChallenge {
@@ -497,6 +501,8 @@ export interface CollaborationPayload {
   projects: CollaborationProject[];
   assignments: CollaborationChannelAssignment[];
   active_project_id: string | null;
+  /** Projects the caller may administer: every project for an administrator. */
+  manageable_project_ids: string[];
 }
 
 export interface CollaborationProjectPayload {

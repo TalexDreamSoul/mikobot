@@ -687,12 +687,22 @@ export async function removeCollaborationProjectMember(
 
 export async function updateCollaborationAssignment(
   transport: WebUIMutationTransport,
-  values: { channelType: string; instanceId: string; enabled: boolean },
+  values: {
+    channelType: string;
+    instanceId: string;
+    enabled?: boolean;
+    projectId?: string;
+  },
 ): Promise<{ assignment: CollaborationChannelAssignment }> {
   return mutation<{ assignment: CollaborationChannelAssignment }>(
     transport,
     "collaboration.assignment.update",
-    { channel_type: values.channelType, instance_id: values.instanceId, enabled: values.enabled },
+    {
+      channel_type: values.channelType,
+      instance_id: values.instanceId,
+      ...(values.enabled !== undefined ? { enabled: values.enabled } : {}),
+      ...(values.projectId ? { project_id: values.projectId } : {}),
+    },
   );
 }
 

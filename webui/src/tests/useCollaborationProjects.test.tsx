@@ -55,6 +55,7 @@ function collaboration(
     projects,
     assignments: [],
     active_project_id: activeProjectId,
+    manageable_project_ids: projects.map((item) => item.id),
   };
 }
 

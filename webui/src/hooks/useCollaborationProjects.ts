@@ -196,8 +196,9 @@ export function useCollaborationProjects() {
     channelType: string;
     instanceId: string;
     assigneeUserId?: string | null;
+    projectId?: string;
   }) => {
-    const id = requireProject();
+    const id = values.projectId ?? requireProject();
     setBusyKey("pairing:create");
     setError(null);
     try {
@@ -233,6 +234,19 @@ export function useCollaborationProjects() {
   ) => {
     await run(`assignment:update:${channelType}:${instanceId}`, () => (
       updateCollaborationAssignment(client, { channelType, instanceId, enabled })
+    ));
+    await loadSummary(projectId);
+  }, [client, loadSummary, projectId, run]);
+
+  const moveAssignment = useCallback(async (
+    channelType: string,
+    instanceId: string,
+    targetProjectId: string,
+  ) => {
+    await run(`assignment:update:${channelType}:${instanceId}`, () => (
+      updateCollaborationAssignment(client, {
+        channelType, instanceId, projectId: targetProjectId,
+      })
     ));
     await loadSummary(projectId);
   }, [client, loadSummary, projectId, run]);
@@ -273,6 +287,7 @@ export function useCollaborationProjects() {
     beginPairing,
     finishPairing,
     setAssignmentEnabled,
+    moveAssignment,
     removeAssignment,
   };
 }

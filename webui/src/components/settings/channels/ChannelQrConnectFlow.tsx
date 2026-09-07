@@ -367,9 +367,9 @@ export function ChannelQrConnectFlow({
             size="sm"
             variant="outline"
             className="mt-3 h-8 rounded-full px-3 text-[12px] font-semibold"
-            onClick={() => { window.location.hash = "#/projects?section=channels"; }}
+            onClick={() => { window.location.hash = "#/channels"; }}
           >
-            {tx("settings.channels.manageBots", "Open project channels")}
+            {tx("settings.channels.manageBots", "Open Channels")}
           </Button>
         </div>
       ) : null}

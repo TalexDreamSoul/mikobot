@@ -124,7 +124,7 @@ const TOKEN_REFRESH_MIN_DELAY_MS = 5_000;
 const PAIRING_POLL_INTERVAL_MS = 5_000;
 const PAIRING_IDLE_POLL_INTERVAL_MS = 15_000;
 const PAIRING_DISMISS_SNOOZE_MS = 30_000;
-type ShellView = "chat" | "projects" | "settings" | "apps" | "automations" | "skills";
+type ShellView = "chat" | "projects" | "channels" | "settings" | "apps" | "automations" | "skills";
 type ShellRoute = {
   view: ShellView;
   activeKey: string | null;
@@ -135,6 +135,11 @@ const loadProjectsView = () => import("@/components/projects/ProjectsView");
 const ProjectsView = lazy(async () => {
   const module = await loadProjectsView();
   return { default: module.ProjectsView };
+});
+const loadChannelsView = () => import("@/components/channels/ChannelsView");
+const ChannelsView = lazy(async () => {
+  const module = await loadChannelsView();
+  return { default: module.ChannelsView };
 });
 const loadSettingsView = () => import("@/components/settings/SettingsView");
 const SettingsView = lazy(async () => {
@@ -272,6 +277,9 @@ function readShellRoute(): ShellRoute {
   }
   if (path === "/projects") {
     return { view: "projects", activeKey, settingsSection: "overview" };
+  }
+  if (path === "/channels") {
+    return { view: "channels", activeKey, settingsSection: "overview" };
   }
   if (path === "/apps") {
     return { view: "apps", activeKey, settingsSection: "apps" };
@@ -2109,6 +2117,16 @@ function Shell({
     void loadProjectsView();
   }, []);
 
+  const onOpenChannels = useCallback(() => {
+    setSessionSearchOpen(false);
+    navigate({ view: "channels", activeKey, settingsSection: "overview" });
+    setMobileSidebarOpen(false);
+  }, [activeKey, navigate]);
+
+  const onChannelsIntent = useCallback(() => {
+    void loadChannelsView();
+  }, []);
+
   const onOpenModelSettings = useCallback(() => {
     onOpenSettings("models");
   }, [onOpenSettings]);
@@ -2600,7 +2618,11 @@ function Shell({
       return;
     }
     if (view === "projects") {
-      document.title = t("app.documentTitle.chat", { title: "Projects" });
+      document.title = t("app.documentTitle.chat", { title: t("sidebar.projects") });
+      return;
+    }
+    if (view === "channels") {
+      document.title = t("app.documentTitle.chat", { title: t("sidebar.channels") });
       return;
     }
     if (view === "apps") {
@@ -2674,13 +2696,22 @@ function Shell({
     onNewChatInProject,
     onOpenSettings,
     onOpenProjects,
+    onOpenChannels,
     onOpenApps,
     onOpenAutomations,
     onOpenSkills,
     onSettingsIntent,
     onProjectsIntent,
+    onChannelsIntent,
     onOpenSearch: onOpenSessionSearch,
-    activeUtility: view === "projects" || view === "apps" || view === "automations" || view === "skills" ? view : null,
+    activeUtility:
+      view === "projects"
+      || view === "channels"
+      || view === "apps"
+      || view === "automations"
+      || view === "skills"
+        ? view
+        : null,
     onToggleArchived,
     pinnedKeys: sidebarPinnedTabKeys,
     archivedKeys: sidebarArchivedTabKeys,
@@ -2984,6 +3015,16 @@ function Shell({
               <div className="absolute inset-0 flex flex-col">
                 <Suspense fallback={<SurfaceLoadingFallback />}>
                   <ProjectsView
+                    projects={collaboration}
+                    onToggleSidebar={toggleSidebar}
+                    hostChromeInset={showHostChrome}
+                  />
+                </Suspense>
+              </div>
+            ) : view === "channels" ? (
+              <div className="absolute inset-0 flex flex-col">
+                <Suspense fallback={<SurfaceLoadingFallback />}>
+                  <ChannelsView
                     projects={collaboration}
                     onToggleSidebar={toggleSidebar}
                     hostChromeInset={showHostChrome}

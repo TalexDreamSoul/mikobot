@@ -2,8 +2,6 @@ import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Brain,
-  Cable,
-  ChevronDown,
   FolderKanban,
   Loader2,
   Menu,
@@ -15,7 +13,6 @@ import {
 } from "lucide-react";
 
 import { CapabilitiesPanel } from "@/components/projects/CapabilitiesPanel";
-import { ChannelAssignmentsPanel } from "@/components/projects/ChannelAssignmentsPanel";
 import { ProjectMembersPanel } from "@/components/projects/ProjectMembersPanel";
 import {
   AlertDialog,
@@ -29,27 +26,24 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import type { CollaborationProjectsController } from "@/hooks/useCollaborationProjects";
 import type { CollaborationProject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type ProjectPanel = "channels" | "members" | "capabilities";
+type ProjectPanel = "members" | "capabilities";
 
 const PROJECT_PANELS: Array<{
   id: ProjectPanel;
   labelKey: string;
   icon: LucideIcon;
 }> = [
-  { id: "channels", labelKey: "projects.panels.channels", icon: Cable },
   { id: "members", labelKey: "projects.panels.members", icon: Users },
   { id: "capabilities", labelKey: "projects.panels.capabilities", icon: Brain },
 ];
 
 function initialPanel(): ProjectPanel {
-  const hash = window.location.hash;
-  if (hash.includes("section=members")) return "members";
-  if (hash.includes("section=capabilities")) return "capabilities";
-  return "channels";
+  return window.location.hash.includes("section=capabilities") ? "capabilities" : "members";
 }
 
 function ProjectList({
@@ -261,21 +255,20 @@ export function ProjectsView({
             </div>
 
             <div className="mt-2 flex gap-2 lg:hidden">
-              <div className="relative min-w-0 flex-1">
+              <div className="min-w-0 flex-1">
                 <label htmlFor="mobile-project-switcher" className="sr-only">{t("projects.currentProject")}</label>
-                <select
+                <Select
                   id="mobile-project-switcher"
                   value={projects.projectId ?? ""}
                   onChange={(event) => projects.selectProject(event.target.value)}
                   disabled={!allProjects.length}
-                  className="h-11 w-full appearance-none truncate rounded-control border border-input bg-background py-2 pl-3 pr-9 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+                  className="h-11 font-semibold"
                 >
                   {!allProjects.length ? <option value="">{t("projects.noProjectsYet")}</option> : null}
                   {allProjects.map((project) => (
                     <option key={project.id} value={project.id}>{project.name}</option>
                   ))}
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-3 top-3.5 h-4 w-4 text-muted-foreground" aria-hidden />
+                </Select>
               </div>
               <Button
                 type="button"
@@ -364,8 +357,6 @@ export function ProjectsView({
                     {t("common.retry")}
                   </Button>
                 </div>
-              ) : panel === "channels" ? (
-                <ChannelAssignmentsPanel detail={projects.detail} projects={projects} />
               ) : panel === "members" ? (
                 <ProjectMembersPanel
                   detail={projects.detail}

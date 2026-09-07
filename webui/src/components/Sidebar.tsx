@@ -13,6 +13,7 @@ import {
   Settings,
   SquarePen,
   Blocks,
+  Cable,
   FolderKanban,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -63,13 +64,15 @@ interface SidebarProps {
   onNewChatInProject: (projectPath: string, projectName: string) => void;
   onOpenSettings: () => void;
   onOpenProjects: () => void;
+  onOpenChannels: () => void;
   onOpenApps: () => void;
   onOpenSkills: () => void;
   onOpenAutomations: () => void;
   onProjectsIntent?: () => void;
+  onChannelsIntent?: () => void;
   onSettingsIntent?: () => void;
   onOpenSearch: () => void;
-  activeUtility?: "projects" | "apps" | "skills" | "automations" | null;
+  activeUtility?: "projects" | "channels" | "apps" | "skills" | "automations" | null;
   onToggleArchived: () => void;
   onCollapse: () => void;
   onExpand?: () => void;
@@ -208,6 +211,15 @@ export function Sidebar(props: SidebarProps) {
           active={props.activeUtility === "projects"}
           selectionRef={activeActionRef}
           icon={<FolderKanban className="h-4 w-4" />}
+        />
+        <SidebarActionButton
+          collapsed={collapsed}
+          label={t("sidebar.channels")}
+          onClick={props.onOpenChannels}
+          onIntent={props.onChannelsIntent}
+          active={props.activeUtility === "channels"}
+          selectionRef={activeActionRef}
+          icon={<Cable className="h-4 w-4" />}
         />
         <SidebarActionButton
           collapsed={collapsed}
