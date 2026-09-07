@@ -80,8 +80,20 @@ Python SDK, and the API server pass nothing and run single-user. Inside the
 loop, the host owner's own CLI and token-authenticated WebUI turns never touch
 the repository; only chat-channel senders and OIDC or proxy principals are
 resolved to a project scope, which sets their workspace, session namespace,
-and allowed capabilities. The WebUI **Projects** view (Channels, Members,
-Capabilities) is the management surface.
+and allowed capabilities.
+
+Turns nanobot mints for itself — cron jobs, local triggers, subagent results,
+recovery, continuation, and heartbeat runs — reach the bus on the channel they
+will answer on, under a fixed sender id no chat platform issues. They resolve no
+identity of their own. Instead they inherit the scope their target session
+already recorded: none for the host's own sessions, which keep the process
+workspace, and the stored project for a member's. An automation whose project,
+membership, or channel assignment has since changed is refused rather than
+downgraded to the host workspace.
+
+Two WebUI surfaces manage this. **Channels** lists every assigned instance with
+its project, its runtime status, and its Pair Code flow; **Projects** covers
+members and capability allowlists.
 
 ## Providers
 

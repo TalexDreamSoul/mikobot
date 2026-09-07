@@ -47,8 +47,18 @@ def claimable_channel_payload(
     }
 
 
-def channel_assignment_payload(assignment: ChannelAssignment) -> dict[str, object]:
-    return {
+def channel_assignment_payload(
+    assignment: ChannelAssignment,
+    *,
+    presentation: tuple[str, str, str] | None = None,
+) -> dict[str, object]:
+    """Serialize one assignment, naming the instance when the runtime still has it.
+
+    The two display names and the runtime status are the same three public fields
+    the claimable listing already exposes, and only reach people who manage or
+    belong to the assignment's project.
+    """
+    payload: dict[str, object] = {
         "channel_type": assignment.channel_type,
         "instance_id": assignment.instance_id,
         "project_id": assignment.project_id,
@@ -58,6 +68,12 @@ def channel_assignment_payload(assignment: ChannelAssignment) -> dict[str, objec
         "created_at_ms": assignment.created_at_ms,
         "updated_at_ms": assignment.updated_at_ms,
     }
+    if presentation is not None:
+        channel_display_name, instance_display_name, status = presentation
+        payload["channel_display_name"] = channel_display_name
+        payload["display_name"] = instance_display_name
+        payload["status"] = status
+    return payload
 
 
 def pairing_challenge_payload(

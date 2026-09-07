@@ -71,6 +71,8 @@ class CollaborationRepository(Protocol):
 
     async def list_all_projects(self, actor_user_id: str) -> list[Project]: ...
 
+    async def manageable_project_ids(self, actor_user_id: str) -> list[str]: ...
+
     async def update_project(
         self,
         project_id: str,
@@ -115,6 +117,7 @@ class CollaborationRepository(Protocol):
         channel_type: str,
         instance_id: str,
         enabled: bool | None = None,
+        project_id: str | None = None,
     ) -> ChannelAssignment: ...
 
     async def delete_channel_assignment(
@@ -175,6 +178,16 @@ class CollaborationRepository(Protocol):
         metadata: Mapping[str, object] | None,
         default_workspace: str | Path,
     ) -> ConversationScope: ...
+
+    async def resolve_session_scope(
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        channel: str,
+        chat_id: str,
+        thread_id: str | None = None,
+    ) -> ConversationScope | None: ...
 
 
 def build_collaboration_repository(

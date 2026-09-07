@@ -211,6 +211,24 @@ class TurnContext:
         return self.session
 
 
+# Sender ids nanobot mints for its own turns. A chat platform presents an
+# account identifier here, never one of these words, so they can be recognized
+# without consulting the channel that delivered the turn.
+_RUNTIME_SENDER_IDS = frozenset({
+    "cron",
+    "trigger",
+    "subagent",
+    "runtime",
+    "session",
+    "session_timeout",
+    "webui",
+    "webui-settings",
+    # ``process_direct`` default: heartbeat and other host-initiated runs answer
+    # on a chat channel without a person having sent anything.
+    "user",
+})
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -888,6 +906,55 @@ class AgentLoop:
         """Whether *msg* comes from the host's own CLI or token-authenticated WebUI."""
         return msg.channel in {"cli", "websocket"} and not msg.sender_id.startswith("proxy:")
 
+    @staticmethod
+    def _is_runtime_sender(msg: InboundMessage) -> bool:
+        """Whether *msg* was minted by nanobot itself rather than by a person.
+
+        Cron jobs, local triggers, subagent announcements, recovery and
+        continuation turns, and heartbeat runs all reach the bus on the channel
+        they will answer on, carrying a fixed sender id no chat platform issues.
+        Treating those ids as external senders provisions one user and one
+        project per automation, so they are recognized here instead.
+        """
+        return (
+            msg.channel == "system"
+            or msg.sender_id in _RUNTIME_SENDER_IDS
+            or msg.sender_id.startswith("system:")
+        )
+
+    async def _inherited_session_scope(
+        self, msg: InboundMessage
+    ) -> ConversationScope | None:
+        """Return the scope a runtime-minted turn inherits from its own session.
+
+        An automation has no external identity to resolve, so it may only act
+        with the authorization its target session already recorded: none for the
+        host's own sessions, which keep the process workspace, and the stored
+        project for a member's. A session whose recorded project is gone, whose
+        member was removed, or whose channel instance has been reassigned is
+        refused rather than quietly downgraded to the host workspace.
+        """
+        if self.collaboration is None:
+            return None
+        session = self.sessions.peek(msg.session_key)
+        metadata = session.metadata if session is not None else {}
+        user_id = metadata.get(COLLABORATION_USER_METADATA_KEY)
+        project_id = metadata.get(COLLABORATION_PROJECT_METADATA_KEY)
+        if not isinstance(user_id, str) or not isinstance(project_id, str):
+            return None
+        message_metadata = dict(msg.metadata or {})
+        scope = await self.collaboration.resolve_session_scope(
+            user_id,
+            project_id,
+            channel=msg.channel,
+            chat_id=canonical_conversation_id(msg.chat_id, message_metadata),
+        )
+        if scope is None:
+            raise CollaborationPermissionError(
+                "automation session is no longer authorized for its project"
+            )
+        return scope
+
     async def _conversation_scope_for_message(
         self, msg: InboundMessage
     ) -> ConversationScope | None:
@@ -900,6 +967,8 @@ class AgentLoop:
         """
         if self.collaboration is None or self._is_local_owner(msg):
             return None
+        if self._is_runtime_sender(msg):
+            return await self._inherited_session_scope(msg)
         await self.collaboration.ensure_identity_user(
             msg.channel,
             msg.sender_id,
@@ -1073,6 +1142,10 @@ class AgentLoop:
             return msg.session_key
         if self._is_local_owner(msg):
             return UNIFIED_SESSION_KEY if self._unified_session else msg.session_key
+        if self._is_runtime_sender(msg):
+            # Whoever scheduled the automation already chose its session; deriving
+            # a per-user key here would answer into a different conversation.
+            return msg.session_key
         scope = await self._conversation_scope_for_message(msg)
         if scope is not None and scope.user_id and scope.project_id is not None:
             if self._unified_session:

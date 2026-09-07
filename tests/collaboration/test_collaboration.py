@@ -30,6 +30,10 @@ from nanobot.collaboration import (
     MembershipRole,
 )
 from nanobot.collaboration.links import IdentityLinkError, IdentityLinkStore
+from nanobot.collaboration.models import (
+    COLLABORATION_PROJECT_METADATA_KEY,
+    COLLABORATION_USER_METADATA_KEY,
+)
 from nanobot.collaboration.pairing import CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY
 from nanobot.providers.base import LLMResponse
 
@@ -926,3 +930,128 @@ def test_store_rejects_tampered_assignment_without_membership(tmp_path: Path) ->
 
     with pytest.raises(CollaborationStoreFormatError, match="project membership"):
         CollaborationStore(store_path=store.path).list_users()
+
+def test_assignment_moves_between_projects_only_for_a_manager_of_both(tmp_path: Path) -> None:
+    """Reassigning an instance needs authority over the project it leaves and the one it joins."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    store.update_user_admin(owner.id, True)
+    member, member_project = _user_and_project(store, tmp_path, "member")
+    store.add_member(project.id, owner.id, member.id)
+    _pair(store, owner.id, project_id=project.id, assignee_user_id=member.id)
+
+    with pytest.raises(CollaborationPermissionError, match="owner"):
+        store.update_channel_assignment(
+            member.id, channel_type="weixin", instance_id="release",
+            project_id=member_project.id,
+        )
+
+    moved = store.update_channel_assignment(
+        owner.id, channel_type="weixin", instance_id="release", project_id=member_project.id,
+    )
+
+    assert moved.project_id == member_project.id
+    assert moved.assignee_user_id == member.id
+    assert moved.enabled is True
+    # The assignee follows the instance, exactly as consuming a Pair Code would.
+    assert any(
+        item.user_id == member.id for item in store.list_members(member_project.id, member.id)
+    )
+    with pytest.raises(ValueError, match="at least one"):
+        store.update_channel_assignment(owner.id, channel_type="weixin", instance_id="release")
+
+
+def test_manageable_projects_name_what_the_ui_may_offer(tmp_path: Path) -> None:
+    """An administrator manages every project; anyone else manages the ones they own."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    store.update_user_admin(owner.id, True)
+    member, member_project = _user_and_project(store, tmp_path, "member")
+    store.add_member(project.id, owner.id, member.id)
+
+    assert set(store.manageable_project_ids(owner.id)) == {project.id, member_project.id}
+    assert store.manageable_project_ids(member.id) == [member_project.id]
+
+
+def test_session_scope_is_inherited_only_while_its_authorization_holds(tmp_path: Path) -> None:
+    """A runtime-minted turn keeps its session's project until that grant changes."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    store.update_user_admin(owner.id, True)
+    member, _member_project = _user_and_project(store, tmp_path, "member")
+    store.add_member(project.id, owner.id, member.id)
+    _pair(store, owner.id, project_id=project.id, assignee_user_id=member.id)
+
+    inherited = store.resolve_session_scope(
+        member.id, project.id, channel="weixin.release", chat_id="member-sender"
+    )
+    assert inherited is not None
+    assert (inherited.project_id, inherited.workspace_path) == (project.id, project.workspace_path)
+
+    assert store.resolve_session_scope(
+        member.id, project.id, channel="weixin.release", chat_id="member-sender",
+    ) is not None
+    assert store.resolve_session_scope(
+        member.id, "col_missing", channel="weixin.release", chat_id="member-sender",
+    ) is None
+
+    # Pausing or reassigning the instance withdraws the automation's authority.
+    store.update_channel_assignment(
+        owner.id, channel_type="weixin", instance_id="release", enabled=False
+    )
+    assert store.resolve_session_scope(
+        member.id, project.id, channel="weixin.release", chat_id="member-sender",
+    ) is None
+    store.update_channel_assignment(
+        owner.id, channel_type="weixin", instance_id="release", enabled=True
+    )
+    assert store.remove_member(project.id, owner.id, member.id)
+    assert store.resolve_session_scope(
+        member.id, project.id, channel="weixin.release", chat_id="member-sender",
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_automation_turns_never_provision_an_identity(
+    tmp_path: Path,
+    local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
+) -> None:
+    """Cron and heartbeat turns inherit their session instead of inventing a user."""
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    store, repository = local_collaboration_repository
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    store.update_user_admin(owner.id, True)
+    loop = _scope_loop(workspace, repository, _provider())
+    before = {user.id for user in store.list_users()}
+
+    cron = InboundMessage(
+        "weixin", "cron", "wx-open-id", "run the scheduled job",
+        session_key_override="weixin:wx-open-id",
+    )
+    heartbeat = InboundMessage("weixin", "user", "wx-open-id", "heartbeat check")
+
+    assert await loop._conversation_scope_for_message(cron) is None
+    assert await loop._conversation_scope_for_message(heartbeat) is None
+    assert await loop._effective_session_key(cron) == "weixin:wx-open-id"
+    assert await loop._effective_session_key(heartbeat) == "weixin:wx-open-id"
+    # No user, project, or identity was invented for either runtime sender.
+    assert {user.id for user in store.list_users()} == before
+    assert await repository.resolve_identity("weixin", "cron") is None
+    assert await repository.resolve_identity("weixin", "user") is None
+
+    # A session that records a project keeps the automation inside it.
+    session = loop.sessions.get_or_create("weixin:wx-open-id")
+    session.metadata[COLLABORATION_USER_METADATA_KEY] = owner.id
+    session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = project.id
+    loop.sessions.save(session)
+    scoped = await loop._conversation_scope_for_message(cron)
+
+    assert scoped is not None
+    assert scoped.project_id == project.id
+    assert scoped.workspace_path == project.workspace_path
+
+    # Losing that membership refuses the turn rather than silently widening it.
+    store.delete_project(project.id, owner.id)
+    with pytest.raises(CollaborationPermissionError, match="no longer authorized"):
+        await loop._conversation_scope_for_message(cron)

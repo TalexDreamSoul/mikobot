@@ -1232,21 +1232,48 @@ class GatewayHTTPHandler:
                 if admin else await self.collaboration.list_projects(user.id)
             )[:256]
             assignments = (await self.collaboration.list_channel_assignments(user.id))[:256]
+            manageable = (await self.collaboration.manageable_project_ids(user.id))[:256]
         except (CollaborationStoreError, ValueError):
             return _http_error(503, "collaboration service unavailable")
         active_project_id = user.default_project_id
         if active_project_id not in {project.id for project in projects}:
             active_project_id = projects[0].id if projects else None
+        snapshot = self._channel_registry_snapshot()
         return _http_json_response(
             {
                 "user": user_payload(user),
                 "is_admin": admin,
                 "projects": [project_payload(project) for project in projects],
-                "assignments": [channel_assignment_payload(item) for item in assignments],
+                "assignments": [
+                    channel_assignment_payload(
+                        item,
+                        presentation=_claimable_channel_presentation(
+                            snapshot, item.channel_type, item.instance_id
+                        ),
+                    )
+                    for item in assignments
+                ],
                 "active_project_id": active_project_id,
+                "manageable_project_ids": manageable,
             },
             extra_headers=_NO_STORE_HEADERS,
         )
+
+    def _channel_registry_snapshot(self) -> object | None:
+        """Return the current extension snapshot, or nothing when unavailable.
+
+        The projects and assignments read must keep working on a gateway without
+        an extension registry, so a missing or failing registry only costs the
+        instance's display name and status.
+        """
+        registry = self.settings.extensions
+        if registry is None:
+            return None
+        try:
+            return registry.snapshot()
+        except Exception:
+            self._log.warning("unable to read the channel registry snapshot")
+            return None
 
     async def _handle_collaboration_claimable_channels(self, request: WsRequest) -> Response:
         """List the instances the caller may pair into a project.
@@ -1434,6 +1461,7 @@ class GatewayHTTPHandler:
                     channel_type=required_string(payload, "channel_type"),
                     instance_id=required_string(payload, "instance_id"),
                     enabled=optional_enabled(payload),
+                    project_id=optional_string(payload, "project_id"),
                 )
                 return _http_json_response({"assignment": channel_assignment_payload(assignment)})
             if operation == "assignment/delete":

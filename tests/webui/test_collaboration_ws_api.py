@@ -949,3 +949,80 @@ async def test_another_member_cannot_take_over_a_connect_session_provenance(tmp_
         response = await handler.dispatch(_connection(request), request)
         assert response is not None and response.status_code == 200
         assert _json(response)["channels"] == []
+
+@pytest.mark.asyncio
+async def test_index_names_assigned_instances_and_the_projects_the_caller_manages(
+    tmp_path,
+) -> None:
+    """The Channels surface reads one payload: named instances plus its own authority."""
+    handler = await _handler(tmp_path)
+    _install_registry(
+        handler,
+        _channel_instances_snapshot("weixin", "WeChat", (("front-desk", "enabled"),)),
+    )
+    admin = _local_connection()
+    member = _proxy_connection("member")
+    member_id = (await _identity(handler, member))["user"]["id"]
+    shared = await handler.dispatch_webui_mutation(
+        admin, "collaboration.project.create", {"name": "Shared"}
+    )
+    shared_id = _json(shared)["project"]["id"]
+    added = await handler.dispatch_webui_mutation(
+        admin,
+        "collaboration.project.member.add",
+        {"project_id": shared_id, "member_user_id": member_id},
+    )
+    assert added.status_code == 200
+    challenge_id, code = await _create_pairing(
+        handler, admin, project_id=shared_id, channel_type="weixin",
+        instance_id="front-desk", assignee_user_id=member_id,
+    )
+    await handler.collaboration.verify_pairing_challenge(
+        code, channel_type="weixin", instance_id="front-desk", sender_id="member-sender"
+    )
+    consumed = await handler.dispatch_webui_mutation(
+        admin, "collaboration.pairing.consume", {"challenge_id": challenge_id}
+    )
+    assert consumed.status_code == 200
+
+    index = await _identity(handler, _local_connection("/api/collaboration"))
+    assignment = next(
+        item for item in index["assignments"] if item["instance_id"] == "front-desk"
+    )
+
+    assert assignment["channel_display_name"] == "WeChat"
+    assert assignment["display_name"] == "front-desk"
+    assert assignment["status"] == "running"
+    assert shared_id in index["manageable_project_ids"]
+
+    # The member belongs to the project but does not own it, so the UI must not
+    # offer them controls the store would refuse.
+    member_index = await _identity(handler, _proxy_connection("member"))
+    assert shared_id not in member_index["manageable_project_ids"]
+    assert [item["instance_id"] for item in member_index["assignments"]] == ["front-desk"]
+
+    moved = await handler.dispatch_webui_mutation(
+        member,
+        "collaboration.assignment.update",
+        {
+            "channel_type": "weixin",
+            "instance_id": "front-desk",
+            "project_id": member_index["manageable_project_ids"][0],
+        },
+    )
+    assert moved.status_code == 404
+
+    target = await handler.dispatch_webui_mutation(
+        admin, "collaboration.project.create", {"name": "Front office"}
+    )
+    target_id = _json(target)["project"]["id"]
+    reassigned = await handler.dispatch_webui_mutation(
+        admin,
+        "collaboration.assignment.update",
+        {"channel_type": "weixin", "instance_id": "front-desk", "project_id": target_id},
+    )
+
+    assert reassigned.status_code == 200
+    assert _json(reassigned)["assignment"]["project_id"] == target_id
+    assert _json(reassigned)["assignment"]["enabled"] is True
+

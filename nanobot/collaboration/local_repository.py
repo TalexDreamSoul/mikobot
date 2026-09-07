@@ -92,6 +92,9 @@ class AsyncLocalCollaborationRepository:
     async def list_all_projects(self, actor_user_id: str) -> list[Project]:
         return await asyncio.to_thread(self._store.list_all_projects, actor_user_id)
 
+    async def manageable_project_ids(self, actor_user_id: str) -> list[str]:
+        return await asyncio.to_thread(self._store.manageable_project_ids, actor_user_id)
+
     async def update_project(
         self,
         project_id: str,
@@ -146,11 +149,12 @@ class AsyncLocalCollaborationRepository:
 
     async def update_channel_assignment(
         self, actor_user_id: str, *, channel_type: str, instance_id: str,
-        enabled: bool | None = None,
+        enabled: bool | None = None, project_id: str | None = None,
     ) -> ChannelAssignment:
         return await asyncio.to_thread(
             self._store.update_channel_assignment, actor_user_id,
             channel_type=channel_type, instance_id=instance_id, enabled=enabled,
+            project_id=project_id,
         )
 
     async def delete_channel_assignment(
@@ -226,4 +230,13 @@ class AsyncLocalCollaborationRepository:
     ) -> ConversationScope:
         return await asyncio.to_thread(
             self._store.resolve_scope, channel, sender_id, chat_id, metadata, default_workspace
+        )
+
+    async def resolve_session_scope(
+        self, user_id: str, project_id: str, *, channel: str, chat_id: str,
+        thread_id: str | None = None,
+    ) -> ConversationScope | None:
+        return await asyncio.to_thread(
+            self._store.resolve_session_scope, user_id, project_id,
+            channel=channel, chat_id=chat_id, thread_id=thread_id,
         )

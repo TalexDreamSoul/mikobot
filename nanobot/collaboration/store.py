@@ -330,6 +330,26 @@ class CollaborationStore:
                     projects.append(_project(project))
             return sorted(projects, key=lambda item: (item.updated_at_ms, item.id), reverse=True)
 
+    def manageable_project_ids(self, actor_user_id: str) -> list[str]:
+        """Return the projects *actor_user_id* may administer.
+
+        A system administrator manages every project; anyone else manages the
+        ones they own. The WebUI needs this to decide which channel controls to
+        offer, rather than presenting actions the store would refuse.
+        """
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        with self._state() as state:
+            self._require_user(state, actor_user_id)
+            if self._is_admin(state, actor_user_id):
+                return sorted(state["projects"])
+            return sorted(
+                membership.project_id
+                for value in state["memberships"].values()
+                if (membership := _membership(value)).user_id == actor_user_id
+                and membership.role is MembershipRole.OWNER
+                and membership.project_id in state["projects"]
+            )
+
     def list_all_projects(self, actor_user_id: str) -> list[Project]:
         """Return every project; only a system administrator may ask."""
         actor_user_id = _id(actor_user_id, "actor_user_id")
@@ -548,11 +568,20 @@ class CollaborationStore:
         channel_type: str,
         instance_id: str,
         enabled: bool | None = None,
+        project_id: str | None = None,
     ) -> ChannelAssignment:
+        """Pause an instance, or move it to another project the actor manages.
+
+        Moving an instance requires managing both the project it leaves and the
+        one it joins, so a project owner cannot pull a colleague's instance into
+        their own project. The assignee follows the instance as a member of the
+        target project, exactly as consuming a Pair Code would add them.
+        """
         actor_user_id = _id(actor_user_id, "actor_user_id")
         channel_type = _key(channel_type, "channel_type")
         instance_id = _key(instance_id, "instance_id")
-        if enabled is None:
+        project_id = _id(project_id, "project_id") if project_id is not None else None
+        if enabled is None and project_id is None:
             raise ValueError("provide at least one assignment field")
         with self._state() as state:
             key = _channel_instance_key(channel_type, instance_id)
@@ -561,10 +590,25 @@ class CollaborationStore:
                 raise CollaborationNotFoundError("channel assignment not found")
             assignment = _channel_assignment(value)
             self._require_manager(state, assignment.project_id, actor_user_id)
+            now = _now()
+            target_project_id = assignment.project_id
+            if project_id is not None and project_id != assignment.project_id:
+                self._require_project(state, project_id)
+                self._require_manager(state, project_id, actor_user_id)
+                target_project_id = project_id
+                member_key = _member_key(target_project_id, assignment.assignee_user_id)
+                if member_key not in state["memberships"]:
+                    state["memberships"][member_key] = _encode_membership(
+                        ProjectMembership(
+                            target_project_id, assignment.assignee_user_id,
+                            MembershipRole.MEMBER, now,
+                        )
+                    )
             updated = ChannelAssignment(
-                assignment.channel_type, assignment.instance_id, assignment.project_id,
-                assignment.assignee_user_id, enabled, assignment.created_by_user_id,
-                assignment.created_at_ms, _now(),
+                assignment.channel_type, assignment.instance_id, target_project_id,
+                assignment.assignee_user_id,
+                enabled if enabled is not None else assignment.enabled,
+                assignment.created_by_user_id, assignment.created_at_ms, now,
             )
             state["channelAssignments"][key] = _encode_channel_assignment(updated)
             self._save(state)
@@ -811,6 +855,39 @@ class CollaborationStore:
             del state["conversationBindings"][key]
             self._save(state)
             return True
+
+    def resolve_session_scope(
+        self, user_id: str, project_id: str, *, channel: str, chat_id: str,
+        thread_id: str | None = None,
+    ) -> ConversationScope | None:
+        """Return the scope a session's recorded owner still holds, or ``None``.
+
+        Runtime-minted turns (cron, triggers, recovery) carry no external sender
+        to resolve, so they inherit whatever their target session was already
+        authorized for. ``None`` means that authorization no longer holds: the
+        project or the user is gone, the membership was revoked, or the channel
+        instance has since been reassigned elsewhere.
+        """
+        user_id = _id(user_id, "user_id")
+        project_id = _id(project_id, "project_id")
+        channel, chat_id = _key(channel, "channel"), _key(chat_id, "chat_id")
+        thread_id = _optional_key(thread_id, "thread_id")
+        with self._state() as state:
+            user_value = state["users"].get(user_id)
+            project_value = state["projects"].get(project_id)
+            if user_value is None or project_value is None:
+                return None
+            if not self._is_member(state, project_id, user_id):
+                return None
+            assignment = self._assignment_for_channel(state, channel)
+            if assignment is not None and (
+                not assignment.enabled or assignment.project_id != project_id
+            ):
+                return None
+            return self._project_scope(
+                ConversationScopeKind.DIRECT, _user(user_value), _project(project_value),
+                None, assignment, _scope_suffix(channel, chat_id, thread_id),
+            )
 
     def resolve_scope(self, channel: str, sender_id: str, chat_id: str,
                       metadata: Mapping[str, object] | None,

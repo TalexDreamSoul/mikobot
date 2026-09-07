@@ -1829,6 +1829,15 @@ class SessionManager:
         """Return a cached session without creating or loading one from disk."""
         return self._cached(key)
 
+    def peek(self, key: str) -> Session | None:
+        """Return the persisted session for *key*, without creating or caching one.
+
+        Callers that only need to read what a session already recorded use this
+        instead of ``get_or_create``, which would mint an empty session for a key
+        that has never been written.
+        """
+        return self._cached(key) or self._load(key)
+
     def set_delete_observer(self, observer: Callable[[str], None]) -> None:
         """Observe explicit session deletion for process-local state cleanup."""
         self._delete_observer = observer
