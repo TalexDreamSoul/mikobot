@@ -6,6 +6,7 @@ For tagged releases, see [GitHub Releases](https://github.com/HKUDS/nanobot/rele
 
 ## Highlights
 
+- **2026-09-07** 🔌 Released **v0.5.1** — channels move to their own WebUI surface where each instance picks its project, nanobot's own scheduled turns stop minting a user and an empty project apiece and instead inherit the session they run in, and the Pair Code no longer clears itself a second after it appears. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.5.1) for details.
 - **2026-09-06** 🧹 Released **v0.5.0** — collapses the multi-tenant control plane to projects and channel assignments: one administrator hands channel instances to members with a single Pair Code, per-project Skill/MCP limits, the Postgres backend removed, and the host owner's own turns kept out of the collaboration path. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.5.0) for details.
 - **2026-07-24** 🧭 Guided first-run setup, inline subagents, and model switching from the composer.
 - **2026-07-23** 🔎 Grok OAuth with hosted X Search, live image settings, and clearer fallback models.
