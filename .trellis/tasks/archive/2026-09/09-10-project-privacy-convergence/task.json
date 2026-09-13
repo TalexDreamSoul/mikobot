@@ -1,0 +1,30 @@
+{
+  "id": "project-privacy-convergence",
+  "name": "project-privacy-convergence",
+  "title": "Converge project privacy and runtime safety",
+  "description": "Implement the approved architectural convergence with project-bound identity, memory, revocation, sandbox safety, consistent product surfaces, and isolated full validation",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "TalexDreamSoul",
+  "assignee": "TalexDreamSoul",
+  "createdAt": "2026-09-10",
+  "completedAt": "2026-09-13",
+  "branch": "main",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "Completed and verified locally. See validation.json for full backend/frontend/native sandbox/browser evidence. Dedicated services and temporary acceptance files removed. No commit, publish or deployment; left unarchived to avoid the archive script's automatic commit.",
+  "meta": {
+    "validation": "validation.json",
+    "committed": false,
+    "archived": false
+  }
+}

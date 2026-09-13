@@ -1,0 +1,4 @@
+{"file":".agent/design.md","reason":"Core and composition boundaries"}
+{"file":".agent/security.md","reason":"Workspace, network and sandbox invariants"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Persistence and revocation contracts"}
+{"file":".trellis/tasks/09-10-project-privacy-convergence/design.md","reason":"Approved cross-slice interfaces"}

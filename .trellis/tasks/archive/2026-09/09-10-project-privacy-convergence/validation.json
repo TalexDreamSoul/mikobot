@@ -1,0 +1,57 @@
+{
+  "status": "passed",
+  "date": "2026-09-10",
+  "backend": {
+    "command": ".venv/bin/python -m pytest -q -n 4",
+    "scope": ["tests", "nanobot/channels"],
+    "passed": 7548,
+    "skipped": 13,
+    "failed": 0,
+    "warnings": ["Existing aiohttp BasicAuth deprecation in Discord proxy test"],
+    "environment": "Temporary HOME/config; external provider credentials omitted"
+  },
+  "frontend": {
+    "command": "bun run test --maxWorkers=4 --minWorkers=2 && bun run lint && bun run build",
+    "test_files_passed": 81,
+    "tests_passed": 1206,
+    "failed": 0,
+    "eslint": "passed",
+    "typescript_and_vite_build": "passed",
+    "warnings": ["Vite bundle chunk-size advisory; no suppression added"]
+  },
+  "python_quality": {
+    "ruff": "passed",
+    "basedpyright": "0 errors, 0 warnings, 0 notes"
+  },
+  "native_sandbox": {
+    "platform": "Linux aarch64 container; Bubblewrap 0.8.0",
+    "fixture_permissions": ["SYS_ADMIN", "NET_ADMIN", "seccomp=unconfined"],
+    "mounts": "Only sandbox.py under review, read-only; no user runtime directories",
+    "allowed": ["project file read", "project file write", "exact authorized attachment"],
+    "denied": ["sandbox-external file", "symlink escape", "host environment credential", "parent process root via proc", "unbound attachment", "reachable outer loopback listener from member namespace"],
+    "host_bwrap_proc_escape": "denied",
+    "exit_code": 0
+  },
+  "browser_smoke": {
+    "surface": "Real gateway + built WebUI, local mock model, two authenticated HTTP/WebSocket proxy fixtures",
+    "owner": "Overview/admin navigation and chat round-trip passed",
+    "member": "Member-only navigation and chat round-trip passed on final built source",
+    "model_spy": "All six synthetic member/title requests omitted HOST_PRIVATE_CANARY",
+    "same_project_other_member_read": 404,
+    "revoked_member_read": 404,
+    "member_host_inventory": 403,
+    "admin_deep_link": "Member redirected to Appearance with explanatory notice",
+    "oidc": "Covered by mocked backend/frontend tests, not a real identity-provider login"
+  },
+  "cli_smoke": {
+    "codex_config_export_exit": 0,
+    "retired_include_nanobot_flag_exit": 2,
+    "codex_configuration_written": false
+  },
+  "boundaries": [
+    "No publish, commit, deployment or changes to the existing user runtime configuration",
+    "No real chat-platform account or external LLM calls",
+    "Kernel sandbox proof is separate from the 13 skipped backend tests",
+    "Trusted operator, providers and installed extensions remain trusted infrastructure; not hostile multi-tenant SaaS isolation"
+  ]
+}
