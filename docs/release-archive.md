@@ -6,13 +6,10 @@ For this fork's tagged releases, see [GitHub Releases](https://github.com/TalexD
 
 ## Unreleased
 
-- Separate member/project profiles and automatic archives from shared files; revalidate tool and recovery authority, including explicit internal-message provenance.
-- Require fail-closed member execution, scoped private media, and process/network-isolated Linux Bubblewrap; preserve owner workflows and legacy project-qualified session keys.
-- Separate member navigation from host administration, make runtime health failures visible, and remove the unsupported Codex bridge export flags.
-- Handle kernels that do not expose `SO_ACCEPTCONN` without restarting an otherwise live WebSocket listener.
 
 ## Highlights
 
+- **2026-09-13** Released **v0.6.0** — member turns now use project-bound identities, isolated private profiles and archives, revocation-safe sessions, fail-closed Linux Bubblewrap execution, and a member surface separated from host administration. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.6.0) for details.
 - **2026-09-07** 🏠 Released **v0.5.2** — the host owner reaching in over a chat channel is no longer namespaced against themselves, so their WeChat or Telegram conversation keeps the history it already had instead of starting empty. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.5.2) for details.
 - **2026-09-07** 🔌 Released **v0.5.1** — channels move to their own WebUI surface where each instance picks its project, nanobot's own scheduled turns stop minting a user and an empty project apiece and instead inherit the session they run in, and the Pair Code no longer clears itself a second after it appears. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.5.1) for details.
 - **2026-09-06** 🧹 Released **v0.5.0** — collapses the multi-tenant control plane to projects and channel assignments: one administrator hands channel instances to members with a single Pair Code, per-project Skill/MCP limits, the Postgres backend removed, and the host owner's own turns kept out of the collaboration path. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.5.0) for details.
