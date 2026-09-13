@@ -155,7 +155,7 @@ def test_configured_mcp_classifies_transports_and_excludes_all_sensitive_values(
     assert remote.trust is ExtensionTrust.REMOTE_SERVICE
     assert remote.execution is ExtensionExecution.REMOTE
     assert remote.isolated is None
-    assert remote.lifecycle is ExtensionLifecycle.DISCOVERED
+    assert remote.lifecycle is ExtensionLifecycle.UNAVAILABLE
     assert stdio.configuration is not None
     assert (stdio.configuration.section, stdio.configuration.item) == ("apps", "mcp")
     assert stdio.components[0].configuration == stdio.configuration
@@ -227,16 +227,18 @@ def test_configured_mcp_canonicalizes_names_orders_packages_and_maps_runtime_sta
         "gamma": MCPServerConfig(type="stdio", command="gamma-mcp"),
         "alpha": MCPServerConfig(type="stdio", command="alpha-mcp"),
         "beta": MCPServerConfig(type="stdio", command="beta-mcp"),
+        "missing": MCPServerConfig(type="stdio", command="missing-mcp"),
     }
     snapshot = _configured_adapter(
         servers,
-        {arbitrary: "failed", "gamma": "connecting", "alpha": "connected"},
+        {arbitrary: "failed", "gamma": "connecting", "alpha": "connected", "beta": "unknown"},
     ).snapshot()
 
     assert [package.name for package in snapshot.packages] == [
         "alpha",
         "beta",
         "gamma",
+        "missing",
         *sorted(expected.values()),
     ]
     packages = {package.name: package for package in snapshot.packages}
@@ -250,7 +252,8 @@ def test_configured_mcp_canonicalizes_names_orders_packages_and_maps_runtime_sta
     assert packages[expected[arbitrary]].lifecycle is ExtensionLifecycle.FAILED
     assert packages["gamma"].lifecycle is ExtensionLifecycle.RELOADING
     assert packages["alpha"].lifecycle is ExtensionLifecycle.ENABLED
-    assert packages["beta"].lifecycle is ExtensionLifecycle.DISCOVERED
+    assert packages["beta"].lifecycle is ExtensionLifecycle.UNAVAILABLE
+    assert packages["missing"].lifecycle is ExtensionLifecycle.UNAVAILABLE
 
 
 @pytest.mark.asyncio

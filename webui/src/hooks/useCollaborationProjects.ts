@@ -17,6 +17,7 @@ import {
 import type {
   CollaborationCapabilities,
   CollaborationPayload,
+  CollaborationProjectMember,
   CollaborationProjectPayload,
   CollaborationProjectRole,
 } from "@/lib/types";
@@ -64,6 +65,13 @@ export function useCollaborationProjects() {
     } finally {
       if (detailRequestRef.current === request) setDetailLoading(false);
     }
+  }, [getToken]);
+
+  const loadProjectMembers = useCallback(async (
+    nextProjectId: string,
+  ): Promise<CollaborationProjectMember[]> => {
+    const next = await fetchCollaborationProject(getToken(), nextProjectId);
+    return next.members;
   }, [getToken]);
 
   useEffect(() => {
@@ -267,6 +275,7 @@ export function useCollaborationProjects() {
 
   return {
     summary,
+    loaded: summary !== null,
     isAdmin: summary?.is_admin ?? false,
     projectId,
     detail,
@@ -278,6 +287,7 @@ export function useCollaborationProjects() {
     selectProject,
     reload: loadSummary,
     refreshDetail,
+    loadProjectMembers,
     createProject,
     renameProject,
     removeProject,

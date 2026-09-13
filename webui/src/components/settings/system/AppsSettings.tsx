@@ -245,6 +245,12 @@ export function AppsCatalogSettings({
   return (
     <div className="space-y-7">
       <div role="status" className="sr-only">{oauthStatusAnnouncement}</div>
+      <p className="max-w-2xl text-[12.5px] leading-5 text-muted-foreground">
+        {tx(
+          "settings.apps.description",
+          "Apps manages capabilities you can invoke in chat. Host runtime packages and their health are reported separately in Extensions.",
+        )}
+      </p>
       <section className="space-y-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
           <div className="relative flex-1">
@@ -538,15 +544,21 @@ function McpAppsCatalogRow({
   const hasFields = preset.required_fields.length > 0;
   const needsSetupInput = missingFields.length > 0;
   const configuredInstalled = preset.installed && preset.configured;
-  const readyInstalled = preset.enabled ?? configuredInstalled;
-  const runtimeConnected = !toggleable && preset.runtime_status === "connected";
-  const runtimeConnecting = !toggleable && preset.runtime_status === "connecting";
-  const runtimeFailed = !toggleable && preset.runtime_status === "failed";
-  const statusLabel = toggleable
-    ? tx("settings.nanobotFeatures.enabled", "Enabled")
-    : runtimeConnected
-      ? tx("connection.open", "Connected")
-      : mcpPresetStatusLabel(preset.status, tx);
+  const runtimeConnected = preset.runtime_status === "connected";
+  const runtimeConnecting = preset.runtime_status === "connecting";
+  const runtimeFailed = preset.runtime_status === "failed";
+  const readyInstalled = toggleable
+    ? preset.enabled === true && (preset.runtime_status === undefined || runtimeConnected)
+    : configuredInstalled && runtimeConnected;
+  const statusLabel = runtimeFailed
+    ? tx("settings.mcp.connectionFailed", "Connection failed")
+    : runtimeConnecting
+      ? tx("settings.mcp.connectingLabel", "Connecting…")
+      : runtimeConnected
+        ? tx("connection.open", "Connected")
+        : toggleable && preset.enabled
+          ? tx("settings.nanobotFeatures.enabled", "Enabled")
+          : mcpPresetStatusLabel(preset.status, tx);
   const failureLabel = tx("settings.mcp.connectionFailed", "Connection failed.");
   const failureStatusLabel = failureLabel.replace(/[.!。！]+$/u, "");
   const description = tx(
@@ -597,14 +609,14 @@ function McpAppsCatalogRow({
           <p
             className={cn(
               "mt-0.5 flex min-w-0 items-center gap-1.5 text-[12.5px] leading-5 text-muted-foreground",
-              runtimeFailed && configuredInstalled && "font-medium text-destructive",
+              runtimeFailed && "font-medium text-destructive",
             )}
           >
-            {runtimeFailed && configuredInstalled ? (
+            {runtimeFailed ? (
               <TriangleAlert className="h-3.5 w-3.5 shrink-0" aria-hidden />
             ) : null}
             <span className="truncate">
-              {runtimeFailed && configuredInstalled ? failureLabel : detail}
+              {runtimeFailed ? failureLabel : detail}
             </span>
           </p>
         </div>
@@ -626,7 +638,7 @@ function McpAppsCatalogRow({
                 onClick={onOAuthCancel}
               />
             </>
-          ) : runtimeConnecting && configuredInstalled ? (
+          ) : runtimeConnecting ? (
             <>
               <AppsActionButton
                 ariaLabel={`${preset.display_name}: ${tx("settings.mcp.connectingLabel", "Connecting…")}`}
@@ -643,7 +655,7 @@ function McpAppsCatalogRow({
                 <Trash2 className="h-4 w-4" aria-hidden />
               </AppsActionButton>
             </>
-          ) : runtimeFailed && configuredInstalled ? (
+          ) : runtimeFailed ? (
             <AppsActionButton
               ariaLabel={t("settings.mcp.manageTitle", {
                 name: preset.display_name,
@@ -934,10 +946,14 @@ function appsTitle(item: AppsCatalogItem): string {
 
 function appsReady(item: AppsCatalogItem): boolean {
   if (item.kind === "cli") return item.app.installed;
-  if (item.preset.enabled !== undefined) return item.preset.enabled;
-  return item.preset.installed &&
-    item.preset.configured &&
-    item.preset.runtime_status === "connected";
+  const runtimeStatus = item.preset.runtime_status;
+  if (item.preset.enabled !== undefined) {
+    return item.preset.enabled
+      && (runtimeStatus === undefined || runtimeStatus === "connected");
+  }
+  return item.preset.installed
+    && item.preset.configured
+    && runtimeStatus === "connected";
 }
 
 function appsSearchText(item: AppsCatalogItem): string {

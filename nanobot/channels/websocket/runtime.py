@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import inspect
 import ipaddress
 import json
@@ -25,6 +26,7 @@ from nanobot.bus.events import (
 )
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.collaboration.models import COLLABORATION_USER_METADATA_KEY
 from nanobot.config.schema import Base
 from nanobot.session.webui_turns import (
     clear_websocket_turn_if_current,
@@ -47,7 +49,7 @@ from nanobot.webui.metadata import (
     WEBUI_TURN_METADATA_KEY,
 )
 from nanobot.webui.outbound_projection import WebUIOutboundProjector
-from nanobot.webui.session_identity import is_valid_webui_chat_id
+from nanobot.webui.session_identity import is_valid_webui_chat_id, webui_session_key
 from nanobot.webui.transcript import WEBUI_TRANSCRIPT_INCOMPLETE_KEY
 from nanobot.webui.websocket_logging import websockets_server_logger
 
@@ -647,11 +649,20 @@ class WebSocketChannel(BaseChannel):
         """Return whether every bound socket still has a live listen capability."""
         try:
             sockets = server.sockets
-            return bool(sockets) and server.is_serving() and all(
-                sock.fileno() >= 0
-                and bool(sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
-                for sock in sockets
-            )
+            if not sockets or not server.is_serving():
+                return False
+            for sock in sockets:
+                if sock.fileno() < 0:
+                    return False
+                try:
+                    if not sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN):
+                        return False
+                except OSError as exc:
+                    # Some macOS kernels do not expose SO_ACCEPTCONN. The
+                    # asyncio serving state and live descriptor remain valid.
+                    if exc.errno not in {errno.ENOPROTOOPT, errno.ENOTSUP}:
+                        return False
+            return True
         except OSError:
             return False
 
@@ -860,6 +871,11 @@ class WebSocketChannel(BaseChannel):
         default_chat_id = str(uuid.uuid4())
 
         try:
+            if principal_key is not None and not await self.gateway.prepare_webui_session(
+                connection, webui_session_key(default_chat_id)
+            ):
+                await connection.close(code=1008, reason="Project authorization is unavailable")
+                return
             ready: dict[str, Any] = {
                 "event": "ready",
                 "chat_id": default_chat_id,
@@ -896,6 +912,13 @@ class WebSocketChannel(BaseChannel):
 
                 content = _parse_inbound_payload(raw)
                 if content is None:
+                    continue
+                if principal_key is not None and not await self.gateway.can_access_webui_session(
+                    connection, webui_session_key(default_chat_id)
+                ):
+                    await self._send_event(
+                        connection, "error", detail="session_not_found", chat_id=default_chat_id
+                    )
                     continue
                 # WebSocket already authenticates at handshake time (token),
                 # so pairing is not applicable. Treat as non-DM to avoid
@@ -974,7 +997,23 @@ class WebSocketChannel(BaseChannel):
         *,
         label: str = "",
     ) -> None:
-        """Send a raw frame to one connection, cleaning up on ConnectionClosed."""
+        """Authorize live session fan-out again, including already-attached sockets."""
+        principal = (
+            self.gateway.endpoint.trusted_proxy_principal(connection)
+            or self.gateway.endpoint.oidc_principal(connection)
+            or getattr(connection, "_nanobot_oidc_principal", None)
+        )
+        payload = json.loads(raw)
+        chat_id = cast(dict[str, object], payload).get("chat_id") if isinstance(payload, dict) else None
+        if isinstance(chat_id, str):
+            session_key = webui_session_key(chat_id)
+            sessions = self.gateway.session_manager
+            session = sessions.peek(session_key) if sessions is not None else None
+            scoped = session is not None and COLLABORATION_USER_METADATA_KEY in session.metadata
+            if principal is not None or scoped:
+                if not await self.gateway.can_access_webui_session(connection, session_key):
+                    self._detach(connection, chat_id)
+                    return
         try:
             await connection.send(raw)
         except ConnectionClosed:
@@ -1067,7 +1106,9 @@ class WebSocketChannel(BaseChannel):
         """Serialize one ordinary outbound message selected by the projector."""
         conns = list(self._subs.get(msg.chat_id, ()))
         text = msg.content
-        wire_text = self._media.rewrite_local_markdown_images(text)
+        wire_text = self._media.rewrite_local_markdown_images(
+            text, session_key=webui_session_key(msg.chat_id)
+        )
         payload: dict[str, Any] = {
             "event": "message",
             "chat_id": msg.chat_id,
@@ -1080,7 +1121,9 @@ class WebSocketChannel(BaseChannel):
             payload["media"] = msg.media
             urls: list[dict[str, str]] = []
             for entry in msg.media:
-                signed = self._media.sign_or_stage_media_path(Path(entry))
+                signed = self._media.sign_or_stage_media_path(
+                    Path(entry), session_key=webui_session_key(msg.chat_id)
+                )
                 if signed is not None:
                     urls.append(signed)
             if urls:
@@ -1236,7 +1279,9 @@ class WebSocketChannel(BaseChannel):
             if delta:
                 buffered.append(delta)
             full_text = "".join(buffered)
-            rewritten = self._media.rewrite_local_markdown_images(full_text)
+            rewritten = self._media.rewrite_local_markdown_images(
+                full_text, session_key=webui_session_key(chat_id)
+            )
             completed_text = rewritten
             if delta or rewritten != full_text:
                 body["text"] = rewritten

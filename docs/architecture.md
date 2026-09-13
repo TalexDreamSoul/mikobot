@@ -82,14 +82,18 @@ the repository; only chat-channel senders and OIDC or proxy principals are
 resolved to a project scope, which sets their workspace, session namespace,
 and allowed capabilities.
 
-Turns nanobot mints for itself — cron jobs, local triggers, subagent results,
-recovery, continuation, and heartbeat runs — reach the bus on the channel they
-will answer on, under a fixed sender id no chat platform issues. They resolve no
-identity of their own. Instead they inherit the scope their target session
-already recorded: none for the host's own sessions, which keep the process
-workspace, and the stored project for a member's. An automation whose project,
-membership, or channel assignment has since changed is refused rather than
-downgraded to the host workspace.
+Internal cron, trigger, continuation, recovery, and subagent turns inherit the
+persisted user, project, route, assignment requirement, and binding of their source
+session. A sender label alone is not proof of an internal turn. Missing or revoked
+scope fails closed instead of falling back to the host. Tool execution rechecks the
+admitted capability, including queued subagents and policy changes during a model call.
+
+Member chat-channel keys include both user and project. Public WebUI chat IDs stay
+stable and pin their initial project in server-owned session metadata. Changing a
+default project affects new chats, not the ownership of an existing conversation.
+Reads, attachment, recovery, streaming, and context references recheck ownership;
+cross-session references additionally require the same user and project. Historical
+files are retained rather than guessed into a new namespace.
 
 Two WebUI surfaces manage this. **Channels** lists every assigned instance with
 its project, its runtime status, and its Pair Code flow; **Projects** covers
@@ -193,21 +197,25 @@ The schema accepts both camelCase and snake_case keys, but saves config with cam
 
 ### Agent-Owned State vs Effective Project Context
 
-Runtime code distinguishes the configured agent workspace from the effective
-project workspace carried by a session scope. They are often the same path, but
-a WebUI chat may select a separate project:
+The host's selected **working directory** is not the same concept as a managed
+collaboration **Project**. Host directory selection preserves the configured agent
+profile and memory. A member's project determines shared files and permissions,
+while private profile and memory live outside that shared directory.
 
-| Concern | Path owner |
-|---|---|
-| Session namespace, `SOUL.md`, `USER.md`, memory, and custom skills | Configured agent workspace |
-| Project `AGENTS.md`, relative tool paths, and shell working directory | Effective project workspace |
-| Workspace access mode and project metadata | Session workspace scope |
+| Concern | Host owner | Project member |
+|---|---|---|
+| Project instructions and ordinary file/tool root | Selected working directory | Authorized project workspace |
+| Profile and automatic memory/archive/Dream | Configured agent workspace | `<config-dir>/users/<user-id>/projects/<project-id>/` |
+| Conversation sharing | Legacy single-user rules | Same user and project only |
+| Inbound attachments | Host media store | `<config-dir>/users/<user-id>/media/<project-id>/`, exact authorized files |
+| Executable tools | Owner's configured policy | Linux Bubblewrap required for shell; host-managed CLI Apps unavailable |
 
-`ContextBuilder` combines project instructions with agent-owned profile and
-memory. Filesystem and search tools use the project as their ordinary boundary
-and receive only capability-specific read access to built-in/agent skills and
-the exact agent history file. Keep those cross-root capabilities read-only and
-explicit; do not treat the entire agent workspace as an allowed root.
+Filesystem capabilities grant only the member's exact profile/memory files,
+authorized attachments, and allowed built-in Skills in addition to shared project
+files. Private journals are not writable through ordinary file tools. Member Dream
+does not publish private conversation-derived Skills into shared project directories.
+Session-bound media signatures require current authorization on fetch and do not
+allow Markdown image paths to stage arbitrary host files.
 
 ## Memory and Sessions
 
@@ -221,6 +229,11 @@ Session history is the near-term conversation replay. Memory is the longer-term 
 | Bootstrap identity files | `<workspace>/SOUL.md`, `<workspace>/USER.md`, templates under `nanobot/templates/` |
 
 Dream is implemented in `nanobot/agent/memory.py` and scheduled by the runtime when enabled.
+
+The paths above describe the host store. Member stores use the private user/project
+root described above. Existing mixed historical memory is not automatically erased
+or declassified; operators should review legacy profile/memory files before sharing
+an upgraded deployment with unrelated people.
 
 ## Security Boundaries
 

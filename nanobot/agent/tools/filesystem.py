@@ -20,6 +20,13 @@ from nanobot.agent.tools.schema import (
     tool_parameters_schema,
 )
 from nanobot.config_base import Base
+from nanobot.security.member_access import (
+    current_member_attachment_files,
+    current_member_memory_files,
+    current_member_scope,
+    current_member_tool_scope,
+)
+from nanobot.security.private_media import user_private_memory_root
 from nanobot.security.workspace_access import current_tool_workspace
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
 
@@ -130,6 +137,44 @@ class _FsTool(Tool):
         include_media_dir: bool,
         extra_files_require_allowed_root: bool = False,
     ) -> Path:
+        member_scope = current_member_scope()
+        if member_scope is not None:
+            member = current_member_tool_scope()
+            if member is None:
+                raise PermissionError("member authorization has no active project")
+            # Project files are shared; profiles/journals and attachments are
+            # exact per-user/project capabilities, never ambient host roots.
+            files = list(current_member_memory_files(writable=not include_media_dir))
+            if self._workspace is not None and member.scope.user_id and member.scope.project_id:
+                private_root = user_private_memory_root(
+                    member.scope.user_id, project_id=member.scope.project_id
+                )
+                if Path(self._workspace).expanduser().resolve() == private_root:
+                    candidate = resolve_workspace_path(
+                        path, private_root, self._allowed_dir or private_root,
+                        extra_allowed_dirs, extra_allowed_files, include_media_dir=False,
+                    )
+                    if candidate not in files:
+                        raise PermissionError("private memory tool cannot access shared or journal-write paths")
+                    return candidate
+            skill_roots: list[Path] = []
+            if include_media_dir:
+                from nanobot.agent.skills import BUILTIN_SKILLS_DIR
+
+                files.extend(current_member_attachment_files())
+                skills = member.scope.allowed_skills
+                skill_roots = (
+                    [BUILTIN_SKILLS_DIR]
+                    if skills is None else [
+                        BUILTIN_SKILLS_DIR / name for name in skills
+                        if name not in {".", ".."} and Path(name).name == name
+                        and "/" not in name and "\\" not in name
+                    ]
+                )
+            return resolve_workspace_path(
+                path, member.project_root, member.project_root,
+                skill_roots, files, include_media_dir=False,
+            )
         access = current_tool_workspace(
             self._workspace,
             restrict_to_workspace=self._restrict_to_workspace,
@@ -149,7 +194,7 @@ class _FsTool(Tool):
 
     def _resolve_read(self, path: str) -> Path:
         plugin_skill_dirs: list[Path] = []
-        if self._workspace is not None:
+        if self._workspace is not None and current_member_scope() is None:
             from nanobot.agent.plugins import enabled_agent_plugin_skill_dirs
 
             try:
@@ -190,6 +235,9 @@ class _FsTool(Tool):
         return self._resolve_read(path)
 
     def _display_workspace(self) -> Path | None:
+        if current_member_scope() is not None:
+            member = current_member_tool_scope()
+            return member.project_root if member is not None else None
         return current_tool_workspace(self._workspace).project_path
 
 
@@ -309,7 +357,9 @@ class ReadFileTool(_FsTool):
 
             fp = self._resolve_read(path)
             if not fp.exists():
-                fp = _builtin_skill_read_path(path) or fp
+                builtin = _builtin_skill_read_path(path)
+                if builtin is not None:
+                    fp = self._resolve_read(str(builtin)) if current_member_scope() is not None else builtin
             if _is_blocked_device(fp):
                 return ToolResult.error(f"Error: Reading {fp} is blocked (device path that could hang or produce infinite output).")
             if not fp.exists():
@@ -1164,7 +1214,7 @@ class ListDirTool(_FsTool):
 
             if recursive:
                 for item in sorted(dp.rglob("*")):
-                    if any(p in self._IGNORE_DIRS for p in item.parts):
+                    if item.is_symlink() or any(p in self._IGNORE_DIRS for p in item.parts):
                         continue
                     total += 1
                     if len(items) < cap:
@@ -1172,7 +1222,7 @@ class ListDirTool(_FsTool):
                         items.append(f"{rel}/" if item.is_dir() else str(rel))
             else:
                 for item in sorted(dp.iterdir()):
-                    if item.name in self._IGNORE_DIRS:
+                    if item.is_symlink() or item.name in self._IGNORE_DIRS:
                         continue
                     total += 1
                     if len(items) < cap:

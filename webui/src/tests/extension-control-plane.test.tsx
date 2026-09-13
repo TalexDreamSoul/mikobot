@@ -315,6 +315,43 @@ describe("Executable risk acknowledgement", () => {
     );
   });
 
+  it("keeps an action's failed runtime descriptor visible when the follow-up inventory read fails", async () => {
+    let inventoryReads = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) !== "/api/settings/extensions") return jsonResponse({});
+      inventoryReads += 1;
+      if (inventoryReads === 1) return jsonResponse(extensionInventory());
+      return {
+        ok: false,
+        status: 503,
+        json: async () => ({ error: "gateway unavailable" }),
+      } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    requestMutation.mockResolvedValue({
+      ok: false,
+      actor_id: "operator",
+      action: "enable",
+      package_id: "ext:agent_plugin:desktop",
+      target_id: "ext:agent_plugin:desktop",
+      lifecycle: "failed",
+      message: "Runtime activation failed.",
+      package: { ...agentPluginPackage(), lifecycle: "failed" },
+    });
+    renderSurface();
+    await openPackage("Desktop Automation");
+    const user = userEvent.setup();
+
+    await user.click(within(detail()).getByRole("button", { name: "Enable" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", {
+      name: /Enable anyway/,
+    }));
+
+    expect(await screen.findByText("Runtime activation failed.")).toBeInTheDocument();
+    await waitFor(() => expect(inventoryReads).toBe(2));
+    expect(within(detail()).getAllByText("Failed").length).toBeGreaterThan(0);
+  });
+
   it("never demands acknowledgement for a declared action that is not enable or install", async () => {
     stubInventory(extensionInventory());
     requestMutation.mockResolvedValue({
@@ -428,7 +465,7 @@ describe("Settings navigation", () => {
 
   it("renders the Extensions section from the settings navigation", async () => {
     stubSettingsPage();
-    renderSettingsView({ initialSection: "overview", initialSettings: settingsPayload() });
+    renderSettingsView({ initialSection: "overview", initialSettings: settingsPayload(), isAdmin: true });
 
     const nav = await screen.findByRole("navigation", { name: "Settings sections" });
     await userEvent.setup().click(
@@ -441,9 +478,27 @@ describe("Settings navigation", () => {
 
   it("opens directly on the Extensions section when routed there", async () => {
     stubSettingsPage();
-    renderSettingsView({ initialSection: "extensions", initialSettings: settingsPayload() });
+    renderSettingsView({ initialSection: "extensions", initialSettings: settingsPayload(), isAdmin: true });
 
     expect(await screen.findByRole("list", { name: "Installed extension packages" }))
       .toBeInTheDocument();
+  });
+
+  it("redirects a member extension deep link to Appearance without requesting host inventory", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ available: true, packages: [], diagnostics: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    renderSettingsView({
+      initialSection: "extensions",
+      initialSettings: settingsPayload(),
+      isAdmin: false,
+      restrictedNotice: true,
+    });
+
+    expect(await screen.findByRole("status")).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Settings sections" });
+    expect(within(nav).getByRole("button", { name: "Settings: Appearance" })).toBeInTheDocument();
+    expect(within(nav).queryByRole("button", { name: /Extensions/ })).not.toBeInTheDocument();
+    expect(screen.getByText("Theme")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

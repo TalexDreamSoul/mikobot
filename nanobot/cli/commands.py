@@ -729,16 +729,6 @@ def mcp_codex_config(
         help="Project path to use as exported stdio server CWD",
     ),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to nanobot config file"),
-    include_nanobot: bool = typer.Option(
-        False,
-        "--include-nanobot",
-        help="Also export nanobot's project/task/context stdio MCP server",
-    ),
-    project_id: str | None = typer.Option(
-        None,
-        "--project-id",
-        help="Project id pinned into the exported nanobot MCP server",
-    ),
 ) -> None:
     """Print a Codex MCP config fragment; never writes a Codex config file."""
     from nanobot.agent.plugins import agent_plugin_mcp_servers
@@ -750,32 +740,6 @@ def mcp_codex_config(
         set_config_path(config_path)
     loaded = _load_config_for_cli(config_path, resolve_env=False)
     servers = agent_plugin_mcp_servers(loaded.workspace_path, loaded.tools.mcp_servers)
-    if include_nanobot:
-        from nanobot.config.schema import MCPServerConfig
-
-        bridge_name = "nanobot-project"
-        if bridge_name in servers:
-            console.print("[red]MCP server name 'nanobot-project' is already configured[/red]")
-            raise typer.Exit(1)
-        bridge_args = ["-m", "nanobot", "mcp", "serve"]
-        if config_path is not None:
-            bridge_args.extend(["--config", str(config_path)])
-        if project_id:
-            bridge_args.extend(["--project-id", project_id])
-        servers[bridge_name] = MCPServerConfig(
-            type="stdio",
-            command=sys.executable,
-            args=bridge_args,
-            enabled_tools=[
-                "nanobot_projects",
-                "nanobot_task_lists",
-                "nanobot_tasks",
-                "nanobot_task_create",
-                "nanobot_task_update",
-                "nanobot_context_sources",
-                "nanobot_context_read",
-            ],
-        )
     if server:
         unknown = sorted(set(server) - servers.keys())
         if unknown:

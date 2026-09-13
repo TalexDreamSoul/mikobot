@@ -1143,6 +1143,8 @@ function Shell({
   const { t, i18n } = useTranslation();
   const { client, getToken } = useClient();
   const collaboration = useCollaborationProjects();
+  const adminSurfacesEnabled = collaboration.loaded && collaboration.isAdmin;
+  const collaborationResolved = collaboration.loaded || !collaboration.loading;
   const { theme, toggle } = useTheme();
   const {
     sessions,
@@ -1216,9 +1218,10 @@ function Shell({
   const [runningChatIds, setRunningChatIds] = useState<Set<string>>(() => new Set());
   const [updatedChatIds, setUpdatedChatIds] = useState<Set<string>>(readSessionUpdateChatIds);
   const [workspaces, setWorkspaces] = useState<WorkspacesPayload | null>(null);
-  const skills = useSkills(getToken);
+  const skills = useSkills(getToken, adminSurfacesEnabled);
   const pageVisible = usePageVisibility();
   const [settingsSnapshot, setSettingsSnapshot] = useState<SettingsPayload | null>(null);
+  const [restrictedSettingsNotice, setRestrictedSettingsNotice] = useState(false);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [draftWorkspaceScope, setDraftWorkspaceScope] =
     useState<WorkspaceScopePayload | null>(null);
@@ -1259,6 +1262,27 @@ function Shell({
   );
 
   useEffect(() => {
+    if (!collaborationResolved || adminSurfacesEnabled) return;
+    const blocked = view === "apps"
+      || view === "skills"
+      || (view === "settings" && settingsInitialSection !== "appearance");
+    if (!blocked) return;
+    setRestrictedSettingsNotice(true);
+    navigate({
+      view: "settings",
+      activeKey,
+      settingsSection: "appearance",
+    }, { replace: true });
+  }, [
+    activeKey,
+    adminSurfacesEnabled,
+    collaborationResolved,
+    navigate,
+    settingsInitialSection,
+    view,
+  ]);
+
+  useEffect(() => {
     const applyRoute = () => {
       const route = readShellRoute();
       setActiveKey(route.activeKey);
@@ -1289,6 +1313,10 @@ function Shell({
   }, [client]);
 
   useEffect(() => {
+    if (!adminSurfacesEnabled) {
+      setSettingsSnapshot(null);
+      return;
+    }
     let cancelled = false;
     fetchSettings(getToken())
       .then((payload) => {
@@ -1300,7 +1328,7 @@ function Shell({
     return () => {
       cancelled = true;
     };
-  }, [getToken]);
+  }, [adminSurfacesEnabled, getToken]);
 
   useEffect(() => {
     try {
@@ -1318,6 +1346,7 @@ function Shell({
   }, [updatedChatIds]);
 
   const refreshPairingRequests = useCallback((): Promise<number> => {
+    if (!adminSurfacesEnabled) return Promise.resolve(0);
     if (pairingRefreshRef.current) return pairingRefreshRef.current;
 
     const request = (async () => {
@@ -1349,9 +1378,14 @@ function Shell({
     pairingRefreshRef.current = request;
     void request.then(clearRequest, clearRequest);
     return request;
-  }, [getToken]);
+  }, [adminSurfacesEnabled, getToken]);
 
   useEffect(() => {
+    if (!adminSurfacesEnabled) {
+      setPairingRequests([]);
+      setPairingError(null);
+      return undefined;
+    }
     if (!pageVisible) return undefined;
 
     let disposed = false;
@@ -1369,7 +1403,7 @@ function Shell({
       disposed = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [pageVisible, refreshPairingRequests]);
+  }, [adminSurfacesEnabled, pageVisible, refreshPairingRequests]);
 
   const activeSession = useMemo<ChatSummary | null>(() => {
     if (!activeKey) return null;
@@ -2097,17 +2131,36 @@ function Shell({
     [onSelectChat],
   );
 
-  const onOpenSettings = useCallback((section: SettingsSectionKey = "overview") => {
+  const onOpenSettings = useCallback((section?: SettingsSectionKey) => {
+    const requestedSection = section ?? (
+      collaborationResolved && !adminSurfacesEnabled ? "appearance" : "overview"
+    );
+    const safeSection = !collaborationResolved || adminSurfacesEnabled
+      || requestedSection === "appearance"
+      || requestedSection === "automations"
+      ? requestedSection
+      : "appearance";
+    setRestrictedSettingsNotice(
+      collaborationResolved && !adminSurfacesEnabled
+      && section !== undefined
+      && section !== "appearance"
+      && section !== "automations",
+    );
     setSessionSearchOpen(false);
-    navigate({ view: "settings", activeKey, settingsSection: section });
+    navigate({
+      view: shellViewForSettingsSection(safeSection),
+      activeKey,
+      settingsSection: safeSection,
+    });
     setMobileSidebarOpen(false);
-  }, [activeKey, navigate]);
+  }, [activeKey, adminSurfacesEnabled, collaborationResolved, navigate]);
 
   const onSettingsIntent = useCallback(() => {
     void loadSettingsView();
   }, []);
 
   const onOpenProjects = useCallback(() => {
+    setRestrictedSettingsNotice(false);
     setSessionSearchOpen(false);
     navigate({ view: "projects", activeKey, settingsSection: "overview" });
     setMobileSidebarOpen(false);
@@ -2118,6 +2171,7 @@ function Shell({
   }, []);
 
   const onOpenChannels = useCallback(() => {
+    setRestrictedSettingsNotice(false);
     setSessionSearchOpen(false);
     navigate({ view: "channels", activeKey, settingsSection: "overview" });
     setMobileSidebarOpen(false);
@@ -2132,32 +2186,49 @@ function Shell({
   }, [onOpenSettings]);
 
   const onOpenApps = useCallback(() => {
+    if (!adminSurfacesEnabled) {
+      onOpenSettings("apps");
+      return;
+    }
+    setRestrictedSettingsNotice(false);
     setSessionSearchOpen(false);
     navigate({ view: "apps", activeKey, settingsSection: "apps" });
     setMobileSidebarOpen(false);
-  }, [activeKey, navigate]);
+  }, [activeKey, adminSurfacesEnabled, navigate, onOpenSettings]);
 
   const onOpenAutomations = useCallback(() => {
+    setRestrictedSettingsNotice(false);
     setSessionSearchOpen(false);
     navigate({ view: "automations", activeKey, settingsSection: "automations" });
     setMobileSidebarOpen(false);
   }, [activeKey, navigate]);
 
   const onOpenSkills = useCallback(() => {
+    if (!adminSurfacesEnabled) {
+      onOpenSettings("skills");
+      return;
+    }
+    setRestrictedSettingsNotice(false);
     setSessionSearchOpen(false);
     navigate({ view: "skills", activeKey, settingsSection: "skills" });
     setMobileSidebarOpen(false);
-  }, [activeKey, navigate]);
+  }, [activeKey, adminSurfacesEnabled, navigate, onOpenSettings]);
 
   const onSettingsSectionChange = useCallback(
     (section: SettingsSectionKey) => {
+      const safeSection = adminSurfacesEnabled
+        || section === "appearance"
+        || section === "automations"
+        ? section
+        : "appearance";
+      setRestrictedSettingsNotice(!adminSurfacesEnabled && safeSection !== section);
       navigate({
-        view: shellViewForSettingsSection(section),
+        view: shellViewForSettingsSection(safeSection),
         activeKey,
-        settingsSection: section,
+        settingsSection: safeSection,
       });
     },
-    [activeKey, navigate],
+    [activeKey, adminSurfacesEnabled, navigate],
   );
 
   const onBackToChat = useCallback(() => {
@@ -2365,6 +2436,7 @@ function Shell({
 
   const onPairingAction = useCallback(
     async (action: "approve" | "deny", code: string) => {
+      if (!adminSurfacesEnabled) return;
       setPairingBusyCode(code);
       setPairingError(null);
       try {
@@ -2383,7 +2455,7 @@ function Shell({
         setPairingBusyCode(null);
       }
     },
-    [client, refreshPairingRequests],
+    [adminSurfacesEnabled, client, refreshPairingRequests],
   );
 
   const onDismissPairingRequest = useCallback((code: string) => {
@@ -2701,6 +2773,7 @@ function Shell({
     onOpenAutomations,
     onOpenSkills,
     onSettingsIntent,
+    showAdminNavigation: adminSurfacesEnabled,
     onProjectsIntent,
     onChannelsIntent,
     onOpenSearch: onOpenSessionSearch,
@@ -3034,9 +3107,12 @@ function Shell({
             ) : view !== "chat" ? (
               <div className="absolute inset-0 flex flex-col">
                 <Suspense fallback={<SurfaceLoadingFallback />}>
+                  {!collaborationResolved ? <SurfaceLoadingFallback /> : (
                   <SettingsView
                     theme={theme}
                     initialSection={settingsInitialSection}
+                    isAdmin={adminSurfacesEnabled}
+                    restrictedNotice={restrictedSettingsNotice}
                     initialSettings={settingsSnapshot}
                     showSidebar={view === "settings"}
                     onToggleTheme={toggle}
@@ -3051,6 +3127,7 @@ function Shell({
                     isRestarting={isRestarting}
                     hostChromeInset={showHostChrome}
                   />
+                  )}
                 </Suspense>
               </div>
             ) : null}
@@ -3118,14 +3195,16 @@ function Shell({
             </div>
           </div>
         ) : null}
-        <PairingCodePopup
-          requests={visiblePairingRequests}
-          total={visiblePairingRequests.length}
-          busyCode={pairingBusyCode}
-          error={pairingError}
-          onApprove={(code) => void onPairingAction("approve", code)}
-          onDismiss={onDismissPairingRequest}
-        />
+        {adminSurfacesEnabled ? (
+          <PairingCodePopup
+            requests={visiblePairingRequests}
+            total={visiblePairingRequests.length}
+            busyCode={pairingBusyCode}
+            error={pairingError}
+            onApprove={(code) => void onPairingAction("approve", code)}
+            onDismiss={onDismissPairingRequest}
+          />
+        ) : null}
       </div>
     </ThemeProvider>
   );

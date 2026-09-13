@@ -71,6 +71,20 @@ class GatewayServices:
         """Authorize a WebSocket connection to access one persisted WebUI session."""
         return await self.http.can_access_webui_session(connection, session_key)
 
+    async def prepare_webui_session(self, connection: Any, session_key: str) -> bool:
+        """Bind a newly minted chat to its verified member and project."""
+        return await self.http.prepare_webui_session(connection, session_key)
+
+    async def same_webui_user(self, origin: Any, target: Any) -> bool:
+        """Scope private UI state broadcasts to the same authenticated user."""
+        return await self.http.same_webui_user(origin, target)
+
+    async def can_reference_webui_session(
+        self, connection: Any, source_key: str, target_key: str
+    ) -> bool:
+        """Require both access and equal project ownership for context sharing."""
+        return await self.http.can_reference_webui_session(connection, source_key, target_key)
+
 
 def build_gateway_services(
     *,
@@ -125,6 +139,7 @@ def build_gateway_services(
         workspace_path=workspace_path,
         logger=logger,
         attachment_limits=ingress.attachments,
+        session_manager=session_manager,
     )
     transcripts = WebUITranscriptRecorder(log=logger)
     workspaces = WebUIWorkspaceController(

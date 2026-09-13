@@ -640,7 +640,7 @@
       "thirdPartyBrands": "Los nombres, logotipos y marcas de productos pertenecen a sus respectivos propietarios. Su uso es solo identificativo y no implica respaldo."
     },
     "apps": {
-      "description": "Añade herramientas a nanobot y luego úsalas con @ en el chat.",
+      "description": "Apps administra las capacidades que puedes invocar en el chat. Los paquetes del entorno anfitrión y su estado actual se muestran por separado en Extensiones.",
       "cliLabel": "Aplicación",
       "mcpLabel": "MCP",
       "channelLabel": "Canal",

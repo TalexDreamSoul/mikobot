@@ -4,10 +4,17 @@ import { fetchSkills } from "@/lib/api";
 import { isSkillsPayload, SKILLS_CHANGED_EVENT } from "@/lib/skill-events";
 import type { SkillSummary } from "@/lib/types";
 
-export function useSkills(getToken: () => string): SkillSummary[] {
+export function useSkills(
+  getToken: () => string,
+  enabled = true,
+): SkillSummary[] {
   const [skills, setSkills] = useState<SkillSummary[]>([]);
 
   useEffect(() => {
+    if (!enabled) {
+      setSkills([]);
+      return;
+    }
     let cancelled = false;
     let payloadVersion = 0;
     const refresh = () => {
@@ -34,7 +41,7 @@ export function useSkills(getToken: () => string): SkillSummary[] {
       cancelled = true;
       window.removeEventListener(SKILLS_CHANGED_EVENT, onSkillsChanged);
     };
-  }, [getToken]);
+  }, [enabled, getToken]);
 
   return skills;
 }

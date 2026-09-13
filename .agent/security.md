@@ -4,11 +4,13 @@ The agent operates with significant power (file system, shell, web). The followi
 
 ## Workspace Restriction
 
-Filesystem tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `apply_patch`) resolve paths through the workspace path resolver (`agent/tools/filesystem.py` / `agent/tools/path_utils.py`), which enforces that the resolved path must lie under the active workspace when workspace restriction is enabled. The media upload directory is always an internal extra read root while restricted.
+Filesystem tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `apply_patch`) use the workspace resolver with capability-specific roots. Restricted host tools retain the inherited media read root. Member tools never receive global media or host-history roots: only their project, exact own private profile/memory files, read-only own journals, authorized attachments, and approved built-in Skills are available.
 
 Additional filesystem roots must be capability-specific. `extra_allowed_dirs` is a legacy read-only alias. Use `extra_read_allowed_dirs` for read-only roots, `extra_write_allowed_dirs` only when a write-capable tool is intentionally allowed to modify an extra directory, and exact file allowlists when a tool may modify only specific files.
 
 Shell execution (`ExecTool`, `agent/tools/shell.py`) also respects `restrict_to_workspace` as an application-level guard: if enabled and `working_dir` is outside the workspace, the command is rejected before execution, and command text is checked for obvious workspace escapes. This is not process-level isolation; use an exec sandbox backend for that.
+
+Member requests require Linux Bubblewrap for shell execution and cannot select an outer shell/login script. Their environment is cleared and their filesystem, process, IPC and network capabilities are scoped. Missing/unsupported backends fail before spawn; configured host sandbox failures also never fall back to the native shell.
 
 **Rule**: Any new path-handling logic must go through the workspace path resolver or perform an equivalent containment check with explicit read/write capability semantics.
 
@@ -24,6 +26,12 @@ HTTP/SSE MCP transports are part of this boundary: validate configured MCP URLs 
 
 ## Shell Sandbox
 
-`tools/sandbox.py` provides optional command wrapping. The only backend currently shipped is `bwrap` (bubblewrap), intended for containerized deployments. On Windows and bare-metal Linux without `bwrap`, commands run in the native shell with workspace restriction as an application-level guard only.
+`tools/sandbox.py` ships only `bwrap` (Linux Bubblewrap). All modes isolate PID/IPC namespaces; member mode additionally isolates networking and rejects host extra binds. Owner commands without a configured backend retain their native-shell policy. Member commands always require the supported backend, including on hosts where it is unavailable.
 
 **Rule**: If adding a new sandbox backend, implement `_wrap_<name>(command, workspace, cwd) -> str` and register it in `_BACKENDS`.
+
+## Identity and Derived Work
+
+`InboundMessage.source` is set by producers, not client JSON. Neither sender labels nor session overrides grant runtime authority. Internal work inherits persisted user/project/assignment/binding provenance and revalidates it. Tool execution and consolidation validate current authorization; subagents must retain the same callback and private capabilities.
+
+Automatic member archives and profiles belong under `users/<uid>/projects/<pid>`, never a shared project's memory directory. Member Dream tools preserve their narrower private root and cannot modify shared project files or raw journals. New WebUI endpoints must authorize every read/mutation/reference and live fan-out, not just the initial attachment.

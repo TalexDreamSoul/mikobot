@@ -21,6 +21,7 @@ from nanobot.agent.tools.runtime_control import (
     RuntimeSnapshot,
 )
 from nanobot.config_base import Base
+from nanobot.security.member_access import current_member_scope
 
 if TYPE_CHECKING:
     from nanobot.agent.subagent import SubagentStatus
@@ -368,6 +369,15 @@ class MyTool(Tool):
         value: Any = None,
         **_kwargs: Any,
     ) -> str:
+        if current_member_scope() is not None and not (
+            action in ("inspect", "check")
+            and key is not None
+            and (key == "request" or key.startswith("request."))
+        ):
+            return ToolResult.error(
+                "Error: host runtime state is unavailable in member sessions; "
+                "request.* is read-only and scoped to the current conversation"
+            )
         if action in ("inspect", "check"):
             return self._inspect(key)
         if not self._modify_allowed:

@@ -108,10 +108,10 @@ def _config(
 def _adapter(
     monkeypatch: pytest.MonkeyPatch,
     config: SimpleNamespace,
-    *,
     dependencies_installed: bool | Callable[[str, list[str] | None], bool],
     services: ChannelExtensionServices,
     plugin: ChannelPlugin | None = None,
+    runtime_status: Callable[[], dict[str, dict[str, object]]] | None = None,
 ) -> ChannelExtensionAdapter:
     plugin = plugin or _plugin(dependencies=("demo-sdk>=1",))
     monkeypatch.setattr(
@@ -127,6 +127,7 @@ def _adapter(
             return dependencies_installed
     return ChannelExtensionAdapter(
         lambda: config,  # type: ignore[arg-type]
+        runtime_status=runtime_status,
         dependencies_installed=dependency_check,
         services=services,
     )
@@ -739,6 +740,44 @@ async def test_action_exceptions_and_manager_failure_remain_safe_and_keep_desire
     assert install_events == ["install-error"]
     assert secret not in install_failure.message
     assert "/private/channel-state" not in install_failure.message
+
+
+@pytest.mark.asyncio
+async def test_failed_disable_keeps_the_refreshed_running_instance_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed stop reports failure while inventory keeps the still-running channel enabled."""
+    config = _config()
+    config.channels.Demo["instances"][0]["enabled"] = True
+    statuses = {
+        "runtime-demo": {"owner": "Demo", "instance_id": "first", "state": "running"},
+    }
+
+    def mutate_config(change: object) -> object:
+        return change(config)  # type: ignore[operator]
+
+    async def failed_stop(_action: str, _channel: str, _instance: str) -> dict[str, object]:
+        return {"handled": True, "ok": False, "requires_restart": False}
+
+    adapter = _adapter(
+        monkeypatch,
+        config,
+        dependencies_installed=True,
+        runtime_status=lambda: statuses,
+        services=ChannelExtensionServices(
+            mutate_config=mutate_config,
+            runtime_action=failed_stop,
+        ),
+    )
+    first = _component(adapter, "first")
+
+    result = await adapter.execute(
+        _request(first.id, ExtensionAction.DISABLE, expected_revision=first.revision)
+    )
+
+    assert result.ok is False
+    assert result.lifecycle is ExtensionLifecycle.FAILED
+    assert _component(adapter, "first").lifecycle is ExtensionLifecycle.ENABLED
 
 
 async def _successful_runtime_action(

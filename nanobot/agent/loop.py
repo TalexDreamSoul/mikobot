@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, TypeVar, cast
 
 from loguru import logger
 
@@ -27,7 +27,7 @@ from nanobot.agent.automation_turns import publish_next_deferred_turn
 from nanobot.agent.context import ContextBuilder, PersistedPromptContextResolver, TranscriptInput
 from nanobot.agent.cron_turns import CronTurnCoordinator
 from nanobot.agent.hook import AgentHook, AgentTurnHookFactory
-from nanobot.agent.memory import Consolidator
+from nanobot.agent.memory import Consolidator, MemoryStore
 from nanobot.agent.model_runtime import ModelRuntimeResolver
 from nanobot.agent.runner import (
     _MAX_INJECTIONS_PER_TURN,
@@ -36,7 +36,12 @@ from nanobot.agent.runner import (
     AgentRunSpec,
 )
 from nanobot.agent.subagent import SubagentManager
-from nanobot.agent.tools.context import RequestContext, bind_request_context, reset_request_context
+from nanobot.agent.tools.context import (
+    RequestContext,
+    bind_request_context,
+    require_tool_authorization,
+    reset_request_context,
+)
 from nanobot.agent.tools.exec_session import ExecSessionManager
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
 from nanobot.agent.tools.message import capture_message_deliveries
@@ -53,6 +58,7 @@ from nanobot.bus.outbound_events import StreamedResponseEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import RuntimeEventBus
 from nanobot.collaboration import (
+    COLLABORATION_ASSIGNMENT_METADATA_KEY,
     COLLABORATION_BINDING_METADATA_KEY,
     COLLABORATION_PROJECT_METADATA_KEY,
     COLLABORATION_USER_METADATA_KEY,
@@ -77,8 +83,9 @@ from nanobot.runtime_context import (
     resolve_runtime_context,
     runtime_context_blocks_from_metadata,
 )
-from nanobot.security.private_media import relocate_media_to_user
+from nanobot.security.private_media import relocate_media_to_user, user_private_memory_root
 from nanobot.security.workspace_access import (
+    WORKSPACE_SCOPE_METADATA_KEY,
     WorkspaceScope,
     WorkspaceScopeResolver,
     bind_workspace_scope,
@@ -98,6 +105,7 @@ from nanobot.session.model_selection import (
     SESSION_MODEL_PRESET_METADATA_KEY,
     model_preset_from_metadata,
 )
+from nanobot.session.privacy import session_privacy_scope, session_project_scope
 from nanobot.session.recovery import (
     PENDING_FOLLOWUP_ID_KEY,
     RECOVERY_INBOUND_METADATA_KEY,
@@ -132,10 +140,17 @@ _T = TypeVar("_T")
 _SUBAGENT_PROVIDER_TASK_META = "subagent_provider_task_id"
 _SUBAGENT_TERMINAL_WAIT_SECONDS = 300.0
 _PENDING_REAUTH_DISPATCH_KEY = "pending_reauthorization_dispatch"
+_COLLABORATION_CHANNEL_METADATA_KEY = "collaboration_channel"
+_COLLABORATION_CHAT_METADATA_KEY = "collaboration_chat_id"
+_COLLABORATION_THREAD_METADATA_KEY = "collaboration_thread_id"
 
 def _public_turn_attributes(attributes: Mapping[str, Any]) -> dict[str, Any]:
-    """Hide authorization state while preserving caller-supplied SDK attributes."""
-    return {key: value for key, value in attributes.items() if key != "collaboration_scope"}
+    """Hide internal authorization capabilities from public hook providers."""
+    return {
+        key: value
+        for key, value in attributes.items()
+        if key not in {"collaboration_scope", "authorized_attachment_paths"}
+    }
 
 async def _resolved_conversation_scope(value: object) -> ConversationScope | None:
     """Normalize synchronous and asynchronous scope resolver results."""
@@ -211,22 +226,6 @@ class TurnContext:
         return self.session
 
 
-# Sender ids nanobot mints for its own turns. A chat platform presents an
-# account identifier here, never one of these words, so they can be recognized
-# without consulting the channel that delivered the turn.
-_RUNTIME_SENDER_IDS = frozenset({
-    "cron",
-    "trigger",
-    "subagent",
-    "runtime",
-    "session",
-    "session_timeout",
-    "webui",
-    "webui-settings",
-    # ``process_direct`` default: heartbeat and other host-initiated runs answer
-    # on a chat channel without a person having sent anything.
-    "user",
-})
 
 
 class AgentLoop:
@@ -424,8 +423,17 @@ class AgentLoop:
         _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "0"))
         self._concurrency_gate: asyncio.Semaphore | None = asyncio.Semaphore(_max) if _max > 0 else None
         self.consolidator = Consolidator(
-            store=self.context.memory, sessions=self.sessions, build_messages=self.context.build_messages, get_tool_definitions=self.tools.get_definitions,
-            resolve_prompt_context=PersistedPromptContextResolver(workspace_scopes=self.workspace_scopes, unified_session=unified_session), unified_session=unified_session,
+            store=self.context.memory,
+            sessions=self.sessions,
+            build_messages=self.context.build_messages,
+            get_tool_definitions=self.tools.get_definitions,
+            resolve_prompt_context=PersistedPromptContextResolver(
+                workspace_scopes=self.workspace_scopes,
+                unified_session=unified_session,
+            ),
+            unified_session=unified_session,
+            store_for_session=self._memory_store_for_session,
+            authorize_session=self._authorize_consolidation,
         )
         self.auto_compact = AutoCompact(sessions=self.sessions, consolidator=self.consolidator, session_ttl_minutes=session_ttl_minutes)
         self._idle_compact_check_interval_s = idle_compact_check_interval_seconds
@@ -737,6 +745,7 @@ class AgentLoop:
             session_metadata=ctx.session.metadata,
             attributes=ctx.attributes,
         )
+        collaboration_scope = self._conversation_scope_from_attributes(ctx.attributes)
         return RequestContext(
             channel=ctx.delivery.route.channel,
             chat_id=ctx.delivery.route.chat_id,
@@ -749,6 +758,11 @@ class AgentLoop:
             sender_id=ctx.msg.sender_id,
             turn_id=ctx.turn_id,
             workspace=scope.project_path,
+            authorize_tool=(
+                self._tool_authorizer(ctx.session, collaboration_scope)
+                if collaboration_scope is not None
+                else None
+            ),
         )
 
     async def _resolve_runtime_context_for_turn(
@@ -778,7 +792,15 @@ class AgentLoop:
                 await resolve_runtime_context(self._runtime_context_providers, public_request)
             )
         collaboration_scope = self._conversation_scope_from_attributes(request.attributes)
-        skill_context = self.context.skills.build_explicit_skill_runtime_context(
+        skill_loader = self.context.skills
+        if collaboration_scope is not None and not collaboration_scope.is_local_owner:
+            from nanobot.agent.skills import SkillsLoader
+
+            skill_workspace = collaboration_scope.workspace_path or request.workspace
+            if skill_workspace is None:
+                return blocks
+            skill_loader = SkillsLoader(Path(skill_workspace))
+        skill_context = skill_loader.build_explicit_skill_runtime_context(
             request.original_user_text or "",
             allowed_skills=self._profile_selection(collaboration_scope, "skills"),
         )
@@ -820,6 +842,9 @@ class AgentLoop:
             collaboration_scope = await _resolved_conversation_scope(
                 self._conversation_scope_for_message(ctx.msg)
             )
+            if collaboration_scope is not None:
+                self._persist_conversation_scope(session, ctx.msg, collaboration_scope)
+                self.sessions.save(session)
             attributes = (
                 {"collaboration_scope": collaboration_scope}
                 if collaboration_scope is not None
@@ -851,12 +876,18 @@ class AgentLoop:
                 sender_id=ctx.msg.sender_id,
                 turn_id=metadata.get("webui_turn_id"),
                 workspace=scope.project_path,
+                authorize_tool=(
+                    self._tool_authorizer(session, collaboration_scope)
+                    if collaboration_scope is not None
+                    else None
+                ),
             ))
             workspace_token = bind_workspace_scope(scope)
             turn_scope_stack = ExitStack()
             try:
                 for turn_scope in ctx.turn_scopes:
                     turn_scope_stack.enter_context(turn_scope)
+                await require_tool_authorization()
                 result = await tool.execute(
                     command=ctx.args.strip(),
                     working_dir=str(scope.project_path),
@@ -903,72 +934,86 @@ class AgentLoop:
 
     @staticmethod
     def _is_local_owner(msg: InboundMessage) -> bool:
-        """Whether *msg* comes from the host's own CLI or token-authenticated WebUI."""
-        return msg.channel in {"cli", "websocket"} and not msg.sender_id.startswith("proxy:")
+        """Whether a turn is authenticated as the host owner, not an external principal."""
+        return msg.channel in {"cli", "websocket"} and not msg.sender_id.startswith(
+            ("proxy:", "oidc:")
+        )
 
     @staticmethod
     def _is_runtime_sender(msg: InboundMessage) -> bool:
-        """Whether *msg* was minted by nanobot itself rather than by a person.
+        """Trust explicit producer provenance, never sender names or thread keys."""
+        return msg.channel == "system" or msg.source == "runtime"
 
-        Cron jobs, local triggers, subagent announcements, recovery and
-        continuation turns, and heartbeat runs all reach the bus on the channel
-        they will answer on, carrying a fixed sender id no chat platform issues.
-        Treating those ids as external senders provisions one user and one
-        project per automation, so they are recognized here instead.
-        """
-        return (
-            msg.channel == "system"
-            or msg.sender_id in _RUNTIME_SENDER_IDS
-            or msg.sender_id.startswith("system:")
+    @staticmethod
+    def _thread_id(metadata: Mapping[str, Any]) -> str | None:
+        for key in ("thread_id", "threadId", "root_id", "rootId"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def session_has_collaboration_provenance(metadata: Mapping[str, Any]) -> bool:
+        return any(
+            key in metadata
+            for key in (
+                COLLABORATION_USER_METADATA_KEY,
+                COLLABORATION_PROJECT_METADATA_KEY,
+                COLLABORATION_BINDING_METADATA_KEY,
+                COLLABORATION_ASSIGNMENT_METADATA_KEY,
+            )
         )
 
-    async def _inherited_session_scope(
-        self, msg: InboundMessage
-    ) -> ConversationScope | None:
-        """Return the scope a runtime-minted turn inherits from its own session.
-
-        An automation has no external identity to resolve, so it may only act
-        with the authorization its target session already recorded: none for the
-        host's own sessions, which keep the process workspace, and the stored
-        project for a member's. A session whose recorded project is gone, whose
-        member was removed, or whose channel instance has been reassigned is
-        refused rather than quietly downgraded to the host workspace.
-        """
+    async def _inherited_session_scope(self, msg: InboundMessage) -> ConversationScope | None:
+        """Reauthorize a runtime turn solely from its target session provenance."""
         if self.collaboration is None:
             return None
         session = self.sessions.peek(msg.session_key)
         metadata = session.metadata if session is not None else {}
+        if not self.session_has_collaboration_provenance(metadata):
+            if msg.session_key != UNIFIED_SESSION_KEY and session_privacy_scope(msg.session_key) is not None:
+                raise CollaborationPermissionError("scoped automation session has no authorization provenance")
+            return None
         user_id = metadata.get(COLLABORATION_USER_METADATA_KEY)
         project_id = metadata.get(COLLABORATION_PROJECT_METADATA_KEY)
-        if not isinstance(user_id, str) or not isinstance(project_id, str):
-            return None
-        message_metadata = dict(msg.metadata or {})
+        assignment_required = metadata.get(COLLABORATION_ASSIGNMENT_METADATA_KEY)
+        channel = metadata.get(_COLLABORATION_CHANNEL_METADATA_KEY)
+        chat_id = metadata.get(_COLLABORATION_CHAT_METADATA_KEY)
+        binding_id = metadata.get(COLLABORATION_BINDING_METADATA_KEY)
+        thread_id = metadata.get(_COLLABORATION_THREAD_METADATA_KEY)
+        if (
+            not isinstance(user_id, str)
+            or not isinstance(project_id, str)
+            or not isinstance(assignment_required, bool)
+            or not isinstance(channel, str)
+            or not isinstance(chat_id, str)
+            or (binding_id is not None and not isinstance(binding_id, str))
+            or (thread_id is not None and not isinstance(thread_id, str))
+        ):
+            raise CollaborationPermissionError("automation session has incomplete authorization provenance")
         scope = await self.collaboration.resolve_session_scope(
             user_id,
             project_id,
-            channel=msg.channel,
-            chat_id=canonical_conversation_id(msg.chat_id, message_metadata),
+            channel=channel,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            assignment_required=assignment_required,
+            binding_id=binding_id,
         )
         if scope is None:
-            raise CollaborationPermissionError(
-                "automation session is no longer authorized for its project"
-            )
+            raise CollaborationPermissionError("automation session is no longer authorized for its project")
         return scope
 
     async def _conversation_scope_for_message(
         self, msg: InboundMessage
     ) -> ConversationScope | None:
-        """Resolve the project scope for a chat-channel sender, or ``None``.
-
-        Local CLI and token-authenticated WebUI turns are the host owner's own and
-        keep the upstream workspace-scope behaviour untouched. Only external
-        senders (chat channels, proxy or OIDC principals) are routed through the
-        collaboration store, and only when the composition root wired one.
-        """
-        if self.collaboration is None or self._is_local_owner(msg):
+        """Resolve external identity or reauthorize a persisted internal capability."""
+        if self.collaboration is None:
             return None
         if self._is_runtime_sender(msg):
             return await self._inherited_session_scope(msg)
+        if self._is_local_owner(msg):
+            return None
         await self.collaboration.ensure_identity_user(
             msg.channel,
             msg.sender_id,
@@ -990,10 +1035,151 @@ class AgentLoop:
             metadata.get(CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY) is True
             and scope.is_isolated
         ):
-            raise CollaborationPermissionError(
-                "channel instance is not assigned to a project"
-            )
+            raise CollaborationPermissionError("channel instance is not assigned to a project")
         return scope
+
+    def _persist_conversation_scope(
+        self,
+        session: Session,
+        msg: InboundMessage,
+        scope: ConversationScope,
+    ) -> None:
+        """Persist the authority an internal successor must revalidate."""
+        if scope.is_local_owner:
+            return
+        if scope.user_id is None or scope.project_id is None:
+            session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = None
+            return
+        existing_user = session.metadata.get(COLLABORATION_USER_METADATA_KEY)
+        existing_project = session.metadata.get(COLLABORATION_PROJECT_METADATA_KEY)
+        if (
+            existing_user is not None
+            and existing_user != scope.user_id
+            or existing_project is not None
+            and existing_project != scope.project_id
+        ):
+            raise CollaborationPermissionError("session ownership cannot change projects")
+        metadata = dict(msg.metadata or {})
+        session.metadata[COLLABORATION_USER_METADATA_KEY] = scope.user_id
+        session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = scope.project_id
+        session.metadata[COLLABORATION_ASSIGNMENT_METADATA_KEY] = bool(
+            scope.assignment is not None
+            or metadata.get(CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY) is True
+        )
+        session.metadata[_COLLABORATION_CHANNEL_METADATA_KEY] = msg.channel
+        session.metadata[_COLLABORATION_CHAT_METADATA_KEY] = canonical_conversation_id(
+            msg.chat_id,
+            metadata,
+        )
+        thread_id = self._thread_id(metadata)
+        if thread_id is None:
+            session.metadata.pop(_COLLABORATION_THREAD_METADATA_KEY, None)
+        else:
+            session.metadata[_COLLABORATION_THREAD_METADATA_KEY] = thread_id
+        if scope.binding is None:
+            session.metadata.pop(COLLABORATION_BINDING_METADATA_KEY, None)
+        else:
+            session.metadata[COLLABORATION_BINDING_METADATA_KEY] = scope.binding.id
+        if scope.workspace_path is not None:
+            session.metadata[WORKSPACE_SCOPE_METADATA_KEY] = build_workspace_scope(
+                scope.workspace_path,
+                "restricted",
+                source_channel=msg.channel,
+            ).metadata()
+    def _tool_authorizer(
+        self,
+        session: Session,
+        admitted_scope: ConversationScope,
+    ) -> Callable[[], Awaitable[None]] | None:
+        """Revalidate a member capability immediately before each tool execution."""
+        if admitted_scope.is_local_owner or admitted_scope.user_id is None or admitted_scope.project_id is None:
+            return None
+        user_id = admitted_scope.user_id
+        project_id = admitted_scope.project_id
+        metadata = session.metadata
+        channel = metadata.get(_COLLABORATION_CHANNEL_METADATA_KEY)
+        chat_id = metadata.get(_COLLABORATION_CHAT_METADATA_KEY)
+        assignment_required = metadata.get(COLLABORATION_ASSIGNMENT_METADATA_KEY)
+        binding_id = metadata.get(COLLABORATION_BINDING_METADATA_KEY)
+        thread_id = metadata.get(_COLLABORATION_THREAD_METADATA_KEY)
+        if (
+            not isinstance(channel, str)
+            or not isinstance(chat_id, str)
+            or not isinstance(assignment_required, bool)
+            or (binding_id is not None and not isinstance(binding_id, str))
+            or (thread_id is not None and not isinstance(thread_id, str))
+        ):
+            raise CollaborationPermissionError("session has incomplete tool authorization provenance")
+
+        async def authorize() -> None:
+            if self.collaboration is None:
+                raise CollaborationPermissionError("collaboration authorization is unavailable")
+            current = await self.collaboration.resolve_session_scope(
+                user_id,
+                project_id,
+                channel=channel,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                assignment_required=assignment_required,
+                binding_id=binding_id,
+            )
+            if current is None or (
+                current.workspace_path != admitted_scope.workspace_path
+                or current.allowed_skills != admitted_scope.allowed_skills
+                or current.allowed_mcp_servers != admitted_scope.allowed_mcp_servers
+                or (current.binding.id if current.binding else None)
+                != (admitted_scope.binding.id if admitted_scope.binding else None)
+            ):
+                raise CollaborationPermissionError("tool authorization is no longer valid")
+
+        return authorize
+
+    def _memory_store_for_session(self, session: Session) -> MemoryStore | None:
+        """Return a private per-member project store without host fallback."""
+        if not self.session_has_collaboration_provenance(session.metadata):
+            return self.context.memory
+        user_id = session.metadata.get(COLLABORATION_USER_METADATA_KEY)
+        project_id = session.metadata.get(COLLABORATION_PROJECT_METADATA_KEY)
+        if not isinstance(user_id, str) or not isinstance(project_id, str):
+            return None
+        return MemoryStore(user_private_memory_root(user_id, project_id=project_id))
+
+    async def collaboration_scope_for_session(self, session: Session) -> ConversationScope | None:
+        """Revalidate the persisted collaboration scope for a derived operation."""
+        return await self._inherited_session_scope(InboundMessage(
+            channel="system",
+            sender_id="runtime",
+            chat_id=session.key,
+            content="",
+            session_key_override=session.key,
+        ))
+
+    async def _authorize_consolidation(self, session: Session) -> None:
+        scope = await self.collaboration_scope_for_session(session)
+        if scope is None:
+            return
+        workspace = session.metadata.get(WORKSPACE_SCOPE_METADATA_KEY)
+        if not isinstance(workspace, dict):
+            raise CollaborationPermissionError("consolidation workspace is unavailable")
+        stored_path = cast(dict[str, object], workspace).get("project_path")
+        if stored_path != scope.workspace_path:
+            raise CollaborationPermissionError("consolidation workspace authorization changed")
+
+    async def memory_store_for_session(self, session: Session) -> MemoryStore | None:
+        """Return a currently authorized private owner store for derived operations."""
+        store = self._memory_store_for_session(session)
+        if store is None or store is self.context.memory:
+            return store
+        if self.collaboration is None:
+            return None
+        scope = await self.collaboration_scope_for_session(session)
+        if scope is None or scope.user_id is None or scope.project_id is None:
+            return None
+        expected = user_private_memory_root(scope.user_id, project_id=scope.project_id)
+        if expected.expanduser().resolve() != store.workspace.expanduser().resolve():
+            return None
+        return store
+
 
     @staticmethod
     def _conversation_scope_from_attributes(
@@ -1107,6 +1293,8 @@ class AgentLoop:
         """Return the project's allowlist for *key*, or ``None`` when unrestricted."""
         if scope is None:
             return None
+        if not scope.is_local_owner and scope.project is None:
+            return set()
         allowed = scope.allowed_skills if key == "skills" else scope.allowed_mcp_servers
         return set(allowed) if allowed is not None else None
 
@@ -1116,49 +1304,54 @@ class AgentLoop:
         scope: ConversationScope | None,
     ) -> ToolRegistry:
         allowed_servers = self._profile_selection(scope, "mcpServers")
-        if allowed_servers is None:
+        if allowed_servers is None and (scope is None or scope.is_local_owner):
             return tools
         from nanobot.agent.tools.mcp import mcp_tool_server_name
 
         restricted = ToolRegistry()
         for name in tools.tool_names:
+            if name == "run_cli_app" and scope is not None and not scope.is_local_owner:
+                continue
             tool = tools.get(name)
             if tool is None:
                 continue
             server_name = mcp_tool_server_name(tool)
-            if server_name is None or server_name in allowed_servers:
+            if allowed_servers is None or server_name is None or server_name in allowed_servers:
                 restricted.register(tool)
         return restricted
 
     async def _effective_session_key(self, msg: InboundMessage) -> str:
-        """Return the durable key appropriate for the message principal.
-
-        Local CLI and direct WebSocket owners retain their legacy session keys
-        for compatibility with synchronous pending/recovery queues. Trusted
-        proxy principals and channel senders whose conversation resolves to a
-        project get a per-user namespace; unbound groups keep the channel key.
-        """
-        if msg.session_key_override:
+        """Namespace external routing keys without treating an override as authority."""
+        if self._is_runtime_sender(msg):
             return msg.session_key
         if self._is_local_owner(msg):
-            return UNIFIED_SESSION_KEY if self._unified_session else msg.session_key
-        if self._is_runtime_sender(msg):
-            # Whoever scheduled the automation already chose its session; deriving
-            # a per-user key here would answer into a different conversation.
+            return msg.session_key if msg.session_key_override else (
+                UNIFIED_SESSION_KEY if self._unified_session else msg.session_key
+            )
+        # Member WebUI IDs remain stable; server-owned metadata pins their scope.
+        if msg.channel == "websocket":
             return msg.session_key
         scope = await self._conversation_scope_for_message(msg)
         if scope is not None and scope.is_local_owner:
-            # The host owner reaching in over a chat channel is the same person
-            # as the host owner at the CLI. Namespacing their own conversation
-            # against themselves would strand its history under the old key.
-            return UNIFIED_SESSION_KEY if self._unified_session else msg.session_key
+            return msg.session_key if msg.session_key_override else (
+                UNIFIED_SESSION_KEY if self._unified_session else msg.session_key
+            )
         if scope is not None and scope.user_id and scope.project_id is not None:
-            if self._unified_session:
-                return f"unified:{scope.user_id}"
-            return f"user:{scope.user_id}:{msg.session_key}"
-        if self._unified_session:
-            return UNIFIED_SESSION_KEY
-        return msg.session_key
+            existing = session_project_scope(msg.session_key)
+            if existing is not None:
+                if (existing.user_id, existing.project_id) != (scope.user_id, scope.project_id):
+                    raise CollaborationPermissionError("session key belongs to another project")
+                return msg.session_key
+            if session_privacy_scope(msg.session_key) is not None:
+                raise CollaborationPermissionError("legacy session key has no project provenance")
+            if self._unified_session and not msg.session_key_override:
+                return f"unified:{scope.user_id}:project:{scope.project_id}"
+            return f"user:{scope.user_id}:project:{scope.project_id}:{msg.session_key}"
+        return (
+            UNIFIED_SESSION_KEY
+            if scope is None and self._unified_session and not msg.session_key_override
+            else msg.session_key
+        )
 
     def _remember_unified_session_route(
         self,
@@ -1312,6 +1505,7 @@ class AgentLoop:
                         sender_id=pending_msg.sender_id,
                         turn_id=request_ctx.turn_id,
                         workspace=scope.project_path,
+                        authorize_tool=request_ctx.authorize_tool,
                     )
                     blocks = await self._resolve_runtime_context_for_request(
                         pending_request,
@@ -1407,26 +1601,43 @@ class AgentLoop:
             session_metadata=session.metadata if session is not None else None,
             attributes=request_ctx.attributes,
         )
+        member_memory_workspace = (
+            user_private_memory_root(
+                collaboration_scope.user_id,
+                project_id=collaboration_scope.project_id,
+            )
+            if (
+                collaboration_scope is not None
+                and collaboration_scope.user_id is not None
+                and collaboration_scope.project_id is not None
+                and not collaboration_scope.is_local_owner
+            )
+            else (
+                effective_scope.project_path
+                if collaboration_scope is not None and not collaboration_scope.is_local_owner
+                else None
+            )
+        )
         include_agent_memory = (
             (session.policy.persist if session is not None else True)
             and (collaboration_scope is None or not collaboration_scope.is_isolated)
-            and effective_scope.project_path == self._canonical_workspace
-        )
-        transcript_builder = partial(
-            self.context.build_transcript,
-            channel=request_ctx.channel,
-            workspace=effective_scope.project_path,
-            include_memory=include_agent_memory,
-            include_memory_recent_history=not ephemeral and include_agent_memory,
-            session_key=session.key if session is not None else request_ctx.session_key,
-            unified_session=self._unified_session,
-            allowed_skills=self._profile_selection(collaboration_scope, "skills"),
         )
         if request_context is None:
             request_ctx = dataclasses.replace(
                 request_ctx,
                 workspace=effective_scope.project_path,
             )
+        transcript_builder = partial(
+            self.context.build_transcript,
+            channel=request_ctx.channel,
+            workspace=effective_scope.project_path,
+            memory_workspace=member_memory_workspace,
+            include_memory=include_agent_memory,
+            include_memory_recent_history=not ephemeral and include_agent_memory,
+            session_key=session.key if session is not None else request_ctx.session_key,
+            unified_session=self._unified_session,
+            allowed_skills=self._profile_selection(collaboration_scope, "skills"),
+        )
         effective_tools = self._tools_for_conversation_scope(
             tools or self.tools,
             collaboration_scope,
@@ -2096,18 +2307,17 @@ class AgentLoop:
                         )
                         resolved_media.relative_to(managed_media_root)
                     except (OSError, ValueError):
-                        # Local caller-supplied media is not channel-managed and
-                        # therefore must remain available to the current turn.
-                        relocated_media.append(media_path)
+                        # Member turns never retain arbitrary host paths as
+                        # attachments; only managed uploads can be relocated.
                         continue
-                    relocated_media.extend(
-                        await asyncio.to_thread(
-                            relocate_media_to_user,
-                            [media_path],
-                            owner_user_id=media_scope.user_id,
-                        )
-                        or [media_path]
+                    relocated = await asyncio.to_thread(
+                        relocate_media_to_user,
+                        [media_path],
+                        owner_user_id=media_scope.user_id,
+                        project_id=media_scope.project_id,
                     )
+                    if relocated:
+                        relocated_media.extend(relocated)
                 ctx.msg = dataclasses.replace(msg, media=relocated_media)
                 msg = ctx.msg
 
@@ -2138,37 +2348,20 @@ class AgentLoop:
                     restricted.register(tool)
             tools = restricted
         ctx.tools = tools
-        if ctx.kind is TurnKind.USER and msg.sender_id != "subagent":
-            collaboration_scope = await self._conversation_scope_for_message(msg)
-            if collaboration_scope is None:
-                ctx.attributes.pop("collaboration_scope", None)
-                for key in (
-                    COLLABORATION_USER_METADATA_KEY,
-                    COLLABORATION_PROJECT_METADATA_KEY,
-                    COLLABORATION_BINDING_METADATA_KEY,
-                ):
-                    session.metadata.pop(key, None)
-                self.sessions.save(session)
-                return await self._restore_turn_state(ctx, session, msg, force_fresh_scope)
+        collaboration_scope = await self._conversation_scope_for_message(msg)
+        if collaboration_scope is not None:
             ctx.attributes["collaboration_scope"] = collaboration_scope
-            if collaboration_scope.user_id is not None:
-                session.metadata[COLLABORATION_USER_METADATA_KEY] = collaboration_scope.user_id
-            else:
-                session.metadata.pop(COLLABORATION_USER_METADATA_KEY, None)
-            if collaboration_scope.project_id is not None:
-                session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = (
-                    collaboration_scope.project_id
-                )
-            else:
-                session.metadata.pop(COLLABORATION_PROJECT_METADATA_KEY, None)
-            if collaboration_scope.binding is not None:
-                session.metadata[COLLABORATION_BINDING_METADATA_KEY] = (
-                    collaboration_scope.binding.id
-                )
-            else:
-                session.metadata.pop(COLLABORATION_BINDING_METADATA_KEY, None)
+            if (
+                collaboration_scope.user_id is not None
+                and collaboration_scope.project_id is not None
+                and not collaboration_scope.is_local_owner
+            ):
+                ctx.attributes["authorized_attachment_paths"] = tuple(msg.media or ())
+                self._persist_conversation_scope(session, msg, collaboration_scope)
             ctx.tools = self._tools_for_conversation_scope(ctx.tools, collaboration_scope)
             self.sessions.save(session)
+        elif self._is_runtime_sender(msg) and self.session_has_collaboration_provenance(session.metadata):
+            raise CollaborationPermissionError("runtime turn lost its persisted collaboration scope")
         await self._restore_turn_state(ctx, session, msg, force_fresh_scope)
 
     async def _restore_turn_state(
@@ -2710,6 +2903,7 @@ class AgentLoop:
         runtime: LLMRuntime | None = None,
         on_runtime_admitted: Callable[[LLMRuntime], Awaitable[None]] | None = None,
         attributes: Mapping[str, Any] | None = None,
+        source: Literal["external", "runtime"] = "external",
     ) -> OutboundMessage | None:
         """Process an external message directly and return the outbound payload."""
         await self._ensure_collaboration_initialized()
@@ -2721,6 +2915,8 @@ class AgentLoop:
         msg = InboundMessage(
             channel=channel, sender_id=sender_id, chat_id=chat_id,
             content=content, media=media or [], metadata=metadata,
+            source=source,
+            session_key_override=session_key if source == "runtime" else None,
         )
         # Share the dispatch lock so direct calls serialize with bus turns.
         lock = self._get_session_lock(session_key)

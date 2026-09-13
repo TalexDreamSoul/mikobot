@@ -129,6 +129,8 @@ export function renderSettingsView(
     initialSection?: SettingsSectionKey;
     initialSettings?: SettingsPayload;
     showSidebar?: boolean;
+    isAdmin?: boolean;
+    restrictedNotice?: boolean;
     onBackToChat?: () => void;
     onSettingsChange?: (payload: SettingsPayload) => void;
     onNativeEngineRestart?: () => Promise<string>;
@@ -141,6 +143,8 @@ export function renderSettingsView(
         initialSection={options.initialSection ?? "apps"}
         initialSettings={options.initialSettings}
         showSidebar={options.showSidebar}
+        isAdmin={options.isAdmin ?? true}
+        restrictedNotice={options.restrictedNotice}
         onToggleTheme={() => {}}
         onBackToChat={options.onBackToChat ?? (() => {})}
         onModelNameChange={() => {}}

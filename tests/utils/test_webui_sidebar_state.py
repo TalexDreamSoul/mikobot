@@ -160,7 +160,10 @@ def test_sidebar_state_serializes_concurrent_writes(monkeypatch) -> None:
     active_writes = 0
     peak_writes = 0
 
-    def fake_write(raw: dict[str, object]) -> dict[str, object]:
+    def fake_write(
+        raw: dict[str, object],
+        owner_user_id: str | None = None,
+    ) -> dict[str, object]:
         nonlocal active_writes, peak_writes
         with counter_lock:
             active_writes += 1

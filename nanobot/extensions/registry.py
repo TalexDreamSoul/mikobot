@@ -104,23 +104,25 @@ class ExtensionRegistry:
         if (
             request.action in (ExtensionAction.ENABLE, ExtensionAction.INSTALL)
             and requires_risk_acknowledgement(target.package)
+            and not request.risk_acknowledged
         ):
-            if not request.risk_acknowledged:
-                raise ExtensionRegistryError(
-                    "risk_acknowledgement_required",
-                    "risk acknowledgement is required for this extension action",
-                    status=409,
-                )
-            if not target.package.revision:
+            raise ExtensionRegistryError(
+                "risk_acknowledgement_required",
+                "risk acknowledgement is required for this extension action",
+                status=409,
+            )
+        if request.action is not ExtensionAction.INSPECT:
+            revision = target.descriptor.revision
+            if not revision or not request.expected_revision:
                 raise ExtensionRegistryError(
                     "revision_required",
-                    "extension action requires a current package revision",
+                    "extension action requires a current revision",
                     status=409,
                 )
-            if request.expected_revision != target.package.revision:
+            if request.expected_revision != revision:
                 raise ExtensionRegistryError(
                     "stale_revision",
-                    "extension package revision is stale",
+                    "extension action revision is stale",
                     status=409,
                 )
 

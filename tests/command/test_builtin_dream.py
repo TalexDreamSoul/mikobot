@@ -37,10 +37,10 @@ class _FakeStore:
     def get_last_dream_cursor(self) -> int:
         return self._last_dream_cursor
 
-    def build_dream_prompt(self):
+    def build_dream_prompt(self, *, entry_filter=None):
         return self._dream_prompt_result
 
-    def build_dream_tools(self):
+    def build_dream_tools(self, *, allow_skill_generation: bool = False):
         return None
 
     def set_last_dream_cursor(self, value: int) -> None:
@@ -115,6 +115,14 @@ def _make_sessions(tmp_path) -> SessionManager:
     )
 
 
+async def _memory_store_for_session(store: _FakeStore, _session: object) -> _FakeStore:
+    return store
+
+
+async def _no_collaboration_scope(_session: object) -> None:
+    return None
+
+
 def _make_ctx(raw: str, git: _FakeGit, *, args: str = "", last_dream_cursor: int = 1) -> CommandContext:
     msg = InboundMessage(channel="cli", sender_id="u1", chat_id="direct", content=raw)
     store = _FakeStore(git, last_dream_cursor=last_dream_cursor)
@@ -126,12 +134,23 @@ def _make_dream_ctx(tmp_path) -> tuple[CommandContext, _FakeBus]:
     msg = InboundMessage(channel="cli", sender_id="u1", chat_id="direct", content="/dream")
     store = _FakeStore(_FakeGit(initialized=False), dream_prompt_result=None)
     bus = _FakeBus()
+    sessions = _make_sessions(tmp_path)
     loop = SimpleNamespace(
         bus=bus,
         context=SimpleNamespace(memory=store, timezone="UTC"),
-        sessions=_make_sessions(tmp_path),
+        sessions=sessions,
+        memory_store_for_session=lambda session: _memory_store_for_session(store, session),
+        collaboration_scope_for_session=_no_collaboration_scope,
+        session_has_collaboration_provenance=lambda _metadata: False,
     )
-    ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw="/dream", args="", loop=loop)
+    ctx = CommandContext(
+        msg=msg,
+        session=sessions.get_or_create(msg.session_key),
+        key=msg.session_key,
+        raw="/dream",
+        args="",
+        loop=loop,
+    )
     return ctx, bus
 
 
@@ -176,14 +195,25 @@ async def test_dream_internal_run_silences_progress(tmp_path) -> None:
         )
 
     dream_runtime = object()
+    sessions = _make_sessions(tmp_path)
     loop = SimpleNamespace(
         bus=bus,
         context=SimpleNamespace(memory=store, timezone="UTC"),
-        sessions=_make_sessions(tmp_path),
+        sessions=sessions,
         process_direct=process_direct,
         dream_runtime=lambda: dream_runtime,
+        memory_store_for_session=lambda session: _memory_store_for_session(store, session),
+        collaboration_scope_for_session=_no_collaboration_scope,
+        session_has_collaboration_provenance=lambda _metadata: False,
     )
-    ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw="/dream", args="", loop=loop)
+    ctx = CommandContext(
+        msg=msg,
+        session=sessions.get_or_create(msg.session_key),
+        key=msg.session_key,
+        raw="/dream",
+        args="",
+        loop=loop,
+    )
 
     await cmd_dream(ctx)
     await asyncio.sleep(0)
@@ -209,6 +239,7 @@ def _build_runnable_dream(
         dream_prompt_result=("dream prompt", 42),
         content_diff=content_diff,
     )
+    bus = _FakeBus()
 
     async def process_direct(*args, **kwargs):
         if tool_error:
@@ -227,15 +258,25 @@ def _build_runnable_dream(
             metadata={"_stop_reason": stop_reason},
         )
 
-    bus = _FakeBus()
+    sessions = _make_sessions(tmp_path)
     loop = SimpleNamespace(
         bus=bus,
         context=SimpleNamespace(memory=store, timezone="UTC"),
-        sessions=_make_sessions(tmp_path),
+        sessions=sessions,
         process_direct=process_direct,
         dream_runtime=lambda: None,
+        memory_store_for_session=lambda session: _memory_store_for_session(store, session),
+        collaboration_scope_for_session=_no_collaboration_scope,
+        session_has_collaboration_provenance=lambda _metadata: False,
     )
-    ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw="/dream", args="", loop=loop)
+    ctx = CommandContext(
+        msg=msg,
+        session=sessions.get_or_create(msg.session_key),
+        key=msg.session_key,
+        raw="/dream",
+        args="",
+        loop=loop,
+    )
     return ctx, store
 
 
@@ -313,14 +354,25 @@ async def test_dream_noop_batch_unlocks_following_history(tmp_path) -> None:
 
     msg = InboundMessage(channel="cli", sender_id="u1", chat_id="direct", content="/dream")
     bus = _FakeBus()
+    sessions = _make_sessions(tmp_path)
     loop = SimpleNamespace(
         bus=bus,
         context=SimpleNamespace(memory=store, timezone="UTC"),
-        sessions=_make_sessions(tmp_path),
+        sessions=sessions,
         process_direct=process_direct,
         dream_runtime=lambda: None,
+        memory_store_for_session=lambda session: _memory_store_for_session(store, session),
+        collaboration_scope_for_session=_no_collaboration_scope,
+        session_has_collaboration_provenance=lambda _metadata: False,
     )
-    ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw="/dream", args="", loop=loop)
+    ctx = CommandContext(
+        msg=msg,
+        session=sessions.get_or_create(msg.session_key),
+        key=msg.session_key,
+        raw="/dream",
+        args="",
+        loop=loop,
+    )
 
     await cmd_dream(ctx)
     await asyncio.sleep(0)

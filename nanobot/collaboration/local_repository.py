@@ -233,10 +233,23 @@ class AsyncLocalCollaborationRepository:
         )
 
     async def resolve_session_scope(
-        self, user_id: str, project_id: str, *, channel: str, chat_id: str,
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        channel: str,
+        chat_id: str,
         thread_id: str | None = None,
+        assignment_required: bool = False,
+        binding_id: str | None = None,
     ) -> ConversationScope | None:
         return await asyncio.to_thread(
-            self._store.resolve_session_scope, user_id, project_id,
-            channel=channel, chat_id=chat_id, thread_id=thread_id,
+            self._store.resolve_session_scope,
+            user_id,
+            project_id,
+            channel=channel,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            assignment_required=assignment_required,
+            binding_id=binding_id,
         )

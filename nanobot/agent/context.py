@@ -19,6 +19,10 @@ from nanobot.bus.events import (
     RUNTIME_CONTROL_SESSION_DISCARD,
     InboundMessage,
 )
+from nanobot.collaboration.models import (
+    COLLABORATION_PROJECT_METADATA_KEY,
+    COLLABORATION_USER_METADATA_KEY,
+)
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_END,
     RUNTIME_CONTEXT_MESSAGE_META,
@@ -26,7 +30,11 @@ from nanobot.runtime_context import (
     RuntimeContextBlock,
     append_runtime_context,
 )
-from nanobot.security.workspace_access import WorkspaceScopeResolver
+from nanobot.security.workspace_access import (
+    WORKSPACE_SCOPE_METADATA_KEY,
+    WorkspaceScopeResolver,
+    build_workspace_scope,
+)
 from nanobot.session.keys import last_channel_from_metadata
 from nanobot.session.manager import Session
 from nanobot.session.summary import SessionSummary
@@ -63,6 +71,18 @@ class PersistedPromptContextResolver:
 
     def __call__(self, session: Session) -> tuple[str | None, Path]:
         channel = session.key.split(":", 1)[0] if ":" in session.key else None
+        if COLLABORATION_PROJECT_METADATA_KEY in session.metadata:
+            project_id = session.metadata.get(COLLABORATION_PROJECT_METADATA_KEY)
+            user_id = session.metadata.get(COLLABORATION_USER_METADATA_KEY)
+            workspace = session.metadata.get(WORKSPACE_SCOPE_METADATA_KEY)
+            if not isinstance(project_id, str) or not isinstance(user_id, str) or not isinstance(workspace, dict):
+                raise ValueError("persisted member prompt has incomplete ownership")
+            path = cast(dict[str, object], workspace).get("project_path")
+            if not isinstance(path, str):
+                raise ValueError("persisted member prompt has no project workspace")
+            stored_channel = session.metadata.get("collaboration_channel")
+            channel = stored_channel if isinstance(stored_channel, str) else channel
+            return channel, build_workspace_scope(path, "restricted", source_channel=channel).project_path
         if self.unified_session:
             route = last_channel_from_metadata(session.metadata)
             if route is not None:
@@ -107,6 +127,20 @@ class ContextBuilder:
         self.timezone = timezone
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
+    def _memory_for_workspace(self, memory_workspace: Path | None) -> MemoryStore:
+        """Return the explicitly owned Memory store for this prompt.
+
+        Host turns keep the agent's profile store even while selecting another
+        working directory. Collaboration callers pass their authorized project
+        root, which never falls back to host USER/SOUL/history.
+        """
+        if memory_workspace is None:
+            return self.memory
+        resolved = memory_workspace.expanduser().resolve()
+        if resolved == self.workspace.expanduser().resolve():
+            return self.memory
+        return MemoryStore(resolved)
+
 
     def build_system_prompt(
         self,
@@ -119,12 +153,17 @@ class ContextBuilder:
         session_key: str | None = None,
         unified_session: bool = False,
         allowed_skills: set[str] | None = None,
+        memory_workspace: Path | None = None,
     ) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
         root = workspace or self.workspace
-        parts = [self._get_identity(channel=channel, workspace=root)]
-
-        bootstrap = self._load_bootstrap_files(root)
+        parts = [
+            self._get_identity(
+                channel=channel,
+                workspace=root,
+                agent_workspace=memory_workspace,
+            )
+        ]
+        bootstrap = self._load_bootstrap_files(root, profile_workspace=memory_workspace)
         if bootstrap:
             parts.append(bootstrap)
 
@@ -139,19 +178,24 @@ class ContextBuilder:
             )
 
         if include_memory:
-            memory = self.memory.read_memory()
+            memory = self._memory_for_workspace(memory_workspace).read_memory()
             if memory and not self._is_template_content(memory, "memory/MEMORY.md"):
                 parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
 
-        active_skills = self.skills.get_always_skills()
+        skill_loader = (
+            self.skills
+            if memory_workspace is None
+            else SkillsLoader(root)
+        )
+        active_skills = skill_loader.get_always_skills()
         if allowed_skills is not None:
             active_skills = [name for name in active_skills if name in allowed_skills]
         if active_skills:
-            active_content = self.skills.load_skills_for_context(active_skills)
+            active_content = skill_loader.load_skills_for_context(active_skills)
             if active_content:
                 parts.append(f"# Active Skills\n\n{active_content}")
 
-        skills_summary = self.skills.build_skills_summary(
+        skills_summary = skill_loader.build_skills_summary(
             exclude=set(active_skills),
             workspace=root,
             include=allowed_skills,
@@ -160,8 +204,8 @@ class ContextBuilder:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
 
         if include_memory_recent_history:
-            entries = self.memory.read_recent_history_for_prompt(
-                since_cursor=self.memory.get_last_dream_cursor(),
+            entries = self._memory_for_workspace(memory_workspace).read_recent_history_for_prompt(
+                since_cursor=self._memory_for_workspace(memory_workspace).get_last_dream_cursor(),
                 session_key=session_key,
                 unified_session=unified_session,
             )
@@ -210,11 +254,17 @@ class ContextBuilder:
                 return [*entries[:index], *entries[index + 1:]]
         return entries
 
-    def _get_identity(self, channel: str | None = None, workspace: Path | None = None) -> str:
-        """Get the core identity section."""
+    def _get_identity(
+        self,
+        channel: str | None = None,
+        workspace: Path | None = None,
+        agent_workspace: Path | None = None,
+    ) -> str:
+        """Get the core identity section without exposing the host agent root."""
         root = workspace or self.workspace
         workspace_path = str(root.expanduser().resolve())
-        agent_workspace_path = str(self.workspace.expanduser().resolve())
+        profile_root = agent_workspace or self.workspace
+        agent_workspace_path = str(profile_root.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
@@ -250,14 +300,20 @@ class ContextBuilder:
 
         return _to_blocks(left) + _to_blocks(right)
 
-    def _load_bootstrap_files(self, workspace: Path | None = None) -> str:
-        """Load project instructions plus the agent's global profile files."""
+    def _load_bootstrap_files(
+        self,
+        workspace: Path | None = None,
+        *,
+        profile_workspace: Path | None = None,
+    ) -> str:
+        """Load project instructions and the explicitly owned profile files."""
         parts: list[str] = []
         project_root = workspace or self.workspace
+        profile_root = profile_workspace or self.workspace
         sources = [
             ("AGENTS.md", project_root),
-            ("SOUL.md", self.workspace),
-            ("USER.md", self.workspace),
+            ("SOUL.md", profile_root),
+            ("USER.md", profile_root),
         ]
 
         for filename, root in sources:
@@ -303,6 +359,7 @@ class ContextBuilder:
         session_key: str | None = None,
         unified_session: bool = False,
         allowed_skills: set[str] | None = None,
+        memory_workspace: Path | None = None,
     ) -> list[dict[str, Any]]:
         """Compatibility wrapper for callers that need merged adjacent roles."""
         messages = self.build_transcript(
@@ -321,6 +378,7 @@ class ContextBuilder:
             session_key=session_key,
             unified_session=unified_session,
             allowed_skills=allowed_skills,
+            memory_workspace=memory_workspace,
         )
         current = messages[-1]
         if len(messages) < 2 or messages[-2].get("role") != current.get("role"):
@@ -349,6 +407,7 @@ class ContextBuilder:
         session_key: str | None = None,
         unified_session: bool = False,
         allowed_skills: set[str] | None = None,
+        memory_workspace: Path | None = None,
     ) -> list[dict[str, Any]]:
         """Build a model transcript while preserving the fresh-turn boundary."""
         root = workspace or self.workspace
@@ -364,6 +423,7 @@ class ContextBuilder:
                     session_key=session_key,
                     unified_session=unified_session,
                     allowed_skills=allowed_skills,
+                    memory_workspace=memory_workspace,
                 ),
             },
             *transcript.history,

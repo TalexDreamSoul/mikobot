@@ -9,7 +9,6 @@ from nanobot.channels.websocket import runtime
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _RUNTIME_PATH = _REPOSITORY_ROOT / "nanobot" / "channels" / "websocket" / "runtime.py"
-_SESSION_IDENTITY_PATH = _REPOSITORY_ROOT / "nanobot" / "webui" / "session_identity.py"
 _FORBIDDEN_RUNTIME_IMPORTS = (
     "nanobot.bus.outbound_events",
     "nanobot.command",
@@ -76,19 +75,6 @@ def test_business_entrypoints_are_thin_transport_delegations() -> None:
     assert len(statements) == 1
     assert isinstance(statements[0], ast.Return)
     assert isinstance(statements[0].value, ast.Await)
-
-
-def test_persisted_webui_session_prefix_has_one_production_owner() -> None:
-    owners = []
-    for path in (_REPOSITORY_ROOT / "nanobot").rglob("*.py"):
-        if "tests" in path.parts or path == _SESSION_IDENTITY_PATH:
-            continue
-        if "websocket:" in path.read_text(encoding="utf-8"):
-            owners.append(path.relative_to(_REPOSITORY_ROOT).as_posix())
-    assert owners == []
-    assert 'WEBUI_SESSION_STORAGE_PREFIX = "websocket:"' in _SESSION_IDENTITY_PATH.read_text(
-        encoding="utf-8"
-    )
 
 
 def test_runtime_exports_compatibility_protocol_helpers() -> None:

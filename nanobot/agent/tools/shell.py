@@ -31,7 +31,7 @@ from nanobot.agent.tools.exec_session import (
     clamp_session_int,
     format_session_poll,
 )
-from nanobot.agent.tools.sandbox import wrap_command
+from nanobot.agent.tools.sandbox import SandboxUnavailableError, wrap_command
 from nanobot.agent.tools.schema import (
     BooleanSchema,
     IntegerSchema,
@@ -40,6 +40,11 @@ from nanobot.agent.tools.schema import (
 )
 from nanobot.config.paths import get_media_dir
 from nanobot.config_base import Base
+from nanobot.security.member_access import (
+    current_member_attachment_files,
+    current_member_scope,
+    current_member_tool_scope,
+)
 from nanobot.security.workspace_access import current_scope_allows_loopback, current_tool_workspace
 from nanobot.security.workspace_policy import is_path_within
 
@@ -287,7 +292,10 @@ class ExecTool(Tool):
         if max_output_chars is None:
             max_output_chars = max_output_tokens
 
-        prepared = self._prepare_command(command, working_dir, timeout, shell, login)
+        try:
+            prepared = self._prepare_command(command, working_dir, timeout, shell, login)
+        except (SandboxUnavailableError, ValueError) as exc:
+            return ToolResult.error(f"Error: {exc}")
         if isinstance(prepared, str):
             return prepared
 
@@ -405,20 +413,26 @@ class ExecTool(Tool):
         shell: str | None = None,
         login: bool | None = None,
     ) -> _PreparedCommand | str:
+        member_scope = current_member_scope()
+        try:
+            member = current_member_tool_scope()
+        except PermissionError as exc:
+            return ToolResult.error(f"Error: {exc}")
+        is_member = member_scope is not None
         access = current_tool_workspace(
             self.working_dir,
             restrict_to_workspace=self.restrict_to_workspace,
-            sandbox_restricts_workspace=bool(self.sandbox),
+            sandbox_restricts_workspace=bool(self.sandbox) or is_member,
         )
-        workspace_root = str(access.project_path) if access.project_path is not None else self.working_dir
+        workspace_root = str(member.project_root) if member is not None else (
+            str(access.project_path) if access.project_path is not None else self.working_dir
+        )
         cwd = working_dir or workspace_root or os.getcwd()
 
-        # Prevent an LLM-supplied working_dir from escaping the configured
-        # workspace when restrict_to_workspace is enabled (#2826). Without
-        # this, a caller can pass working_dir="/etc" and then all absolute
-        # paths under /etc would pass the _guard_command check that anchors
-        # on cwd.
-        if access.restrict_to_workspace and workspace_root:
+        # Member shell text receives an OS sandbox below. This check only gives
+        # a helpful early error; it is not relied on as a shell-parser boundary.
+        requires_workspace = access.restrict_to_workspace or is_member
+        if requires_workspace and workspace_root:
             try:
                 requested = Path(cwd).expanduser().resolve()
                 resolved_root = Path(workspace_root).expanduser().resolve()
@@ -433,49 +447,60 @@ class ExecTool(Tool):
                     + _WORKSPACE_BOUNDARY_NOTE
                 )
 
-        # Full access is an explicit trust decision. Keep the application-level
-        # command guard aligned with the selected access mode instead of
-        # continuing to block commands after workspace restriction is disabled.
-        if access.restrict_to_workspace:
+        if is_member and (shell is not None or login is True):
+            return ToolResult.error(
+                "Error: member execution uses a fixed non-login /bin/sh wrapper; shell and login options are not allowed"
+            )
+
+        if requires_workspace:
             guard_error = self._guard_command(
                 command,
                 cwd,
                 restrict_to_workspace=True,
                 workspace_root=workspace_root,
+                member=is_member,
             )
             if guard_error:
                 return guard_error
 
-        if self.sandbox:
-            if _IS_WINDOWS:
-                logger.warning(
-                    "Sandbox '{}' is not supported on Windows; running unsandboxed",
-                    self.sandbox,
-                )
-            else:
-                workspace = workspace_root or cwd
+        sandbox = "bwrap" if is_member else self.sandbox
+        if sandbox:
+            workspace = workspace_root or cwd
+            try:
                 command = wrap_command(
-                    self.sandbox,
+                    sandbox,
                     command,
                     workspace,
                     cwd,
-                    sandbox_ro_binds=[str(p) for p in self.sandbox_ro_binds],
-                    sandbox_rw_binds=[str(p) for p in self.sandbox_rw_binds],
+                    sandbox_ro_binds=None if is_member else [str(p) for p in self.sandbox_ro_binds],
+                    sandbox_rw_binds=None if is_member else [str(p) for p in self.sandbox_rw_binds],
+                    member=is_member,
+                    member_ro_files=current_member_attachment_files() if is_member else None,
                 )
-                cwd = str(Path(workspace).resolve())
+            except (SandboxUnavailableError, ValueError) as exc:
+                return ToolResult.error(f"Error: {exc}")
+            cwd = str(Path(workspace).resolve())
 
         effective_timeout = self._resolve_timeout(timeout)
-        env = self._build_env()
+        env = self._build_member_env(cwd) if is_member else self._build_env()
 
-        if self.path_prepend or self.path_append:
+        if (self.path_prepend or self.path_append) and not is_member:
             if _IS_WINDOWS:
                 env["PATH"] = self._compose_path(env.get("PATH", ""))
             else:
                 command = self._wrap_path_export(command, env)
 
-        shell_program, shell_error = self._resolve_shell(shell)
-        if shell_error:
-            return shell_error
+        if is_member:
+            # The shell that launches bwrap is itself a host process. Never
+            # honor model-selected shells or login startup files before the
+            # member namespace exists.
+            shell_program = "/bin/sh"
+            resolved_login = False
+        else:
+            shell_program, shell_error = self._resolve_shell(shell)
+            if shell_error:
+                return shell_error
+            resolved_login = False if login is None else login
 
         return _PreparedCommand(
             command=command,
@@ -483,7 +508,7 @@ class ExecTool(Tool):
             env=env,
             timeout=effective_timeout,
             shell_program=shell_program,
-            login=False if login is None else login,
+            login=resolved_login,
         )
 
     def _compose_path(self, current_path: str) -> str:
@@ -748,16 +773,22 @@ class ExecTool(Tool):
         owner.release()
         ExecTool._drop_process_tree_owner(process)
 
+    @staticmethod
+    def _build_member_env(workspace: str) -> dict[str, str]:
+        """Return the credential-free environment enforced inside member bwrap."""
+        return {
+            "HOME": workspace,
+            "LANG": "C.UTF-8",
+            "TERM": "dumb",
+            "PATH": "/usr/bin:/bin",
+            "PYTHONUNBUFFERED": "1",
+        }
+
     def _build_env(self) -> dict[str, str]:
         """Build a minimal environment for subprocess execution.
 
-        On Unix, only HOME/LANG/TERM are passed by default. If callers request
-        ``login=True``, bash/zsh may source the user's profile and add PATH or
-        other variables.
-
-        On Windows, ``cmd.exe`` has no login-profile mechanism, so a curated
-        set of system variables (including PATH) is forwarded.  API keys and
-        other secrets are still excluded.
+        Member turns use ``_build_member_env`` plus Bubblewrap ``--clearenv``;
+        configured host commands retain their established explicit allowlist.
         """
         if _IS_WINDOWS:
             sr = os.environ.get("SYSTEMROOT", r"C:\Windows")
@@ -804,6 +835,7 @@ class ExecTool(Tool):
         *,
         restrict_to_workspace: bool | None = None,
         workspace_root: str | None = None,
+        member: bool = False,
     ) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""
         cmd = command.strip()
@@ -850,9 +882,12 @@ class ExecTool(Tool):
                 if workspace_root
                 else None
             )
-            sandbox_bind_roots = self._active_sandbox_bind_roots(
+            # This parser provides only early diagnostics. Member isolation is
+            # enforced by the Bubblewrap mount namespace, never by regex parsing.
+            sandbox_bind_roots = [] if member else self._active_sandbox_bind_roots(
                 resolved_workspace or cwd_path
             )
+            member_attachment_files: set[Path] = set(current_member_attachment_files()) if member else set()
 
             for raw in self._extract_absolute_paths(cmd):
                 try:
@@ -884,11 +919,9 @@ class ExecTool(Tool):
                 if self._is_benign_device_path(str(p)):
                     continue
 
-                media_path = get_media_dir().resolve()
-                allowed = (
-                    is_path_within(p, cwd_path)
-                    or is_path_within(p, media_path)
-                )
+                allowed = is_path_within(p, cwd_path) or (member and p in member_attachment_files)
+                if not member:
+                    allowed = allowed or is_path_within(p, get_media_dir().resolve())
                 if not allowed and resolved_workspace is not None:
                     allowed = is_path_within(p, resolved_workspace)
                 if not allowed and sandbox_bind_roots:

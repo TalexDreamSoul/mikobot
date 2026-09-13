@@ -12,7 +12,7 @@ import dataclasses
 import json
 from collections.abc import Iterable, Mapping
 from datetime import datetime
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from loguru import logger
@@ -89,6 +89,7 @@ def record_pending_followup(session: Session, message: InboundMessage) -> str | 
         {
             "id": followup_id,
             "sender_id": message.sender_id,
+            "source": message.source,
             "chat_id": message.chat_id,
             "content": message.content,
             "media": list(message.media or []),
@@ -115,6 +116,9 @@ def pending_followups(session: Session) -> list[InboundMessage]:
         chat_id = cast(object, record.get("chat_id"))
         content = cast(object, record.get("content"))
         metadata = cast(object, record.get("metadata"))
+        source = cast(object, record.get("source", "external"))
+        if not isinstance(source, str) or source not in {"external", "runtime"}:
+            continue
         if (
             not isinstance(followup_id, str)
             or not followup_id
@@ -142,6 +146,7 @@ def pending_followups(session: Session) -> list[InboundMessage]:
                 metadata={**cast(dict[str, Any], metadata), PENDING_FOLLOWUP_ID_KEY: followup_id},
                 session_key_override=session.key,
                 require_existing_session=True,
+                source=cast(Literal["external", "runtime"], source),
             )
         )
     return messages
@@ -807,6 +812,7 @@ class RecoveryCoordinator:
                 },
                 session_key_override=session.key,
                 require_existing_session=True,
+                source="runtime",
             )
         )
 

@@ -467,7 +467,10 @@ class CollaborationStore:
                 if assignment["projectId"] == project_id and assignment["assigneeUserId"] == user_id:
                     del state["channelAssignments"][assignment_key]
             for challenge_key, challenge in tuple(state["pairingChallenges"].items()):
-                if challenge["projectId"] == project_id and challenge["assigneeUserId"] == user_id:
+                if challenge["projectId"] == project_id and (
+                    challenge["assigneeUserId"] == user_id
+                    or challenge["requestedByUserId"] == user_id
+                ):
                     del state["pairingChallenges"][challenge_key]
             user = self._require_user(state, user_id)
             if user.default_project_id == project_id:
@@ -610,6 +613,9 @@ class CollaborationStore:
                 enabled if enabled is not None else assignment.enabled,
                 assignment.created_by_user_id, assignment.created_at_ms, now,
             )
+            self._discard_active_pairing_challenges_for_instance(
+                state, assignment.channel_type, assignment.instance_id
+            )
             state["channelAssignments"][key] = _encode_channel_assignment(updated)
             self._save(state)
             return updated
@@ -627,6 +633,7 @@ class CollaborationStore:
                 return False
             assignment = _channel_assignment(value)
             self._require_manager(state, assignment.project_id, actor_user_id)
+            self._discard_active_pairing_challenges_for_instance(state, channel_type, instance_id)
             del state["channelAssignments"][key]
             self._save(state)
             return True
@@ -742,6 +749,7 @@ class CollaborationStore:
                     break
             if challenge is None:
                 raise CollaborationNotFoundError("pairing challenge not found or expired")
+            self._require_current_pairing_authority(state, challenge)
             if challenge.verified_at_ms is not None:
                 if challenge.verified_sender_id != sender_id:
                     raise CollaborationConflictError(
@@ -781,6 +789,7 @@ class CollaborationStore:
                 raise CollaborationConflictError("pairing challenge was already consumed")
             project = self._require_project(state, challenge.project_id)
             assignee = self._require_user(state, challenge.assignee_user_id)
+            self._require_current_pairing_authority(state, challenge)
             key = _channel_instance_key(challenge.channel_type, challenge.instance_id)
             existing_value = state["channelAssignments"].get(key)
             if existing_value is not None:
@@ -791,6 +800,12 @@ class CollaborationStore:
             created_at = (
                 _channel_assignment(existing_value).created_at_ms
                 if existing_value is not None else now
+            )
+            self._discard_active_pairing_challenges_for_instance(
+                state,
+                challenge.channel_type,
+                challenge.instance_id,
+                preserve_challenge_id=challenge.id,
             )
             assignment = ChannelAssignment(
                 challenge.channel_type, challenge.instance_id, project.id, assignee.id,
@@ -857,21 +872,31 @@ class CollaborationStore:
             return True
 
     def resolve_session_scope(
-        self, user_id: str, project_id: str, *, channel: str, chat_id: str,
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        channel: str,
+        chat_id: str,
         thread_id: str | None = None,
+        assignment_required: bool = False,
+        binding_id: str | None = None,
     ) -> ConversationScope | None:
-        """Return the scope a session's recorded owner still holds, or ``None``.
+        """Return a session's still-authorized scope, or ``None`` when revoked.
 
-        Runtime-minted turns (cron, triggers, recovery) carry no external sender
-        to resolve, so they inherit whatever their target session was already
-        authorized for. ``None`` means that authorization no longer holds: the
-        project or the user is gone, the membership was revoked, or the channel
-        instance has since been reassigned elsewhere.
+        Runtime turns have no external sender, so persisted provenance is a
+        capability to revalidate rather than a hint to reconstruct.  Required
+        assignment and binding provenance must still identify the current route
+        for this exact conversation; unassigned personal conversations retain
+        their direct scope when assignment provenance was not recorded.
         """
         user_id = _id(user_id, "user_id")
         project_id = _id(project_id, "project_id")
         channel, chat_id = _key(channel, "channel"), _key(chat_id, "chat_id")
         thread_id = _optional_key(thread_id, "thread_id")
+        if type(assignment_required) is not bool:
+            raise ValueError("assignment_required must be a boolean")
+        binding_id = _id(binding_id, "binding_id") if binding_id is not None else None
         with self._state() as state:
             user_value = state["users"].get(user_id)
             project_value = state["projects"].get(project_id)
@@ -880,13 +905,38 @@ class CollaborationStore:
             if not self._is_member(state, project_id, user_id):
                 return None
             assignment = self._assignment_for_channel(state, channel)
-            if assignment is not None and (
+            if assignment_required:
+                if (
+                    assignment is None
+                    or not assignment.enabled
+                    or assignment.project_id != project_id
+                ):
+                    return None
+            elif assignment is not None and (
                 not assignment.enabled or assignment.project_id != project_id
             ):
                 return None
+            binding: ConversationBinding | None = None
+            if binding_id is not None:
+                binding_value = state["conversationBindings"].get(
+                    _conversation_key(channel, chat_id, thread_id)
+                )
+                if binding_value is None:
+                    return None
+                binding = _binding(binding_value)
+                if (
+                    binding.id != binding_id
+                    or binding.project_id != project_id
+                    or not self._is_member(state, project_id, binding.created_by_user_id)
+                ):
+                    return None
             return self._project_scope(
-                ConversationScopeKind.DIRECT, _user(user_value), _project(project_value),
-                None, assignment, _scope_suffix(channel, chat_id, thread_id),
+                ConversationScopeKind.BOUND if binding is not None else ConversationScopeKind.DIRECT,
+                _user(user_value),
+                _project(project_value),
+                binding,
+                assignment,
+                _scope_suffix(channel, chat_id, thread_id),
                 state["localOwnerId"] == user_id,
             )
 
@@ -985,6 +1035,25 @@ class CollaborationStore:
                 return assignment
         return None
 
+    @staticmethod
+    def _discard_active_pairing_challenges_for_instance(
+        state: _StoreState,
+        channel_type: str,
+        instance_id: str,
+        *,
+        preserve_challenge_id: str | None = None,
+    ) -> None:
+        """Invalidate pending codes when an instance's current route changes."""
+        for challenge_id, value in tuple(state["pairingChallenges"].items()):
+            challenge = _pairing_challenge(value)
+            if (
+                challenge.id != preserve_challenge_id
+                and challenge.consumed_at_ms is None
+                and challenge.channel_type == channel_type
+                and challenge.instance_id == instance_id
+            ):
+                del state["pairingChallenges"][challenge_id]
+
     def _is_admin(self, state: _StoreState, user_id: str) -> bool:
         if state["localOwnerId"] == user_id:
             return True
@@ -1013,6 +1082,34 @@ class CollaborationStore:
             return True
         value = state["memberships"].get(_member_key(project_id, user_id))
         return value is not None and _membership(value).role is MembershipRole.OWNER
+
+    def _require_current_pairing_authority(
+        self,
+        state: _StoreState,
+        challenge: PairingChallenge,
+    ) -> None:
+        """Revalidate the challenge issuer's authority before use."""
+        self._require_user(state, challenge.requested_by_user_id)
+        self._require_user(state, challenge.assignee_user_id)
+        self._require_project(state, challenge.project_id)
+        if self._is_admin(state, challenge.requested_by_user_id):
+            self._require_member_or_admin(
+                state, challenge.project_id, challenge.assignee_user_id
+            )
+            return
+        self._require_member(state, challenge.project_id, challenge.requested_by_user_id)
+        provision = state["channelProvisions"].get(
+            _channel_instance_key(challenge.channel_type, challenge.instance_id)
+        )
+        if (
+            challenge.assignee_user_id != challenge.requested_by_user_id
+            or provision is None
+            or _channel_provision(provision).created_by_user_id
+            != challenge.requested_by_user_id
+        ):
+            raise CollaborationPermissionError(
+                "pairing challenge issuer no longer has authority for the instance"
+            )
 
     def _require_manager(self, state: _StoreState, project_id: str, user_id: str) -> None:
         """Require a project owner or a system administrator."""

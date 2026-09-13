@@ -15,6 +15,7 @@ from nanobot import __version__
 from nanobot.bus.events import INBOUND_META_USER_SHELL, OutboundMessage
 from nanobot.command.router import CommandContext, CommandRouter, normalize_command_text
 from nanobot.providers.base import LLMUsage
+from nanobot.session.keys import UNIFIED_SESSION_KEY
 from nanobot.utils.helpers import build_status_content
 from nanobot.utils.restart import set_restart_notice_to_env
 from nanobot.utils.workspace_prompts import initialize_workspace_prompt
@@ -434,13 +435,52 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
         build_dream_commit_message = MemoryStore.build_dream_commit_message
         prune_dream_sessions = MemoryStore.prune_dream_sessions
 
-        store = loop.context.memory
+        session = ctx.session
+        if session is None:
+            await loop.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Dream cannot resolve the current session.",
+            ))
+            return
+        try:
+            store = await loop.memory_store_for_session(session)
+            scope = await loop.collaboration_scope_for_session(session)
+        except Exception:
+            store = None
+            scope = None
+        if store is None:
+            await loop.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Dream is not authorized for this session.",
+            ))
+            return
+        attributes = {"collaboration_scope": scope} if scope is not None else None
         content = ""
         resp = None
         diff_body = ""
         t0 = time.monotonic()
         try:
-            result = store.build_dream_prompt()
+            def _entry_allowed(entry: dict[str, Any]) -> bool:
+                if scope is not None:
+                    return True
+                key = entry.get("session_key")
+                if not isinstance(key, str):
+                    return True
+                historical = loop.sessions.peek(key)
+                return (
+                    not (
+                        key.startswith(("user:", "vault:"))
+                        or (key.startswith("unified:") and key != UNIFIED_SESSION_KEY)
+                    )
+                    and (
+                        historical is None
+                        or not loop.session_has_collaboration_provenance(historical.metadata)
+                    )
+                )
+
+            result = store.build_dream_prompt(entry_filter=_entry_allowed)
             if result is None:
                 await loop.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
@@ -454,10 +494,15 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
             resp = await loop.process_direct(
                 prompt,
                 session_key=key,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                sender_id=msg.sender_id,
                 ephemeral=True,
-                tools=store.build_dream_tools(),
+                tools=store.build_dream_tools(allow_skill_generation=scope is None),
                 on_progress=_silent,
                 runtime=dream_runtime,
+                attributes=attributes,
+                source="runtime",
             )
             elapsed = time.monotonic() - t0
             # The real file delta grounds the audit record; normal completion

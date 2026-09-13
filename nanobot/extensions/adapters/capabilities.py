@@ -110,12 +110,12 @@ def _mcp_revision(server: object, transport: str) -> str:
 
 def _mcp_lifecycle(status: object) -> ExtensionLifecycle:
     if not isinstance(status, str):
-        return ExtensionLifecycle.DISCOVERED
+        return ExtensionLifecycle.UNAVAILABLE
     return {
         "connected": ExtensionLifecycle.ENABLED,
         "connecting": ExtensionLifecycle.RELOADING,
         "failed": ExtensionLifecycle.FAILED,
-    }.get(status, ExtensionLifecycle.DISCOVERED)
+    }.get(status, ExtensionLifecycle.UNAVAILABLE)
 
 
 class EffectiveSkillsExtensionAdapter:

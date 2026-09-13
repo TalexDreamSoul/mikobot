@@ -20,6 +20,7 @@ from nanobot.extensions.contracts import (
     ExtensionComponentKind,
     ExtensionConfigurationTarget,
     ExtensionDiagnostic,
+    ExtensionLifecycle,
     ExtensionPackageDescriptor,
     ExtensionSnapshot,
     requires_risk_acknowledgement,
@@ -75,6 +76,11 @@ def _with_mcp_reload_result(
         updated["requires_restart"] = True
     if not reload_payload["ok"]:
         updated["ok"] = False
+        updated["lifecycle"] = (
+            ExtensionLifecycle.RESTART_REQUIRED.value
+            if reload_payload["requires_restart"]
+            else ExtensionLifecycle.FAILED.value
+        )
     return updated
 
 
@@ -354,7 +360,7 @@ class ExtensionSettingsHandler:
         try:
             result = await registry.execute(action_request)
         except ExtensionRegistryError as exc:
-            return SettingsRouteResult.failure(exc.status, str(exc))
+            return SettingsRouteResult.failure(exc.status, safe_extension_message(exc))
         except Exception:
             self.logger.exception("extension action '{}' failed", action_request.action.value)
             return SettingsRouteResult.failure(500, "extension action could not be completed")
@@ -367,7 +373,20 @@ class ExtensionSettingsHandler:
         located = _locate(refreshed, result.package_id) if refreshed is not None else None
         package = located[0] if located is not None else None
         payload = action_result_payload(result, actor_id=actor_id, package=package)
-        payload = await self._reconcile_mcp_runtime(payload, result, package)
+        payload, mcp_reconciled = await self._reconcile_mcp_runtime(payload, result, package)
+        if mcp_reconciled:
+            try:
+                reconciled_snapshot = await asyncio.to_thread(registry.snapshot)
+            except Exception:
+                self.logger.exception("failed to refresh the reconciled extension inventory")
+            else:
+                reconciled = _locate(reconciled_snapshot, result.package_id)
+                reconciled_package = reconciled[0] if reconciled is not None else None
+                payload["package"] = (
+                    package_payload(reconciled_package)
+                    if reconciled_package is not None
+                    else None
+                )
         return SettingsRouteResult.success(
             payload,
             decorate_restart=True,
@@ -383,7 +402,7 @@ class ExtensionSettingsHandler:
         payload: dict[str, Any],
         result: ExtensionActionResult,
         package: ExtensionPackageDescriptor | None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
         """Hot reload MCP when the acted-on package publishes MCP servers.
 
         An Agent Plugin owns Skills and stdio MCP servers together, and its adapter
@@ -392,14 +411,14 @@ class ExtensionSettingsHandler:
         marker write whose reload failed from being displayed as a live success.
         """
         if not result.ok or self._reload_mcp is None or package is None:
-            return payload
+            return payload, False
         if not any(
             component.kind is ExtensionComponentKind.MCP_SERVER
             for component in package.components
         ):
-            return payload
+            return payload, False
         if result.action not in _MCP_RECONCILING_ACTIONS:
-            return payload
+            return payload, False
         try:
             reload_result = await self._reload_mcp()
         except Exception:
@@ -409,7 +428,7 @@ class ExtensionSettingsHandler:
                 "message": "MCP hot reload failed. Restart nanobot to pick up changes.",
                 "requires_restart": True,
             }
-        return _with_mcp_reload_result(payload, reload_result)
+        return _with_mcp_reload_result(payload, reload_result), True
 
     @staticmethod
     def _reject_before_dispatch(

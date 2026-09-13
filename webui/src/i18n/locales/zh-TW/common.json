@@ -639,7 +639,7 @@
       "thirdPartyBrands": "產品名稱、Logo 與品牌均為各自擁有者的財產。僅供識別之用，不代表任何形式的背書。"
     },
     "apps": {
-      "description": "將工具新增至 nanobot，再於聊天中使用 @ 指定工具。",
+      "description": "Apps 管理可在聊天中呼叫的能力；主機執行階段套件及其目前健康狀態會在 Extensions 中分開顯示。",
       "cliLabel": "應用程式",
       "mcpLabel": "MCP",
       "channelLabel": "通訊管道",

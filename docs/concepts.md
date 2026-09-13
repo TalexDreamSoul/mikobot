@@ -41,9 +41,9 @@ The config file controls what nanobot may use. The workspace is where nanobot ke
 
 ### Agent Workspace and Project Workspace
 
-The configured workspace is the **agent workspace**. A WebUI chat can also select
-a different **project workspace** for repository-specific work without moving the
-agent's identity or durable state.
+For the host owner, the configured workspace is the **agent workspace**. A host
+WebUI chat can select a different **working directory** for repository-specific
+work without moving the agent's identity or durable state.
 
 | Resource | Owner when a project is selected |
 |---|---|
@@ -55,6 +55,17 @@ agent's identity or durable state.
 When no separate project is selected, one directory normally serves both roles.
 Selecting a project changes the working context for that chat; it does not create
 a second agent or relocate the configured agent workspace.
+
+The **Projects** page serves a different purpose: a managed Project is a shared
+workspace with members and optional Skill/MCP allowlists. Members do not choose
+arbitrary host directories or Full Access. Their profile and automatic memory are
+private to that member and project, outside the shared workspace. Only files they
+intentionally put in the project workspace are shared project material.
+
+**Channels** assigns connected chat instances to a Project; the assignee identifies
+who proved control through a Pair Code, not an exclusive ACL. Other authorized
+project members may use the instance. A group's explicit project binding remains
+separate from its channel assignment.
 
 ## Config Format
 
@@ -120,6 +131,11 @@ Each channel maps inbound messages to a session key. That lets independent conve
 
 `agents.defaults.unifiedSession` can intentionally share one session across channels for a single-user multi-device setup. Leave it off if you expect separate people, groups, channels, or projects to keep separate context.
 
+Member chat-channel sessions remain separated by user and project even when
+unification is enabled. WebUI chats keep their initially authorized project when a
+member changes defaults. Revoked membership or a removed/disabled/reassigned required
+channel prevents subsequent access and tool execution; it does not delete history.
+
 ## Memory, Sessions, and Dream
 
 nanobot uses two related stores:
@@ -130,6 +146,11 @@ nanobot uses two related stores:
 | Memory | `<workspace>/memory/MEMORY.md` and `<workspace>/memory/history.jsonl` | Long-term facts and consolidated history |
 
 Dream is a periodic consolidation job. It reads accumulated history and updates workspace memory so useful context can survive beyond short session replay.
+
+For members, the workspace in this table is the private store at
+`<config-dir>/users/<user-id>/projects/<project-id>/`, not the shared project directory.
+Automatic archives and Dream never publish one member's raw conversation into another
+member's memory. Shared knowledge belongs in explicitly authored project files.
 
 The configured workspace contains a `.nanobot/workspace-id` file. It contains only an
 opaque random identifier—never conversation content or credentials. Keep it with workspace
@@ -152,12 +173,18 @@ replacing them:
 | MCP server | Runtime tools exposed to the agent |
 | CLI App | Locally managed executable whose adapter is packaged and activated like a plugin |
 | Apps | WebUI surface for reviewing and managing these capabilities |
+| Runtime inventory (Settings → Extensions) | Administrator view of configured packages, lifecycle actions, and observed health; not a second Apps catalog |
 
 Native providers, channels, built-in tools, standalone workspace skills, and
 directly configured MCP servers keep their existing extension paths. See
 [`webui.md#apps`](./webui.md#apps) for the user-facing flow and
 [`configuration.md#agent-plugins-v1`](./configuration.md#agent-plugins-v1) for
 the package contract.
+
+Apps, global Skills, provider credentials, and runtime installation are host
+administration. Members use their authorized project/channel capabilities, not those
+global management screens. An enabled package can still be disconnected or failed;
+its runtime state and restart requirement remain visible.
 
 ## Tools and Safety
 

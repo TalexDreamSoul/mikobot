@@ -104,4 +104,10 @@ class SpawnTool(Tool):
             origin_message_id=request_ctx.message_id,
             temperature=temperature,
             workspace_scope=current_workspace_scope(),
+            request_attributes={
+                key: value
+                for key, value in request_ctx.attributes.items()
+                if key in {"collaboration_scope", "authorized_attachment_paths"}
+            },
+            authorize_tool=request_ctx.authorize_tool,
         )

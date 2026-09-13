@@ -280,6 +280,25 @@ async def test_stale_revision_is_refused_before_delegating(tmp_path: Path) -> No
     assert result.message == "Provider action revision is stale."
 
 
+async def test_registry_rejects_missing_provider_revision_before_runtime_reload(tmp_path: Path) -> None:
+    """A reload without the displayed revision cannot reach the provider runtime."""
+    reloader = _Reloader()
+    registry = ExtensionRegistry()
+    registry.register(_adapter(_config(tmp_path), ProviderExtensionServices(reload_image=reloader)))
+
+    with pytest.raises(ExtensionRegistryError) as error:
+        await registry.execute(
+            ExtensionActionRequest(
+                context=_ADMIN,
+                target_id=_OPENAI_IMAGE,
+                action=ExtensionAction.RELOAD,
+            )
+        )
+
+    assert error.value.code == "revision_required"
+    assert reloader.calls == 0
+
+
 async def test_inspect_returns_current_lifecycle_for_a_family(tmp_path: Path) -> None:
     """Inspect reports the current state without touching any owner."""
     adapter = _adapter(_config(tmp_path))

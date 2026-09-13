@@ -8,7 +8,7 @@ import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, NotRequired, TypedDict
+from typing import Any, Awaitable, Callable, NotRequired, TypedDict
 
 from loguru import logger
 
@@ -30,6 +30,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import AgentDefaults, ToolsConfig
 from nanobot.llm_usage.context import LLMUsageSource, current_llm_usage_source
 from nanobot.providers.base import LLMProvider, LLMUsage
+from nanobot.security.private_media import user_private_memory_root
 from nanobot.security.workspace_access import (
     WorkspaceScope,
     bind_workspace_scope,
@@ -45,6 +46,8 @@ class _SubagentOrigin(TypedDict):
     chat_id: str
     session_key: str | None
     llm_usage_source: NotRequired[LLMUsageSource]
+    authorize_tool: NotRequired[Callable[[], Awaitable[None]] | None]
+    attributes: NotRequired[dict[str, Any]]
 
 
 @dataclass(slots=True)
@@ -236,6 +239,8 @@ class SubagentManager:
         origin_message_id: str | None = None,
         temperature: float | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        authorize_tool: Callable[[], Awaitable[None]] | None = None,
+        request_attributes: dict[str, Any] | None = None,
         *,
         runtime: LLMRuntime | None = None,
     ) -> str:
@@ -251,6 +256,8 @@ class SubagentManager:
             "chat_id": origin_chat_id,
             "session_key": session_key,
             "llm_usage_source": current_llm_usage_source(),
+            "attributes": dict(request_attributes or {}),
+            "authorize_tool": authorize_tool,
         }
 
         status = SubagentStatus(
@@ -300,6 +307,8 @@ class SubagentManager:
         origin_message_id: str | None = None,
         temperature: float | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        authorize_tool: Callable[[], Awaitable[None]] | None = None,
+        request_attributes: dict[str, Any] | None = None,
         *,
         runtime: LLMRuntime | None = None,
     ) -> str:
@@ -315,6 +324,8 @@ class SubagentManager:
             "chat_id": origin_chat_id,
             "session_key": session_key,
             "llm_usage_source": current_llm_usage_source(),
+            "authorize_tool": authorize_tool,
+            "attributes": dict(request_attributes or {}),
         }
         status = SubagentStatus(
             task_id=task_id,
@@ -410,7 +421,24 @@ class SubagentManager:
                 cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
             # Construct from the agent workspace; the bound scope below supplies the project cwd.
             tools = self._build_tools(tools_config=cfg)
-            system_prompt = self._build_subagent_prompt(workspace=root)
+            scope = origin.get("attributes", {}).get("collaboration_scope")
+            allowed_skills = getattr(scope, "allowed_skills", None)
+            user_id = getattr(scope, "user_id", None)
+            project_id = getattr(scope, "project_id", None)
+            memory_workspace = (
+                user_private_memory_root(user_id, project_id=project_id)
+                if (
+                    isinstance(user_id, str)
+                    and isinstance(project_id, str)
+                    and not getattr(scope, "is_local_owner", False)
+                )
+                else None
+            )
+            system_prompt = self._build_subagent_prompt(
+                workspace=root,
+                memory_workspace=memory_workspace,
+                allowed_skills=set(allowed_skills) if allowed_skills is not None else None,
+            )
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
@@ -428,6 +456,8 @@ class SubagentManager:
                 message_id=origin_message_id,
                 session_key=sess_key,
                 runtime=runtime,
+                attributes=dict(origin.get("attributes", {})),
+                authorize_tool=origin.get("authorize_tool"),
             ))
             token = bind_workspace_scope(workspace_scope) if workspace_scope is not None else None
             try:
@@ -533,30 +563,42 @@ class SubagentManager:
             content=announce_content,
             session_key_override=override,
             metadata=metadata,
+            source="runtime",
         )
 
         await self.bus.publish_inbound(msg)
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
 
-    def _build_subagent_prompt(self, workspace: Path | None = None) -> str:
-        """Build a focused system prompt for the subagent."""
+    def _build_subagent_prompt(
+        self,
+        workspace: Path | None = None,
+        memory_workspace: Path | None = None,
+        allowed_skills: set[str] | None = None,
+    ) -> str:
+        """Build a project-tools prompt with a private owner journal hint."""
         from nanobot.agent.skills import SkillsLoader
 
         agent_workspace = self.workspace.expanduser().resolve()
         project_workspace = workspace.expanduser().resolve() if workspace else agent_workspace
+        profile_workspace = (
+            memory_workspace.expanduser().resolve()
+            if memory_workspace is not None
+            else agent_workspace
+        )
         skills_summary = SkillsLoader(
             self.workspace,
             disabled_skills=self.disabled_skills,
-        ).build_skills_summary(workspace=project_workspace)
+        ).build_skills_summary(workspace=project_workspace, include=allowed_skills)
         history_log = (
-            str(agent_workspace / "memory" / "history.jsonl")
-            if agent_workspace != project_workspace
-            else "memory/history.jsonl"
+            "memory/history.jsonl"
+            if profile_workspace == project_workspace
+            else str(profile_workspace / "memory" / "history.jsonl")
         )
+        visible_agent_workspace = profile_workspace if memory_workspace is not None else agent_workspace
         return render_template(
             "agent/subagent_system.md",
             workspace=str(project_workspace),
-            agent_workspace=str(agent_workspace),
+            agent_workspace=str(visible_agent_workspace),
             history_log=history_log,
             skills_summary=skills_summary or "",
         )

@@ -639,7 +639,7 @@
       "thirdPartyBrands": "Tên sản phẩm, logo và thương hiệu thuộc về chủ sở hữu tương ứng. Việc sử dụng chỉ nhằm nhận diện và không ngụ ý được xác nhận."
     },
     "apps": {
-      "description": "Thêm công cụ vào nanobot, sau đó dùng @ trong cuộc trò chuyện.",
+      "description": "Apps quản lý các khả năng bạn có thể gọi trong cuộc trò chuyện. Các gói runtime của máy chủ và tình trạng hiện tại được hiển thị riêng trong Extensions.",
       "cliLabel": "Ứng dụng",
       "mcpLabel": "MCP",
       "channelLabel": "Kênh",

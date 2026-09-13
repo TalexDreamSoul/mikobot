@@ -1,6 +1,7 @@
 """Runtime context for tool construction."""
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -42,6 +43,7 @@ class RequestContext:
     turn_id: str | None = None
     workspace: Path | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
+    authorize_tool: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
 
 
 @runtime_checkable
@@ -56,6 +58,17 @@ def bind_request_context(ctx: RequestContext) -> Token[RequestContext | None]:
 
 def reset_request_context(token: Token[RequestContext | None]) -> None:
     _CURRENT_REQUEST_CONTEXT.reset(token)
+
+
+async def require_tool_authorization() -> None:
+    """Revalidate a turn's server-owned capability immediately before a tool runs."""
+    request = _CURRENT_REQUEST_CONTEXT.get()
+    if request is None or request.authorize_tool is None:
+        return
+    try:
+        await request.authorize_tool()
+    except Exception as exc:
+        raise PermissionError("Tool authorization is no longer valid; start an authorized turn") from exc
 
 
 @contextmanager

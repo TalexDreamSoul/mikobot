@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from nanobot.bus.events import (
     INBOUND_META_RUNTIME_CONTROL,
@@ -13,7 +13,11 @@ from nanobot.bus.events import (
     InboundMessage,
 )
 from nanobot.bus.queue import MessageBus
-from nanobot.security.workspace_access import WorkspaceScope
+from nanobot.security.workspace_access import (
+    WORKSPACE_SCOPE_METADATA_KEY,
+    WorkspaceScope,
+    build_workspace_scope,
+)
 from nanobot.session.manager import Session, SessionManager
 from nanobot.webui.workspaces import WebUIWorkspaceController
 
@@ -123,9 +127,20 @@ class WebUITemporaryChats:
         if command.startswith("/") and command not in _TEMPORARY_CHAT_COMMANDS:
             raise TemporaryChatError("temporary_chat_command_rejected")
 
+        workspace_scope = self._workspaces.restricted_default_scope()
+        stored_scope = session.metadata.get(WORKSPACE_SCOPE_METADATA_KEY)
+        project_path = (
+            cast(dict[str, object], stored_scope).get("project_path")
+            if isinstance(stored_scope, dict) else None
+        )
+        if isinstance(project_path, str):
+            workspace_scope = build_workspace_scope(
+                project_path, "restricted", source_channel=self._channel_name
+            )
+
         return TemporaryChatMessagePolicy(
             session_key=self._session_key(chat_id),
-            workspace_scope=self._workspaces.restricted_default_scope(),
+            workspace_scope=workspace_scope,
         )
 
     def validate_attach(self, chat_id: str) -> None:
@@ -203,6 +218,7 @@ class WebUITemporaryChats:
                     INBOUND_META_RUNTIME_CONTROL: RUNTIME_CONTROL_SESSION_DISCARD,
                 },
                 session_key_override=session_key,
+                source="runtime",
             )
         )
 

@@ -8,6 +8,8 @@ export type { SettingsSectionKey } from "@/components/settings/contracts";
 interface SettingsViewProps {
   theme: "light" | "dark";
   initialSection?: SettingsSectionKey;
+  isAdmin?: boolean;
+  restrictedNotice?: boolean;
   initialSettings?: SettingsPayload | null;
   showSidebar?: boolean;
   onToggleTheme: () => void;
@@ -26,6 +28,8 @@ interface SettingsViewProps {
 export function SettingsView({
   theme,
   initialSection = "overview",
+  isAdmin = false,
+  restrictedNotice = false,
   initialSettings = null,
   showSidebar = true,
   onToggleTheme,
@@ -40,9 +44,15 @@ export function SettingsView({
   isRestarting = false,
   hostChromeInset = false,
 }: SettingsViewProps) {
+  const safeInitialSection = isAdmin
+    || initialSection === "appearance"
+    || initialSection === "automations"
+    ? initialSection
+    : "appearance";
   const controller = useSettingsController({
-    initialSection,
-    initialSettings,
+    initialSection: safeInitialSection,
+    enabled: isAdmin,
+    initialSettings: isAdmin ? initialSettings : null,
     onModelNameChange,
     onSettingsChange,
     onSectionChange,
@@ -54,6 +64,8 @@ export function SettingsView({
     <SettingsPage
       controller={controller}
       theme={theme}
+      isAdmin={isAdmin}
+      restrictedNotice={restrictedNotice}
       showSidebar={showSidebar}
       onToggleTheme={onToggleTheme}
       onBackToChat={onBackToChat}

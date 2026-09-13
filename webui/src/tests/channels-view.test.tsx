@@ -82,6 +82,32 @@ describe("ChannelsView", () => {
     await waitFor(() => expect(projects.removeAssignment).toHaveBeenCalledWith("weixin", "support"));
   });
 
+  it("assigns a claimable channel to a known project member instead of accepting a free-form identity", async () => {
+    vi.mocked(fetchCollaborationClaimableChannels).mockResolvedValue(claimable);
+    const beginPairing = vi.fn().mockResolvedValue({ pairing: pendingChallenge({ code: "ABCD-EFGH" }) });
+    const projects = controller({ beginPairing });
+
+    render(wrap(<ChannelsView projects={projects} onToggleSidebar={vi.fn()} />));
+
+    const assignee = await screen.findByRole("combobox", { name: "Assign to project member" });
+    expect((assignee as HTMLSelectElement).value).toBe("user-1");
+    expect(Array.from((assignee as HTMLSelectElement).options, (option) => option.value))
+      .toEqual(["user-1", "user-2"]);
+    expect(screen.queryByRole("textbox", { name: /Assign/ })).not.toBeInTheDocument();
+    fireEvent.change(assignee, { target: { value: "user-2" } });
+    fireEvent.change(await screen.findByRole("combobox", { name: "Channel instance" }), {
+      target: { value: "weixin:sales" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Generate Pair Code" }));
+
+    await waitFor(() => expect(beginPairing).toHaveBeenCalledWith({
+      channelType: "weixin",
+      instanceId: "sales",
+      projectId: project.id,
+      assigneeUserId: "user-2",
+    }));
+  });
+
   it("keeps the Pair Code on screen while polling reports status without it", async () => {
     vi.mocked(fetchCollaborationClaimableChannels).mockResolvedValue(claimable);
     // Only the issuing response carries the code; every status read omits it.
@@ -98,19 +124,13 @@ describe("ChannelsView", () => {
       within(picker).getByRole("option", { name: "WeChat · Sales · running" }),
     ).toBeInTheDocument());
     fireEvent.change(picker, { target: { value: "weixin:sales" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "Assign to project" }), {
-      target: { value: secondProject.id },
-    });
-    fireEvent.change(screen.getByRole("textbox", { name: "Assign to user ID (optional)" }), {
-      target: { value: "user-3" },
-    });
     fireEvent.click(screen.getByRole("button", { name: "Generate Pair Code" }));
 
     await waitFor(() => expect(beginPairing).toHaveBeenCalledWith({
       channelType: "weixin",
       instanceId: "sales",
-      projectId: secondProject.id,
-      assigneeUserId: "user-3",
+      projectId: project.id,
+      assigneeUserId: "user-1",
     }));
     expect(await screen.findByText("ABCD-EFGH")).toBeInTheDocument();
 
@@ -132,6 +152,7 @@ describe("ChannelsView", () => {
     });
     const finishPairing = vi.fn().mockResolvedValue({
       pairing: pendingChallenge({ verified: true, consumed: true }),
+      channel_activation: { ok: false, message: "Channel activation could not start." },
     });
     const projects = controller({ beginPairing, finishPairing, isAdmin: false });
 
@@ -155,7 +176,7 @@ describe("ChannelsView", () => {
       assigneeUserId: null,
     });
     await waitFor(() => expect(finishPairing).toHaveBeenCalledWith("challenge-sales"), { timeout: 3_000 });
-    expect(await screen.findByText("Assignment complete")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Channel activation could not start.");
   });
 
   it("distinguishes a refusal to list instances from an empty list", async () => {

@@ -248,7 +248,7 @@ export function ExtensionsSettings({
           <p className="mt-1 max-w-prose text-[12.5px] leading-5 text-muted-foreground">
             {t("settings.extensions.description", {
               defaultValue:
-                "Every package this gateway has loaded, who owns each component, and what it is trusted to do. nanobot does not sandbox or verify third-party extensions.",
+                "Host runtime inventory for packages loaded by this gateway. Enabled is requested state, not proof that a runtime is healthy; current failures and restart requirements remain visible here. Apps manages chat capabilities. nanobot does not sandbox or verify third-party extensions.",
             })}
           </p>
         </div>

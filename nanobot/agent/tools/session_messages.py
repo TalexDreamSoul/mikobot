@@ -25,7 +25,7 @@ from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.runtime_context import RuntimeContextBlock
 from nanobot.session.manager import SessionManager
-from nanobot.session.privacy import same_privacy_scope
+from nanobot.session.privacy import same_privacy_scope, same_project_owner
 from nanobot.session.session_handles import (
     SessionHandleResolver,
     normalize_session_handle,
@@ -63,6 +63,7 @@ class ListSessionsTool(Tool):
     """List the handles of other persisted sessions."""
 
     def __init__(self, sessions: SessionManager) -> None:
+        self._sessions = sessions
         self._handles = SessionHandleResolver(sessions)
 
     @classmethod
@@ -93,10 +94,23 @@ class ListSessionsTool(Tool):
                 f"@{handle.name}"
                 for handle in handles
                 if handle.session_key != request.session_key
-                and same_privacy_scope(request.session_key, handle.session_key)
+                and self._allowed(request.session_key, handle.session_key)
             ],
             ensure_ascii=True,
         )
+
+    def _allowed(self, source_key: str, target_key: str) -> bool:
+        source = self._sessions.peek(source_key)
+        target = self._sessions.peek(target_key)
+        source_metadata = source.metadata if source is not None else None
+        target_metadata = target.metadata if target is not None else None
+        if same_project_owner(source_metadata, target_metadata):
+            return True
+        scoped = any(
+            metadata is not None and any(key.startswith("collaboration_") for key in metadata)
+            for metadata in (source_metadata, target_metadata)
+        )
+        return not scoped and same_privacy_scope(source_key, target_key)
 
 
 @tool_parameters(
@@ -125,6 +139,7 @@ class SendSessionMessageTool(Tool):
         clock: Callable[[], float] | None = None,
     ) -> None:
         self._bus = bus
+        self._sessions = sessions
         self._handles = SessionHandleResolver(sessions)
         self._max_messages_per_minute = max_messages_per_minute
         self._schedule_later = schedule_later
@@ -229,8 +244,19 @@ class SendSessionMessageTool(Tool):
         )
         if source is None:
             raise SessionMessageError("source session was not found")
-        if not same_privacy_scope(source.session_key, target.session_key):
-            raise SessionMessageError("cross-user session messaging is not authorized")
+        source_session = self._sessions.peek(source.session_key)
+        target_session = self._sessions.peek(target.session_key)
+        source_metadata = source_session.metadata if source_session is not None else None
+        target_metadata = target_session.metadata if target_session is not None else None
+        scoped = any(
+            metadata is not None and any(key.startswith("collaboration_") for key in metadata)
+            for metadata in (source_metadata, target_metadata)
+        )
+        if not (
+            same_project_owner(source_metadata, target_metadata)
+            or (not scoped and same_privacy_scope(source.session_key, target.session_key))
+        ):
+            raise SessionMessageError("cross-project session messaging is not authorized")
         envelope: SessionMessageEnvelope = {
             "message_id": uuid4().hex,
             "created_at_ms": int(time.time() * 1000),
@@ -264,6 +290,7 @@ class SendSessionMessageTool(Tool):
                 metadata={SESSION_MESSAGE_METADATA_KEY: envelope},
                 session_key_override=target.session_key,
                 input_role="user",
+                source="runtime",
             ))
             sent_at.append(now)
             self._sent_at[source.session_key] = sent_at
@@ -354,4 +381,5 @@ class SendSessionMessageTool(Tool):
                 ),
                 session_key_override=source_session_key,
                 input_role="user",
+                source="runtime",
             ))

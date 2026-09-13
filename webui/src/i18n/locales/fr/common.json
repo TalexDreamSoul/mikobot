@@ -639,7 +639,7 @@
       "thirdPartyBrands": "Les noms, logos et marques de produits appartiennent à leurs propriétaires respectifs. Leur utilisation sert uniquement à l'identification et n'implique aucune approbation."
     },
     "apps": {
-      "description": "Ajoutez des outils à nanobot, puis utilisez-les avec @ dans le chat.",
+      "description": "Apps gère les capacités que vous pouvez invoquer dans le chat. Les paquets de l’environnement hôte et leur état actuel sont présentés séparément dans Extensions.",
       "cliLabel": "Application",
       "mcpLabel": "MCP",
       "channelLabel": "Canal",

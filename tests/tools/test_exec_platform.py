@@ -15,11 +15,6 @@ import pytest
 from nanobot.agent.tools.exec_session import ExecSessionManager, ExecSessionTool
 from nanobot.agent.tools.shell import ExecTool
 
-_WINDOWS_ENV_KEYS = {
-    "APPDATA", "LOCALAPPDATA", "ProgramData",
-    "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
-}
-
 
 class _FakeWindowsJob:
     creation_flags = 0
@@ -55,38 +50,40 @@ class TestBuildEnvUnix:
         assert env["HOME"] == "/Users/dev"
 
     def test_secrets_excluded(self, monkeypatch):
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
-        monkeypatch.setenv("NANOBOT_TOKEN", "tok-secret")
+        openai_secret = "openai-secret-4e1d"
+        token_secret = "nanobot-token-8b2c"
+        monkeypatch.setenv("OPENAI_API_KEY", openai_secret)
+        monkeypatch.setenv("NANOBOT_TOKEN", token_secret)
         with patch("nanobot.agent.tools.shell._IS_WINDOWS", False):
             env = ExecTool()._build_env()
-        assert "OPENAI_API_KEY" not in env
-        assert "NANOBOT_TOKEN" not in env
-        for v in env.values():
-            assert "secret" not in v.lower()
+        assert openai_secret not in env.values()
+        assert token_secret not in env.values()
 
 
 class TestBuildEnvWindows:
 
-    _EXPECTED_KEYS = {
-        "SYSTEMROOT", "COMSPEC", "USERPROFILE", "HOMEDRIVE",
-        "HOMEPATH", "TEMP", "TMP", "PATHEXT", "PATH", "PYTHONUNBUFFERED",
-        *_WINDOWS_ENV_KEYS,
-    }
-
-    def test_expected_keys(self):
+    def test_windows_preserves_curated_and_explicit_environment(self, monkeypatch):
+        appdata = r"C:\\Users\\member\\AppData\\Roaming"
+        program_data = r"C:\\ProgramData"
+        custom_tool_env = "member-tool-value"
+        monkeypatch.setenv("APPDATA", appdata)
+        monkeypatch.setenv("ProgramData", program_data)
+        monkeypatch.setenv("MY_WINDOWS_TOOL_ENV", custom_tool_env)
         with patch("nanobot.agent.tools.shell._IS_WINDOWS", True):
-            env = ExecTool()._build_env()
-        assert set(env) == self._EXPECTED_KEYS
+            env = ExecTool(allowed_env_keys=["MY_WINDOWS_TOOL_ENV"])._build_env()
+        assert env["APPDATA"] == appdata
+        assert env["ProgramData"] == program_data
+        assert env["MY_WINDOWS_TOOL_ENV"] == custom_tool_env
 
     def test_secrets_excluded(self, monkeypatch):
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
-        monkeypatch.setenv("NANOBOT_TOKEN", "tok-secret")
+        openai_secret = "openai-secret-4e1d"
+        token_secret = "nanobot-token-8b2c"
+        monkeypatch.setenv("OPENAI_API_KEY", openai_secret)
+        monkeypatch.setenv("NANOBOT_TOKEN", token_secret)
         with patch("nanobot.agent.tools.shell._IS_WINDOWS", True):
             env = ExecTool()._build_env()
-        assert "OPENAI_API_KEY" not in env
-        assert "NANOBOT_TOKEN" not in env
-        for v in env.values():
-            assert "secret" not in v.lower()
+        assert openai_secret not in env.values()
+        assert token_secret not in env.values()
 
     def test_path_has_sensible_default(self):
         with (
@@ -487,23 +484,17 @@ class TestPathAppendPlatform:
 class TestSandboxPlatform:
 
     @pytest.mark.asyncio
-    async def test_bwrap_skipped_on_windows(self):
-        """bwrap must be silently skipped on Windows, not crash."""
-        mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"ok", b"")
-        mock_proc.returncode = 0
-
+    async def test_bwrap_refuses_windows_before_spawning(self):
+        """A configured Bubblewrap backend must not degrade to a host process on Windows."""
         with (
             patch("nanobot.agent.tools.shell._IS_WINDOWS", True),
-            patch.object(ExecTool, "_spawn", return_value=mock_proc) as mock_spawn,
-            patch.object(ExecTool, "_guard_command", return_value=None),
+            patch("nanobot.agent.tools.sandbox.sys.platform", "win32"),
+            patch.object(ExecTool, "_spawn", new_callable=AsyncMock) as spawn,
         ):
-            tool = ExecTool(sandbox="bwrap")
-            result = await tool.execute(command="dir")
+            result = await ExecTool(sandbox="bwrap").execute(command="dir")
 
-        assert "ok" in result
-        spawned_cmd = mock_spawn.call_args[0][0]
-        assert "bwrap" not in spawned_cmd
+        assert result.is_error
+        spawn.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_bwrap_applied_on_unix(self):

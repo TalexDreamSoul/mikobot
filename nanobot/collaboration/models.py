@@ -13,6 +13,7 @@ from enum import StrEnum
 COLLABORATION_USER_METADATA_KEY = "collaboration_user_id"
 COLLABORATION_PROJECT_METADATA_KEY = "collaboration_project_id"
 COLLABORATION_BINDING_METADATA_KEY = "collaboration_binding_id"
+COLLABORATION_ASSIGNMENT_METADATA_KEY = "collaboration_assignment_required"
 
 
 class MembershipRole(StrEnum):

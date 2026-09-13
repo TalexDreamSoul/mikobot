@@ -12,6 +12,7 @@ import pytest_asyncio
 
 from nanobot.agent.context import TranscriptInput
 from nanobot.agent.loop import AgentLoop, TurnContext, TurnKind
+from nanobot.agent.memory import MemoryStore
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.collaboration import ProjectsTool
 from nanobot.agent.tools.context import RequestContext, request_context
@@ -20,6 +21,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.collaboration import (
+    COLLABORATION_ASSIGNMENT_METADATA_KEY,
     AsyncLocalCollaborationRepository,
     CollaborationConflictError,
     CollaborationNotFoundError,
@@ -35,7 +37,8 @@ from nanobot.collaboration.models import (
     COLLABORATION_USER_METADATA_KEY,
 )
 from nanobot.collaboration.pairing import CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY
-from nanobot.providers.base import LLMResponse
+from nanobot.providers.base import LLMResponse, ToolCallRequest
+from nanobot.security.private_media import user_private_memory_root
 
 
 class _BuiltinTool(Tool):
@@ -275,21 +278,27 @@ async def test_agent_loop_project_allowlists_filter_skills_and_mcp_servers(
 ) -> None:
     """Project allowlists suppress only excluded explicit skill instructions and MCP tools."""
     workspace = tmp_path / "agent"
-    (workspace / "skills" / "allowed").mkdir(parents=True)
-    (workspace / "skills" / "blocked").mkdir(parents=True)
-    (workspace / "skills" / "allowed" / "SKILL.md").write_text(
-        "---\nname: allowed\ndescription: allowed behavior\n---\nALLOWED SKILL", encoding="utf-8"
-    )
-    (workspace / "skills" / "blocked" / "SKILL.md").write_text(
-        "---\nname: blocked\ndescription: blocked behavior\n---\nBLOCKED SKILL", encoding="utf-8"
-    )
     store, repository = local_collaboration_repository
     user, project = store.ensure_identity_user("telegram", "alice", workspace)
+    alice_skills = Path(project.workspace_path) / "skills"
+    (alice_skills / "allowed").mkdir(parents=True)
+    (alice_skills / "blocked").mkdir(parents=True)
+    (alice_skills / "allowed" / "SKILL.md").write_text(
+        "---\nname: allowed\ndescription: allowed behavior\n---\nALLOWED SKILL", encoding="utf-8"
+    )
+    (alice_skills / "blocked" / "SKILL.md").write_text(
+        "---\nname: blocked\ndescription: blocked behavior\n---\nBLOCKED SKILL", encoding="utf-8"
+    )
     store.update_project(
         project.id, user.id, allowed_skills=["allowed"], allowed_mcp_servers=["approved"]
     )
     restricted_scope = await repository.resolve_scope("telegram", "alice", "alice", {}, workspace)
-    store.ensure_identity_user("telegram", "bob", workspace)
+    bob, bob_project = store.ensure_identity_user("telegram", "bob", workspace)
+    bob_skills = Path(bob_project.workspace_path) / "skills" / "blocked"
+    bob_skills.mkdir(parents=True)
+    (bob_skills / "SKILL.md").write_text(
+        "---\nname: blocked\ndescription: blocked behavior\n---\nBLOCKED SKILL", encoding="utf-8"
+    )
     unrestricted_scope = await repository.resolve_scope("telegram", "bob", "bob", {}, workspace)
     loop = _scope_loop(workspace, repository, _provider())
     registry = ToolRegistry()
@@ -329,13 +338,27 @@ async def test_agent_loop_gives_unbound_external_groups_a_private_restricted_wor
     """An unbound group cannot operate in the process-wide workspace."""
     workspace = tmp_path / "agent"
     workspace.mkdir()
+    (workspace / "SOUL.md").write_text("HOST_GROUP_SOUL_SECRET", encoding="utf-8")
+    (workspace / "USER.md").write_text("HOST_GROUP_USER_SECRET", encoding="utf-8")
+    host_skill = workspace / "skills" / "host-private" / "SKILL.md"
+    host_skill.parent.mkdir(parents=True)
+    host_skill.write_text(
+        "---\nname: host-private\ndescription: Host-only skill\n---\nHOST_GROUP_SKILL_SECRET",
+        encoding="utf-8",
+    )
     runtime_root = tmp_path / "runtime"
     monkeypatch.setattr(
         "nanobot.agent.loop.get_runtime_subdir", lambda name: runtime_root / name
     )
     _store, repository = local_collaboration_repository
-    loop = _scope_loop(workspace, repository, _provider())
-    message = InboundMessage("telegram", "alice", "team-chat", "hello team")
+    provider = _turn_provider()
+    loop = _scope_loop(workspace, repository, provider)
+    tools = ToolRegistry()
+    tools.register(_BuiltinTool())
+    definition = SimpleNamespace(name="query", description="query", inputSchema={"type": "object"})
+    tools.register(MCPToolWrapper(object(), "host-private", definition))
+    loop.tools = tools
+    message = InboundMessage("telegram", "alice", "team-chat", "$host-private hello team")
 
     scope = await loop._conversation_scope_for_message(message)
     turn_workspace = await loop._effective_workspace_scope(
@@ -351,6 +374,13 @@ async def test_agent_loop_gives_unbound_external_groups_a_private_restricted_wor
     assert turn_workspace.project_path.is_relative_to(
         runtime_root / "collaboration" / "workspaces" / "isolated"
     )
+    await loop._process_message(message)
+    prompt = str(provider.chat_with_retry.await_args.kwargs["messages"][0]["content"])
+    assert "HOST_GROUP_SOUL_SECRET" not in prompt
+    assert "HOST_GROUP_USER_SECRET" not in prompt
+    assert "HOST_GROUP_SKILL_SECRET" not in prompt
+    definitions = provider.chat_with_retry.await_args.kwargs["tools"]
+    assert all(item["function"]["name"] != "mcp_host-private_query" for item in definitions)
 
 
 @pytest.mark.asyncio
@@ -533,12 +563,12 @@ async def test_media_relocation_keeps_caller_file_and_moves_managed_attachment(
 
     await loop._restore_turn(ctx)
 
-    moved_files = list((runtime_root / "users" / scope.user_id / "media").iterdir())
+    moved_files = [path for path in (runtime_root / "users" / scope.user_id / "media").rglob("*") if path.is_file()]
     assert caller_file.exists()
     assert not managed.exists()
     assert len(moved_files) == 1
     assert moved_files[0].read_text(encoding="utf-8") == "managed attachment"
-    assert str(caller_file) in ctx.msg.content
+    assert str(caller_file) not in ctx.msg.content
     assert str(moved_files[0]) in ctx.msg.content
 
 
@@ -551,7 +581,7 @@ async def test_agent_loop_session_keys_are_user_scoped_for_channel_senders(
     workspace = tmp_path / "agent"
     workspace.mkdir()
     store, repository = local_collaboration_repository
-    alice, _ = store.ensure_identity_user("telegram", "alice", workspace)
+    alice, alice_project = store.ensure_identity_user("telegram", "alice", workspace)
     loop = _scope_loop(workspace, repository, _provider())
 
     scoped = await loop._effective_session_key(
@@ -561,7 +591,7 @@ async def test_agent_loop_session_keys_are_user_scoped_for_channel_senders(
         InboundMessage("websocket", "browser", "local-chat", "hi")
     )
 
-    assert scoped == f"user:{alice.id}:telegram:alice"
+    assert scoped == f"user:{alice.id}:project:{alice_project.id}:telegram:alice"
     assert local == "websocket:local-chat"
 
 
@@ -591,11 +621,11 @@ async def test_the_host_owner_keeps_one_conversation_across_their_own_channels(
     # to a per-user namespace that holds nothing.
     assert key == "weixin:owner-wechat-id"
 
-    stranger, _ = store.ensure_identity_user("weixin", "someone-else", workspace)
+    stranger, stranger_project = store.ensure_identity_user("weixin", "someone-else", workspace)
     stranger_key = await loop._effective_session_key(
         InboundMessage("weixin", "someone-else", "someone-else", "hello", metadata={"direct": True})
     )
-    assert stranger_key == f"user:{stranger.id}:weixin:someone-else"
+    assert stranger_key == f"user:{stranger.id}:project:{stranger_project.id}:weixin:someone-else"
 
 
 def test_legacy_multi_tenant_store_collapses_to_projects_and_assignments(tmp_path: Path) -> None:
@@ -1006,50 +1036,13 @@ def test_manageable_projects_name_what_the_ui_may_offer(tmp_path: Path) -> None:
     assert store.manageable_project_ids(member.id) == [member_project.id]
 
 
-def test_session_scope_is_inherited_only_while_its_authorization_holds(tmp_path: Path) -> None:
-    """A runtime-minted turn keeps its session's project until that grant changes."""
-    store = CollaborationStore(tmp_path / "collaboration")
-    owner, project = _user_and_project(store, tmp_path, "owner")
-    store.update_user_admin(owner.id, True)
-    member, _member_project = _user_and_project(store, tmp_path, "member")
-    store.add_member(project.id, owner.id, member.id)
-    _pair(store, owner.id, project_id=project.id, assignee_user_id=member.id)
-
-    inherited = store.resolve_session_scope(
-        member.id, project.id, channel="weixin.release", chat_id="member-sender"
-    )
-    assert inherited is not None
-    assert (inherited.project_id, inherited.workspace_path) == (project.id, project.workspace_path)
-
-    assert store.resolve_session_scope(
-        member.id, project.id, channel="weixin.release", chat_id="member-sender",
-    ) is not None
-    assert store.resolve_session_scope(
-        member.id, "col_missing", channel="weixin.release", chat_id="member-sender",
-    ) is None
-
-    # Pausing or reassigning the instance withdraws the automation's authority.
-    store.update_channel_assignment(
-        owner.id, channel_type="weixin", instance_id="release", enabled=False
-    )
-    assert store.resolve_session_scope(
-        member.id, project.id, channel="weixin.release", chat_id="member-sender",
-    ) is None
-    store.update_channel_assignment(
-        owner.id, channel_type="weixin", instance_id="release", enabled=True
-    )
-    assert store.remove_member(project.id, owner.id, member.id)
-    assert store.resolve_session_scope(
-        member.id, project.id, channel="weixin.release", chat_id="member-sender",
-    ) is None
-
 
 @pytest.mark.asyncio
 async def test_agent_loop_automation_turns_never_provision_an_identity(
     tmp_path: Path,
     local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
 ) -> None:
-    """Cron and heartbeat turns inherit their session instead of inventing a user."""
+    """Cron and heartbeat never provision an identity or become host when their scope is absent."""
     workspace = tmp_path / "agent"
     workspace.mkdir()
     store, repository = local_collaboration_repository
@@ -1059,11 +1052,21 @@ async def test_agent_loop_automation_turns_never_provision_an_identity(
     before = {user.id for user in store.list_users()}
 
     cron = InboundMessage(
-        "weixin", "cron", "wx-open-id", "run the scheduled job",
+        "weixin",
+        "cron",
+        "wx-open-id",
+        "run the scheduled job",
         session_key_override="weixin:wx-open-id",
+        source="runtime",
     )
-    heartbeat = InboundMessage("weixin", "user", "wx-open-id", "heartbeat check")
-
+    heartbeat = InboundMessage(
+        "weixin",
+        "runtime",
+        "wx-open-id",
+        "heartbeat check",
+        session_key_override="weixin:wx-open-id",
+        source="runtime",
+    )
     assert await loop._conversation_scope_for_message(cron) is None
     assert await loop._conversation_scope_for_message(heartbeat) is None
     assert await loop._effective_session_key(cron) == "weixin:wx-open-id"
@@ -1071,12 +1074,15 @@ async def test_agent_loop_automation_turns_never_provision_an_identity(
     # No user, project, or identity was invented for either runtime sender.
     assert {user.id for user in store.list_users()} == before
     assert await repository.resolve_identity("weixin", "cron") is None
-    assert await repository.resolve_identity("weixin", "user") is None
+    assert await repository.resolve_identity("weixin", "runtime") is None
 
     # A session that records a project keeps the automation inside it.
     session = loop.sessions.get_or_create("weixin:wx-open-id")
     session.metadata[COLLABORATION_USER_METADATA_KEY] = owner.id
     session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = project.id
+    session.metadata[COLLABORATION_ASSIGNMENT_METADATA_KEY] = False
+    session.metadata["collaboration_channel"] = "weixin"
+    session.metadata["collaboration_chat_id"] = "wx-open-id"
     loop.sessions.save(session)
     scoped = await loop._conversation_scope_for_message(cron)
 
@@ -1086,5 +1092,476 @@ async def test_agent_loop_automation_turns_never_provision_an_identity(
 
     # Losing that membership refuses the turn rather than silently widening it.
     store.delete_project(project.id, owner.id)
-    with pytest.raises(CollaborationPermissionError, match="no longer authorized"):
+    with pytest.raises(CollaborationPermissionError):
         await loop._conversation_scope_for_message(cron)
+
+
+@pytest.mark.asyncio
+async def test_external_cron_label_with_session_override_stays_external(
+    tmp_path: Path,
+    local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
+) -> None:
+    """A chat user named cron cannot claim runtime or host authority through an override."""
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    _store, repository = local_collaboration_repository
+    loop = _scope_loop(workspace, repository, _provider())
+    message = InboundMessage(
+        "weixin",
+        "cron",
+        "external-chat",
+        "human message",
+        metadata={"direct": True},
+        session_key_override="weixin:external-chat:thread",
+        source="external",
+    )
+
+    scope = await loop._conversation_scope_for_message(message)
+    key = await loop._effective_session_key(message)
+
+    assert scope is not None
+    assert not scope.is_local_owner
+    assert scope.workspace_path != str(workspace)
+    assert key.startswith(f"user:{scope.user_id}:project:{scope.project_id}:")
+
+
+def test_session_scope_revalidates_required_assignment_and_exact_binding(tmp_path: Path) -> None:
+    """A persisted member turn loses access when its instance or exact binding changes."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project_a = _user_and_project(store, tmp_path, "owner")
+    store.update_user_admin(owner.id, True)
+    project_b = store.create_project(owner.id, "second project", tmp_path / "second-project")
+    member, _member_project = _user_and_project(store, tmp_path, "member")
+    store.add_member(project_a.id, owner.id, member.id)
+    _pair(store, owner.id, project_id=project_a.id, assignee_user_id=member.id)
+    binding = store.bind_conversation("weixin.release", "member-sender", project_a.id, member.id)
+
+    def resolve(project_id: str, *, binding_id: str | None = binding.id):
+        return store.resolve_session_scope(
+            member.id,
+            project_id,
+            channel="weixin.release",
+            chat_id="member-sender",
+            assignment_required=True,
+            binding_id=binding_id,
+        )
+
+    resolved = resolve(project_a.id)
+    assert resolved is not None
+    assert resolved.assignment is not None
+    assert resolved.assignment.instance_id == "release"
+
+    assert store.delete_channel_assignment(owner.id, channel_type="weixin", instance_id="release")
+    assert resolve(project_a.id) is None
+
+    _pair(store, owner.id, project_id=project_a.id, assignee_user_id=member.id)
+    store.update_channel_assignment(owner.id, channel_type="weixin", instance_id="release", enabled=False)
+    assert resolve(project_a.id) is None
+    store.update_channel_assignment(owner.id, channel_type="weixin", instance_id="release", enabled=True)
+    assert resolve(project_a.id) is not None
+
+    store.update_channel_assignment(
+        owner.id,
+        channel_type="weixin",
+        instance_id="release",
+        project_id=project_b.id,
+    )
+    assert resolve(project_a.id) is None
+    assert resolve(project_b.id) is None
+
+    assert store.unbind_conversation("weixin.release", "member-sender", owner.id)
+    replacement = store.bind_conversation("weixin.release", "member-sender", project_b.id, member.id)
+    assert replacement.id != binding.id
+    assert resolve(project_b.id) is None
+    rebound = resolve(project_b.id, binding_id=replacement.id)
+    assert rebound is not None
+    assert rebound.binding == replacement
+
+    assert store.remove_member(project_b.id, owner.id, member.id)
+    assert resolve(project_b.id, binding_id=replacement.id) is None
+
+
+def test_session_scope_without_assignment_preserves_personal_webui_authorization(tmp_path: Path) -> None:
+    """Personal WebUI provenance remains valid without a channel assignment."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    user, project = _user_and_project(store, tmp_path, "member")
+
+    scope = store.resolve_session_scope(
+        user.id,
+        project.id,
+        channel="websocket",
+        chat_id="personal-chat",
+        assignment_required=False,
+    )
+
+    assert scope is not None
+    assert scope.project_id == project.id
+
+
+def _turn_provider() -> MagicMock:
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.generation = SimpleNamespace(
+        max_tokens=4096,
+        temperature=0.1,
+        reasoning_effort=None,
+    )
+    provider.chat_with_retry = AsyncMock(
+        return_value=LLMResponse(content="safe response", tool_calls=[], usage=None)
+    )
+    return provider
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("principal", ["proxy:member", "oidc:member"])
+async def test_runtime_turns_revalidate_persisted_member_provenance(
+    tmp_path: Path,
+    local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
+    principal: str,
+) -> None:
+    """Proxy and OIDC members keep their project for internal turns or fail closed after revocation."""
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    store, repository = local_collaboration_repository
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    member, _personal_project = store.ensure_identity_user("websocket", principal, workspace)
+    store.add_member(project.id, owner.id, member.id)
+    store.update_user_default_project(member.id, project.id)
+    provider = _turn_provider()
+    loop = _scope_loop(workspace, repository, provider)
+    human = InboundMessage("websocket", principal, "member-chat", "human request")
+
+    await loop._process_message(human)
+    key = await loop._effective_session_key(human)
+    session = loop.sessions.get_or_create(key)
+    assert session.metadata[COLLABORATION_USER_METADATA_KEY] == member.id
+    assert session.metadata[COLLABORATION_PROJECT_METADATA_KEY] == project.id
+
+    for sender_id in ("cron", "system:continuation", "system:recovery"):
+        internal = InboundMessage(
+            "websocket",
+            sender_id,
+            "member-chat",
+            "continue work",
+            session_key_override=key,
+            source="runtime",
+        )
+        scope = await loop._conversation_scope_for_message(internal)
+        assert scope is not None
+        assert (scope.user_id, scope.project_id) == (member.id, project.id)
+
+    session.metadata.pop(COLLABORATION_PROJECT_METADATA_KEY)
+    loop.sessions.save(session)
+    with pytest.raises(CollaborationPermissionError):
+        await loop._conversation_scope_for_message(
+            InboundMessage(
+                "websocket",
+                "cron",
+                "member-chat",
+                "missing project provenance",
+                session_key_override=key,
+                source="runtime",
+            )
+        )
+
+    session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = project.id
+    loop.sessions.save(session)
+    assert store.remove_member(project.id, owner.id, member.id)
+    for sender_id in ("cron", "system:continuation", "system:recovery"):
+        with pytest.raises(CollaborationPermissionError):
+            await loop._conversation_scope_for_message(
+                InboundMessage(
+                    "websocket",
+                    sender_id,
+                    "member-chat",
+                    "revoked continuation",
+                    session_key_override=key,
+                    source="runtime",
+                )
+            )
+
+
+@pytest.mark.asyncio
+async def test_assigned_human_turn_records_required_assignment_for_later_automation(
+    tmp_path: Path,
+    local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
+) -> None:
+    """A cron turn cannot reuse an assigned member session after that assignment is deleted."""
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    store, repository = local_collaboration_repository
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    store.update_user_admin(owner.id, True)
+    member, _member_project = _user_and_project(store, tmp_path, "member")
+    store.add_member(project.id, owner.id, member.id)
+    _pair(
+        store,
+        owner.id,
+        project_id=project.id,
+        assignee_user_id=member.id,
+        sender_id="member-sender",
+    )
+    loop = _scope_loop(workspace, repository, _turn_provider())
+    human = InboundMessage(
+        "weixin.release",
+        "member-sender",
+        "member-sender",
+        "assigned request",
+        metadata={"direct": True},
+    )
+
+    key = await loop._effective_session_key(human)
+    human.session_key_override = key
+    await loop._process_message(human)
+    session = loop.sessions.get_or_create(key)
+    assert session.metadata[COLLABORATION_ASSIGNMENT_METADATA_KEY] is True
+
+    assert store.delete_channel_assignment(owner.id, channel_type="weixin", instance_id="release")
+    with pytest.raises(CollaborationPermissionError):
+        await loop._conversation_scope_for_message(
+            InboundMessage(
+                "weixin.release",
+                "cron",
+                "member-sender",
+                "scheduled work",
+                session_key_override=key,
+                source="runtime",
+            )
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unified_session", [False, True])
+async def test_member_history_stays_private_when_their_default_project_changes(
+    tmp_path: Path,
+    local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
+    unified_session: bool,
+) -> None:
+    """Changing a member's project selects a new durable history, never the old project's turn."""
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    store, repository = local_collaboration_repository
+    owner, project_a = _user_and_project(store, tmp_path, "owner")
+    project_b = store.create_project(owner.id, "second project", tmp_path / "second-project")
+    member, _personal_project = store.ensure_identity_user("weixin", "member", workspace)
+    store.add_member(project_a.id, owner.id, member.id)
+    store.add_member(project_b.id, owner.id, member.id)
+    store.update_user_default_project(member.id, project_a.id)
+    loop = _scope_loop(workspace, repository, _turn_provider())
+    loop._unified_session = unified_session
+    first = InboundMessage("weixin", "member", "member-chat", "A_SECRET_MARKER", metadata={"direct": True})
+    key_a = await loop._effective_session_key(first)
+    first.session_key_override = key_a
+    await loop._process_message(first)
+    expected_a = (
+        f"unified:{member.id}:project:{project_a.id}"
+        if unified_session
+        else f"user:{member.id}:project:{project_a.id}:weixin:member-chat"
+    )
+    assert key_a == expected_a
+    assert any(message["content"] == "A_SECRET_MARKER" for message in loop.sessions.get_or_create(key_a).messages)
+    store.update_user_default_project(member.id, project_b.id)
+
+    second = InboundMessage("weixin", "member", "member-chat", "B_SECRET_MARKER", metadata={"direct": True})
+    key_b = await loop._effective_session_key(second)
+    second.session_key_override = key_b
+    await loop._process_message(second)
+    expected_b = (
+        f"unified:{member.id}:project:{project_b.id}"
+        if unified_session
+        else f"user:{member.id}:project:{project_b.id}:weixin:member-chat"
+    )
+
+    assert key_b == expected_b
+    assert key_b != key_a
+    history_b = loop.sessions.get_or_create(key_b).messages
+    assert any(message["content"] == "B_SECRET_MARKER" for message in history_b)
+    assert all(message["content"] != "A_SECRET_MARKER" for message in history_b)
+
+
+@pytest.mark.asyncio
+async def test_member_prompt_archive_and_dream_keep_same_project_members_private(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
+) -> None:
+    """Project instructions are shared, but each member owns an isolated profile, journal, archive, and Dream."""
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setattr(
+        "nanobot.security.private_media.get_runtime_subdir",
+        lambda name: runtime_root / name,
+    )
+    workspace = tmp_path / "host-workspace"
+    project_workspace = tmp_path / "project-workspace"
+    workspace.mkdir()
+    project_workspace.mkdir()
+    (workspace / "SOUL.md").write_text("HOST_SOUL_SECRET", encoding="utf-8")
+    (workspace / "USER.md").write_text("HOST_USER_SECRET", encoding="utf-8")
+    MemoryStore(workspace).write_memory("HOST_MEMORY_SECRET")
+    (workspace / "AGENTS.md").write_text("HOST_ARCHIVE_AGENTS_SECRET", encoding="utf-8")
+    (project_workspace / "AGENTS.md").write_text("PROJECT_INSTRUCTIONS_MARKER", encoding="utf-8")
+    shared_skill = project_workspace / "skills" / "shared" / "SKILL.md"
+    shared_skill.parent.mkdir(parents=True)
+    shared_skill.write_text(
+        "---\nname: shared\ndescription: Shared project behavior\nalways: true\n---\nSHARED_SKILL_MARKER",
+        encoding="utf-8",
+    )
+    store, repository = local_collaboration_repository
+    owner = store.create_user("owner")
+    project = store.create_project(owner.id, "project", project_workspace)
+    alice, _alice_personal = store.ensure_identity_user("weixin", "alice-sender", workspace)
+    bob, _bob_personal = store.ensure_identity_user("weixin", "bob-sender", workspace)
+    store.add_member(project.id, owner.id, alice.id)
+    store.add_member(project.id, owner.id, bob.id)
+    store.update_user_default_project(alice.id, project.id)
+    store.update_user_default_project(bob.id, project.id)
+    alice_key = f"user:{alice.id}:project:{project.id}:weixin:member-chat"
+    alice_memory_root = user_private_memory_root(alice.id, project_id=project.id)
+    bob_memory_root = user_private_memory_root(bob.id, project_id=project.id)
+    MemoryStore(workspace).append_history("HOST_HISTORY_SECRET", session_key=alice_key)
+    alice_memory = MemoryStore(alice_memory_root)
+    alice_memory.write_memory("ALICE_MEMORY_MARKER")
+    alice_memory.append_history("ALICE_HISTORY_MARKER", session_key=alice_key)
+    bob_memory = MemoryStore(bob_memory_root)
+    bob_memory.write_memory("BOB_MEMORY_SECRET")
+    bob_memory.append_history(
+        "BOB_HISTORY_SECRET",
+        session_key=f"user:{bob.id}:project:{project.id}:weixin:member-chat",
+    )
+    provider = _turn_provider()
+    loop = _scope_loop(workspace, repository, provider)
+    archive_definition = SimpleNamespace(name="query", description="query", inputSchema={"type": "object"})
+    loop.tools.register(MCPToolWrapper(object(), "host-archive", archive_definition))
+
+    human = InboundMessage(
+        "weixin",
+        "alice-sender",
+        "member-chat",
+        "ALICE_REQUEST_MARKER",
+        metadata={"direct": True},
+    )
+    alice_key = await loop._effective_session_key(human)
+    human.session_key_override = alice_key
+    await loop._process_message(human)
+    session = loop.sessions.get_or_create(alice_key)
+    private_memory = await loop.memory_store_for_session(session)
+    assert private_memory is not None
+    assert private_memory.workspace == alice_memory_root
+    archived = await loop.consolidator.archive_session(
+        session,
+        archive_end=1,
+        runtime=loop.llm_runtime(),
+    )
+    assert archived == "safe response"
+    archive_call = provider.chat_with_retry.await_args_list[-1].kwargs
+    archive_prompt = str(archive_call["messages"][0]["content"])
+    assert "HOST_ARCHIVE_AGENTS_SECRET" not in archive_prompt
+    assert all(
+        "host-archive" not in item["function"]["name"]
+        for item in archive_call["tools"]
+    )
+    private_memory.raw_archive(
+        [{"role": "assistant", "content": "ALICE_ARCHIVE_SECRET"}],
+        session_key=session.key,
+    )
+    dream = private_memory.build_dream_prompt()
+    assert dream is not None
+    dream_prompt, _cursor = dream
+    assert "ALICE_ARCHIVE_SECRET" in dream_prompt
+    assert "HOST_HISTORY_SECRET" not in dream_prompt
+    assert "BOB_HISTORY_SECRET" not in dream_prompt
+    assert "ALICE_ARCHIVE_SECRET" not in bob_memory.history_file.read_text(encoding="utf-8")
+
+    messages = provider.chat_with_retry.await_args.kwargs["messages"]
+    prompt = str(messages[0]["content"])
+    assert "PROJECT_INSTRUCTIONS_MARKER" in prompt
+    assert "ALICE_MEMORY_MARKER" in prompt
+    assert "SHARED_SKILL_MARKER" in prompt
+    assert "ALICE_HISTORY_MARKER" in prompt
+    assert "HOST_SOUL_SECRET" not in prompt
+    assert "HOST_USER_SECRET" not in prompt
+    assert "HOST_MEMORY_SECRET" not in prompt
+    assert "HOST_HISTORY_SECRET" not in prompt
+    assert "BOB_MEMORY_SECRET" not in prompt
+    assert "BOB_HISTORY_SECRET" not in prompt
+
+    history_before_revoke = private_memory.history_file.read_text(encoding="utf-8")
+    provider_calls_before_revoke = provider.chat_with_retry.await_count
+    assert store.remove_member(project.id, owner.id, alice.id)
+    with pytest.raises(CollaborationPermissionError):
+        await loop.consolidator.archive_session(
+            session,
+            archive_end=1,
+            runtime=loop.llm_runtime(),
+        )
+    assert provider.chat_with_retry.await_count == provider_calls_before_revoke
+    assert private_memory.history_file.read_text(encoding="utf-8") == history_before_revoke
+    with pytest.raises(CollaborationPermissionError):
+        await loop.memory_store_for_session(session)
+
+
+@pytest.mark.asyncio
+async def test_member_revocation_before_tool_execution_prevents_side_effect(
+    tmp_path: Path,
+    local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
+) -> None:
+    """An already-admitted member turn reauthorizes before an LLM-requested tool can mutate state."""
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    store, repository = local_collaboration_repository
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    member, _personal_project = store.ensure_identity_user("weixin", "member-sender", workspace)
+    store.add_member(project.id, owner.id, member.id)
+    store.update_user_default_project(member.id, project.id)
+    mutations: list[str] = []
+
+    class MutatingTool(Tool):
+        @property
+        def name(self) -> str:
+            return "mutate_marker"
+
+        @property
+        def description(self) -> str:
+            return "Mutate a test marker."
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, **kwargs: object) -> str:
+            mutations.append("executed")
+            return "mutation completed"
+
+    provider = _turn_provider()
+    calls = 0
+
+    async def chat_with_retry(**_kwargs: object) -> LLMResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            assert store.remove_member(project.id, owner.id, member.id)
+            return LLMResponse(
+                content="attempting mutation",
+                tool_calls=[ToolCallRequest(id="mutation-1", name="mutate_marker", arguments={})],
+                usage=None,
+            )
+        return LLMResponse(content="access revoked", tool_calls=[], usage=None)
+
+    provider.chat_with_retry = AsyncMock(side_effect=chat_with_retry)
+    loop = _scope_loop(workspace, repository, provider)
+    tools = ToolRegistry()
+    tools.register(MutatingTool())
+    loop.tools = tools
+
+    await loop._process_message(
+        InboundMessage(
+            "weixin",
+            "member-sender",
+            "member-chat",
+            "change the marker",
+            metadata={"direct": True},
+        )
+    )
+
+    assert mutations == []
+    assert calls >= 1

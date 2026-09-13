@@ -19,6 +19,7 @@ from typing import Any, Iterable, Iterator, TypeVar
 
 from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.filesystem import ListDirTool, _FsTool
+from nanobot.security.workspace_policy import is_path_within
 from nanobot.utils.document import (
     LocatedDocumentLine,
     PdfPageRangeError,
@@ -178,15 +179,19 @@ class _SearchTool(_FsTool):
 
     def _iter_files(self, root: Path) -> Iterable[Path]:
         if root.is_file():
-            yield root
+            if not root.is_symlink():
+                yield root
             return
 
+        resolved_root = root.resolve(strict=False)
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = sorted(d for d in dirnames if d not in self._IGNORE_DIRS)
             current = Path(dirpath)
             for filename in sorted(filenames):
-                yield current / filename
-
+                path = current / filename
+                if path.is_symlink() or not is_path_within(path, resolved_root):
+                    continue
+                yield path
 
 class FindFilesTool(_SearchTool):
     """Find files by path fragment, glob, or type."""
@@ -278,11 +283,9 @@ class FindFilesTool(_SearchTool):
                 for raw_entry in entries:
                     budget.visit_path()
                     try:
-                        is_dir = raw_entry.is_dir(follow_symlinks=False)
-                        # os.walk yields special files and broken file symlinks,
-                        # but does not descend into directory symlinks by default.
-                        if not is_dir and raw_entry.is_symlink() and raw_entry.is_dir():
+                        if raw_entry.is_symlink():
                             continue
+                        is_dir = raw_entry.is_dir(follow_symlinks=False)
                     except OSError:
                         continue
                     if is_dir and raw_entry.name in self._IGNORE_DIRS:

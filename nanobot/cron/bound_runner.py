@@ -125,6 +125,7 @@ async def run_bound_cron_job(
                 content=prompt,
                 metadata=metadata,
                 session_key_override=session_key,
+                source="runtime",
             )
         )
     except (Exception, asyncio.CancelledError) as exc:

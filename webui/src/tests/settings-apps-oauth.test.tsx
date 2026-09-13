@@ -53,6 +53,7 @@ describe("SettingsView Apps catalog", () => {
               configured: true,
               available: true,
               status: "configured",
+              runtime_status: "connected",
               connection_summary: "https://app.xmind.com/api/mcp",
             }
             : xmindMcpPreset],
@@ -428,6 +429,7 @@ describe("SettingsView Apps catalog", () => {
               available: true,
               status: "configured",
               connection_summary: "https://app.xmind.com/api/mcp",
+              runtime_status: "connected",
             }
             : xmindMcpPreset],
           installed_count: completed ? 1 : 0,
@@ -587,6 +589,7 @@ describe("SettingsView Apps catalog", () => {
             available: true,
             status: "configured",
             connection_summary: "https://app.xmind.com/api/mcp",
+            runtime_status: "connected",
           }],
           installed_count: 1,
         });

@@ -245,12 +245,12 @@ def agent_plugin_mcp_servers(
 
 
 def discover_agent_plugins(workspace: Path) -> list[AgentPlugin]:
-    """Return component and lifecycle state for discovered plugins."""
+    """Return component and lifecycle state without initializing runtime data."""
     discovered: list[AgentPlugin] = []
     for plugin in _installed_plugins(workspace):
         fingerprint = _package_fingerprint(plugin.root)
         skills = tuple(name for name, _path in _discover_plugin_skills(plugin.name, plugin.root))
-        mcp_servers = tuple(sorted(_plugin_mcp_servers(workspace, plugin)))
+        mcp_servers = tuple(sorted(_plugin_mcp_servers(workspace, plugin, create_data=False)))
         if fingerprint is not None and _package_fingerprint(plugin.root) != fingerprint:
             fingerprint = None
             skills = ()
@@ -340,7 +340,13 @@ def _plugin_logo(value: object, plugin_root: Path) -> str | None:
     return None
 
 
-def _plugin_mcp_servers(workspace: Path, plugin: AgentPlugin) -> dict[str, MCPServerConfig]:
+def _plugin_mcp_servers(
+    workspace: Path,
+    plugin: AgentPlugin,
+    *,
+    create_data: bool = True,
+) -> dict[str, MCPServerConfig]:
+    """Materialize a plugin MCP declaration, creating data only for runtime use."""
     payload = _read_object(plugin.root / "mcp.json", plugin.root)
     if payload is None:
         return {}
@@ -353,13 +359,13 @@ def _plugin_mcp_servers(workspace: Path, plugin: AgentPlugin) -> dict[str, MCPSe
         logger.warning("Ignoring invalid MCP component for Agent Plugin '{}'", plugin.name)
         return {}
 
-    data = _plugin_data_dir(workspace, plugin.name, create=True)
+    data = _plugin_data_dir(workspace, plugin.name, create=create_data)
     servers: dict[str, MCPServerConfig] = {}
     for name, raw in cast(dict[str, object], raw_servers).items():
         if not name or len(name) > 128 or any(ord(char) < 32 for char in name):
             logger.warning("Ignoring invalid MCP server name in Agent Plugin '{}'", plugin.name)
             continue
-        server = _plugin_mcp_server(raw, plugin.root, data)
+        server = _plugin_mcp_server(raw, plugin.root, data, create_data=create_data)
         if server is None:
             logger.warning("Ignoring invalid MCP server '{}' in Agent Plugin '{}'", name, plugin.name)
             continue
@@ -367,7 +373,13 @@ def _plugin_mcp_servers(workspace: Path, plugin: AgentPlugin) -> dict[str, MCPSe
     return servers
 
 
-def _plugin_mcp_server(raw: object, root: Path, data: Path) -> MCPServerConfig | None:
+def _plugin_mcp_server(
+    raw: object,
+    root: Path,
+    data: Path,
+    *,
+    create_data: bool,
+) -> MCPServerConfig | None:
     if not isinstance(raw, dict):
         return None
     payload = cast(dict[str, object], raw)
@@ -378,7 +390,7 @@ def _plugin_mcp_server(raw: object, root: Path, data: Path) -> MCPServerConfig |
     except ValidationError:
         return None
     command = _stdio_command(server.command, root)
-    cwd = _stdio_cwd(payload.get("cwd"), root, data)
+    cwd = _stdio_cwd(payload.get("cwd"), root, data, create_data=create_data)
     if server.type != "stdio" or command is None or cwd is None:
         return None
     if {"PLUGIN_ROOT", "PLUGIN_DATA"} & server.env.keys():
@@ -409,7 +421,13 @@ def _stdio_command(value: object, root: Path) -> str | None:
     return value
 
 
-def _stdio_cwd(value: object, root: Path, data: Path) -> Path | None:
+def _stdio_cwd(
+    value: object,
+    root: Path,
+    data: Path,
+    *,
+    create_data: bool,
+) -> Path | None:
     if value is None:
         return root
     if not isinstance(value, str):
@@ -422,10 +440,10 @@ def _stdio_cwd(value: object, root: Path, data: Path) -> Path | None:
             candidate = (base / relative).resolve()
             if not candidate.is_relative_to(base):
                 return None
-            if base == data:
+            if base == data and create_data:
                 candidate.mkdir(parents=True, exist_ok=True)
                 candidate.chmod(0o700)
-            return candidate if candidate.is_dir() else None
+            return candidate
     return None
 
 

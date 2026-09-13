@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from nanobot.agent.tools.base import Tool, ToolResult
-from nanobot.agent.tools.context import ContextAware, current_request_context
+from nanobot.agent.tools.context import (
+    ContextAware,
+    current_request_context,
+    require_tool_authorization,
+)
 from nanobot.extensions.contracts import ExtensionSource
 
 if TYPE_CHECKING:
@@ -233,6 +237,7 @@ class ToolRegistry:
 
         try:
             assert tool is not None  # guarded by prepare_call()
+            await require_tool_authorization()
             result = await tool.execute(**params)
             if is_tool_error_result(result):
                 return ToolResult.error(str(result) + hint)

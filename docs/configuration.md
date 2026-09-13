@@ -2315,7 +2315,10 @@ By default, each channel × chat ID combination gets its own session. If you use
 }
 ```
 
-When enabled, all incoming messages — regardless of which channel they arrive on — are routed into a single shared session. Switching from Telegram to Discord (or any other channel) continues the same conversation seamlessly.
+For the host owner, unification routes ordinary messages into the inherited shared
+session. Member chat-channel sessions are still isolated by both user and project;
+WebUI topics retain their pinned project and public chat ID. An explicit internal
+session override is a routing instruction, not permission to bypass authorization.
 
 | Behavior | `false` (default) | `true` |
 |----------|-------------------|--------|
@@ -2358,6 +2361,11 @@ An enabled package is treated as immutable: changing any packaged file disables 
 reviews and enables it again. Runtime state belongs under `PLUGIN_DATA`, not the package root.
 
 Enabled plugins run as the nanobot user; permissions are descriptive, not an OS sandbox. The optional `extensions.dev.nanobot.logo` accepts a contained PNG, JPEG, or WebP up to 256 KiB.
+
+The Extensions inventory distinguishes desired activation from observed MCP health.
+Missing health is unavailable, not a fabricated ready state; failed reloads retain
+the configured marker and report the failure/restart requirement. Project allowlists
+are capability grants, not independent sandboxing of an operator-configured MCP server.
 
 CLI Apps use the same skills-only package layout while their installer manages executables, updates, and removal. Future catalogs can place packages before using this activation path.
 

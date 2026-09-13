@@ -43,6 +43,7 @@ import { useClient } from "@/providers/ClientProvider";
 
 interface SettingsControllerOptions {
   initialSection: SettingsSectionKey;
+  enabled: boolean;
   initialSettings: SettingsPayload | null;
   onModelNameChange: (modelName: string | null) => void;
   onSettingsChange?: (payload: SettingsPayload) => void;
@@ -68,6 +69,7 @@ function pendingRestartSectionsFromPayload(payload: SettingsPayload): PendingRes
 
 export function useSettingsController({
   initialSection,
+  enabled,
   initialSettings,
   onModelNameChange,
   onSettingsChange,
@@ -80,8 +82,10 @@ export function useSettingsController({
   const pageVisible = usePageVisibility();
   const remoteBrowserAccess =
     typeof window !== "undefined" && !isLoopbackHost(window.location.hostname);
-  const [settings, setSettings] = useState<SettingsPayload | null>(() => initialSettings);
-  const [loading, setLoading] = useState(() => initialSettings === null);
+  const [settings, setSettings] = useState<SettingsPayload | null>(() => (
+    enabled ? initialSettings : null
+  ));
+  const [loading, setLoading] = useState(() => enabled && initialSettings === null);
   const [hostEngineApplying, setHostEngineApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSectionKey>(initialSection);
@@ -183,12 +187,19 @@ export function useSettingsController({
   });
 
   useEffect(() => {
+    if (!enabled) return;
     if (!initialSettings || settings !== null) return;
     applyPayload(initialSettings);
     setLoading(false);
-  }, [applyPayload, initialSettings, settings]);
+  }, [applyPayload, enabled, initialSettings, settings]);
 
   useEffect(() => {
+    if (!enabled) {
+      setSettings(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
     let cancelled = false;
     const showLoading = settings === null;
     if (showLoading) setLoading(true);
@@ -210,11 +221,11 @@ export function useSettingsController({
     return () => {
       cancelled = true;
     };
-  }, [applyPayload, getToken]);
+  }, [applyPayload, enabled, getToken]);
 
   const hasSettings = settings !== null;
   useEffect(() => {
-    if (activeSection !== "overview" || !hasSettings || !pageVisible) return;
+    if (!enabled || activeSection !== "overview" || !hasSettings || !pageVisible) return;
     let cancelled = false;
     let refreshing = false;
     const refresh = async () => {
@@ -240,8 +251,9 @@ export function useSettingsController({
       window.clearInterval(interval);
       window.removeEventListener("focus", onFocus);
     };
-  }, [activeSection, getToken, hasSettings, pageVisible]);
+  }, [activeSection, enabled, getToken, hasSettings, pageVisible]);
   const { refreshAutomations } = useSystemSettingsEffects({
+    enabled,
     state: systemState,
     activeSection,
     getToken,

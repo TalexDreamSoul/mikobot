@@ -173,6 +173,24 @@ class TestBuildDreamPrompt:
         assert cursor == 2
         assert "usable memory" in prompt
 
+    def test_entry_filter_keeps_another_member_history_out_of_project_dream(self, store):
+        """Dream receives only the requesting member's history from a shared project journal."""
+        owner_key = "user:alice:project:alpha:weixin:chat"
+        store.append_history("ALICE_DREAM_MARKER", session_key=owner_key)
+        store.append_history(
+            "BOB_DREAM_SECRET",
+            session_key="user:bob:project:alpha:weixin:chat",
+        )
+
+        result = store.build_dream_prompt(
+            entry_filter=lambda entry: entry.get("session_key") == owner_key,
+        )
+
+        assert result is not None
+        prompt, _cursor = result
+        assert "ALICE_DREAM_MARKER" in prompt
+        assert "BOB_DREAM_SECRET" not in prompt
+
     def test_dream_prompt_consumes_consolidator_attribute_tags(self):
         prompt = render_template(
             "agent/dream.md",

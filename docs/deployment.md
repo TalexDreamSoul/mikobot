@@ -165,7 +165,7 @@ The default Compose file drops all Linux capabilities except `CHOWN`, `SETUID`, 
 1000. It also enables `no-new-privileges`, so the non-root process cannot regain those
 bootstrap capabilities through setuid binaries or file capabilities. Docker's default
 AppArmor/seccomp profiles remain enabled. If you explicitly set
-`"tools.exec.sandbox": "bwrap"` in `~/.nanobot/config.json`, add the bwrap
+`"tools.exec.sandbox": "bwrap"`, or need member shell execution, add the bwrap
 override file when starting containers:
 
 ```bash
@@ -173,11 +173,18 @@ docker compose -f docker-compose.yml -f docker-compose.bwrap.yml up -d nanobot-g
 docker compose -f docker-compose.yml -f docker-compose.bwrap.yml run --rm nanobot-cli agent -m "Hello!"
 ```
 
-The override adds `CAP_SYS_ADMIN` and disables AppArmor/seccomp confinement for the
-container so bubblewrap can create its nested namespaces. It preserves
-`no-new-privileges`. The host must also allow unprivileged user namespaces; the
-override cannot bypass a host-level namespace restriction. Use it only when the
-bwrap sandbox is enabled.
+The override adds `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` and disables AppArmor/seccomp
+confinement for the container so Bubblewrap can create nested mount/process/IPC/network
+namespaces and configure the isolated loopback interface. It preserves
+`no-new-privileges`. These are broad container privileges: use a dedicated deployment,
+mount only its intended runtime data, and never substitute `--privileged` or host-root
+mounts. The host must permit the required namespaces; the override cannot bypass a
+host-level restriction. Without a working backend, member execution fails closed.
+
+Member command networking is intentionally isolated. Fetching through approved web/MCP
+tools is a separate, explicitly configured capability. On native macOS and Windows,
+member shell and host-managed CLI App execution are unavailable rather than silently
+running with host privileges.
 
 ### Docker
 
@@ -213,7 +220,7 @@ docker run \
 # `clone3: Operation not permitted`.
 docker run \
   --cap-drop ALL \
-  --cap-add CHOWN --cap-add SETGID --cap-add SETUID --cap-add SYS_ADMIN \
+  --cap-add CHOWN --cap-add SETGID --cap-add SETUID --cap-add SYS_ADMIN --cap-add NET_ADMIN \
   --security-opt no-new-privileges:true \
   --security-opt apparmor=unconfined \
   --security-opt seccomp=unconfined \

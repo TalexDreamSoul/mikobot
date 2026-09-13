@@ -46,13 +46,13 @@ export function useExtensionsSettings(active: boolean) {
   const [conflict, setConflict] = useState<ExtensionConflict | null>(null);
   const [riskPrompt, setRiskPrompt] = useState<ExtensionRiskPrompt | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (preserveInventory = false) => {
     setLoading(true);
     setLoadError(null);
     try {
       setInventory(await fetchExtensionInventory(getToken()));
     } catch (err) {
-      setInventory(null);
+      if (!preserveInventory) setInventory(null);
       setLoadError((err as Error).message);
     } finally {
       setLoading(false);
@@ -104,11 +104,30 @@ export function useExtensionsSettings(active: boolean) {
           expectedRevision,
           ...(riskAcknowledged ? { riskAcknowledged: true } : {}),
         });
-        setActionMessage(result.message || null);
-        if (!result.ok) setActionError(result.message || null);
-        // The server owns lifecycle. Reload rather than patching the row locally so the
-        // next action is bound to a revision the gateway actually reported.
-        await refresh();
+        const returnedPackage = result.package;
+        setInventory((current) => {
+          if (!current) {
+            return returnedPackage
+              ? { ...EMPTY_INVENTORY, packages: [returnedPackage] }
+              : current;
+          }
+          const packages = returnedPackage
+            ? current.packages.some((pkg) => pkg.id === result.package_id)
+              ? current.packages.map((pkg) => (
+                pkg.id === result.package_id ? returnedPackage : pkg
+              ))
+              : [...current.packages, returnedPackage]
+            : current.packages.filter((pkg) => pkg.id !== result.package_id);
+          return { ...current, packages };
+        });
+        if (result.ok) {
+          setActionMessage(result.message || null);
+        } else {
+          setActionError(result.message || null);
+        }
+        // The action descriptor is already a fresh runtime snapshot. Reconcile the
+        // whole inventory too, but preserve that truth if the follow-up read fails.
+        await refresh(true);
       } catch (err) {
         if (err instanceof ApiError && err.status === 409) {
           // A stale revision is not retried with a refreshed one: the operator reopens

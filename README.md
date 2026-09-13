@@ -32,9 +32,9 @@
   </p>
 </div>
 
-# nanobot
+# mikobot
 
-🐈 **nanobot** is an ultra-lightweight, open-source, self-hosted personal AI agent framework written in Python. It runs in a WebUI, terminal, or chat apps and combines tools, long-term memory, MCP integrations, model routing, multi-agent delegation, scheduled automation, and an OpenAI-compatible API in a small, readable core.
+**mikobot** is a self-hosted AI workbench derived from [HKUDS/nanobot](https://github.com/HKUDS/nanobot). It preserves the owner's personal agent workflow and adds project-scoped member access, channel-instance assignments, and a unified runtime inventory around nanobot's existing tools, memory, automation, WebUI, and SDK.
 
 ## Start Here
 
@@ -59,6 +59,9 @@ nanobot is a self-hosted personal AI agent runtime. It can:
 - run long-horizon goals and scheduled automations
 - expose a Python SDK and OpenAI-compatible API for integrations
 - deploy as a long-running local or server-side agent gateway
+- share managed project workspaces with members while keeping each member's conversation and memory ownership separate
+- assign connected channel instances to projects with a one-time Pair Code
+- inspect configured capabilities and actual runtime health without treating an enabled marker as proof of a running service
 
 ## 💡 Why nanobot
 
@@ -71,16 +74,16 @@ nanobot is a self-hosted personal AI agent runtime. It can:
 ## 📦 Install
 
 > [!IMPORTANT]
-> If you want the newest features and experiments, install from source.
+> Install from **this repository's source** to use the project/privacy behavior documented here.
 >
-> If you want the most stable day-to-day experience, install from PyPI or with `uv`.
+> The PyPI package and upstream installer commands below target `nanobot-ai`; do not assume an upstream release includes this fork's changes. The Python import and CLI names remain `nanobot` for compatibility with the inherited runtime.
 
 Pick **one** install method:
 
 | Track | Install with | Update with | What runs |
 |---|---|---|---|
-| Stable | installer, `uv`, or pip | the same package tool | one released Python/WebUI/TUI version |
-| Current source | editable Git checkout | `git pull --ff-only` + editable dependency sync | Python, WebUI, and TUI from that checkout |
+| Upstream release | upstream installer, `uv`, or pip | the same package tool | the published upstream release, not this fork's source contract |
+| mikobot source | this repository's editable checkout | `git pull --ff-only` + editable dependency sync | Python, WebUI, and TUI from this checkout |
 
 Prerequisites: Python 3.11 or newer. Git and [Bun](https://bun.sh/) are only needed for a source install. Published packages include the WebUI and fetch a checksummed, version-matched TUI archive—with its licenses, notices, corresponding application source, source offer, and relinking instructions—on first use.
 
@@ -134,8 +137,8 @@ Clone the repository and install it in editable mode. Bun is required because th
 checkout runs the matching TUI directly instead of downloading an older release binary.
 
 ```bash
-git clone https://github.com/HKUDS/nanobot.git
-cd nanobot
+git clone https://github.com/TalexDreamSoul/mikobot.git
+cd mikobot
 python -m venv .venv
 ```
 

@@ -16,6 +16,31 @@ We aim to respond to security reports within 48 hours.
 
 ## Security Best Practices
 
+### Trust model for shared projects
+
+This fork is a single-host, self-hosted workbench, not a mutually distrustful SaaS
+tenant sandbox. The host administrator, configured providers/MCP servers, and installed
+in-process extensions remain trusted infrastructure. An extension permission label or
+`NANOBOT_WORKSPACE_SANDBOX_ENFORCED` display hint is not proof of per-project isolation.
+
+Project authorization is checked server-side from identity, membership and recorded
+route provenance. Internal jobs inherit the source session; missing or revoked scope
+never upgrades them to host authority. Tool calls revalidate that capability, including
+after a model request and in queued subagents. Revocation prevents subsequent operations;
+it cannot undo a completed side effect or retract content already read by a client.
+
+Private profiles and automatic archives are separated by **user and project** under
+`<config-dir>/users/<user-id>/projects/<project-id>/`. Project workspaces contain shared
+files. Member media is stored under that user's project-specific media root and signed
+for a session whose authorization is checked on fetch. Do not move private journals into
+shared project directories. Review legacy mixed memory/profile files before upgrading a
+deployment for unrelated users; this change preserves historical data instead of
+attempting destructive automatic declassification.
+
+Shared project documents and Skills can contain untrusted instructions. Filesystem and
+process boundaries do not eliminate prompt injection or make a trusted MCP server safe.
+Use explicit project capability allowlists and separate OS deployments for hostile users.
+
 ### 1. API Key Management
 
 **CRITICAL**: Never commit API keys to version control.
@@ -81,12 +106,22 @@ The `exec` tool can execute shell commands. While dangerous command patterns are
 
 On Linux, set `"tools.exec.sandbox": "bwrap"` to wrap every shell command in a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. This uses Linux kernel namespaces to restrict what the process can see:
 
-- Workspace directory → **read-write** (agent works normally)
-- Media directory → **read-only** (can read uploaded attachments)
-- System directories (`/usr`, `/bin`, `/lib`) → **read-only** (commands still work)
-- Config files and API keys (`~/.nanobot/config.json`) → **hidden** (masked by tmpfs)
+- Every Bubblewrap mode isolates the process and IPC namespaces, preventing host
+  process inspection through `/proc` from bypassing the filesystem boundary.
+- The host's configured mode retains explicitly allowed extra binds and networking.
+- Member shell calls require a supported Linux Bubblewrap backend automatically.
+  They bind only the shared project read-write and exact authorized attachments
+  read-only, clear inherited credentials, and isolate networking. Configured host
+  extra binds and ambient sandbox hints cannot widen a member sandbox.
+- Member calls cannot select a host shell executable or login startup script before
+  sandbox entry. Host-managed CLI Apps cannot bypass this boundary.
+- Unsupported platforms, unavailable backends, or sandbox startup failures are errors;
+  there is no silent unsandboxed fallback. On macOS/Windows, use a Linux sandbox-capable
+  deployment for member code execution; ordinary scoped file tools remain available.
 
-Requires `bwrap` installed (`apt install bubblewrap`). Pre-installed in the official Docker image. **Not available on macOS or Windows** — bubblewrap depends on Linux kernel namespaces.
+Requires `bwrap` and permitted Linux namespace creation. It is preinstalled in the
+repository Docker image; see [Deployment](docs/deployment.md#docker-compose) for
+the explicitly privileged nested-sandbox override and its trade-offs.
 
 Enabling the sandbox also automatically activates `restrictToWorkspace` for file tools.
 
@@ -106,6 +141,13 @@ File operations have path traversal protection, but:
 - ✅ Use filesystem permissions to protect sensitive directories
 - ✅ Regularly audit file operations in logs
 - ❌ Don't give unrestricted access to sensitive files
+
+
+Member file tools additionally deny host profile/history, global media, and other
+members' private roots. Only exact own-profile files, read-only own journals, authorized
+attachments, and approved built-in Skills supplement the project workspace. Symlink
+containment applies to those extra capabilities as well. Shell regex checks are early
+diagnostics, never the process-isolation mechanism.
 
 ### 5. Network Security
 

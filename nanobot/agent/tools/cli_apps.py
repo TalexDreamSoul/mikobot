@@ -19,8 +19,10 @@ from nanobot.agent.tools.schema import (
 )
 from nanobot.apps.cli import CliAppError, CliAppManager, CliAppsRuntimeConfig
 from nanobot.apps.cli.utils import runtime_lines_for_request
+from nanobot.collaboration.models import ConversationScope
 from nanobot.config_base import Base
 from nanobot.runtime_context import RuntimeContextBlock, wrap_runtime_context_lines
+from nanobot.security.member_access import current_member_scope, current_member_tool_scope
 from nanobot.security.workspace_access import current_tool_workspace
 
 
@@ -123,6 +125,9 @@ class CliAppsTool(Tool):
         self,
         request: RequestContext,
     ) -> RuntimeContextBlock | None:
+        scope = request.attributes.get("collaboration_scope")
+        if isinstance(scope, ConversationScope) and not scope.is_local_owner:
+            return None
         lines = runtime_lines_for_request(
             request.original_user_text or "",
             request.metadata,
@@ -141,6 +146,16 @@ class CliAppsTool(Tool):
         working_dir: str | None = None,
         timeout: int | None = None,
     ) -> str:
+        if current_member_scope() is not None:
+            # CliAppManager owns native argv execution and has no Bubblewrap
+            # runner contract. Deny rather than letting a member bypass exec.
+            try:
+                current_member_tool_scope()
+            except PermissionError as exc:
+                return ToolResult.error(f"Error: {exc}")
+            return ToolResult.error(
+                "Error: CLI app execution is unavailable for project members because no argv sandbox is configured"
+            )
         access = current_tool_workspace(
             self.workspace,
             restrict_to_workspace=self.restrict_to_workspace,

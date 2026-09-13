@@ -2,6 +2,7 @@
 
 from nanobot.collaboration.local_repository import AsyncLocalCollaborationRepository
 from nanobot.collaboration.models import (
+    COLLABORATION_ASSIGNMENT_METADATA_KEY,
     COLLABORATION_BINDING_METADATA_KEY,
     COLLABORATION_PROJECT_METADATA_KEY,
     COLLABORATION_USER_METADATA_KEY,
@@ -40,6 +41,7 @@ __all__ = [
     "CollaborationRepository",
     "build_collaboration_repository",
     "AsyncLocalCollaborationRepository",
+    "COLLABORATION_ASSIGNMENT_METADATA_KEY",
     "COLLABORATION_BINDING_METADATA_KEY",
     "COLLABORATION_PROJECT_METADATA_KEY",
     "COLLABORATION_USER_METADATA_KEY",

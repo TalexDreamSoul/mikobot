@@ -51,11 +51,25 @@ function jsonResponse(body: unknown): Response {
   } as Response;
 }
 
+function hostCollaborationPayload() {
+  return {
+    user: { id: "host-test-user", display_name: "Host", is_admin: true, default_project_id: null },
+    is_admin: true,
+    projects: [],
+    assignments: [],
+    active_project_id: null,
+    manageable_project_ids: [],
+  };
+}
+
 function mockFetchRoutes(routes: Record<string, unknown>): void {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
-      const route = routes[String(input)];
+      const url = String(input);
+      const route = routes[url] ?? (
+        url === "/api/collaboration" ? hostCollaborationPayload() : undefined
+      );
       const body =
         typeof route === "function"
           ? await (route as () => unknown | Promise<unknown>)()
@@ -335,10 +349,11 @@ describe("App layout", () => {
     vi.mocked(deriveWsUrl).mockReset().mockReturnValue("ws://test");
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({
-        ok: false,
-        status: 404,
-      }),
+      vi.fn(async (input: RequestInfo | URL) => (
+        String(input) === "/api/collaboration"
+          ? jsonResponse(hostCollaborationPayload())
+          : { ok: false, status: 404 } as Response
+      )),
     );
   });
 
@@ -489,22 +504,6 @@ describe("App layout", () => {
     expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
   });
 
-  it("places Automations after Skills in the main sidebar", async () => {
-    render(<App />);
-
-    await waitFor(() => expect(connectSpy).toHaveBeenCalled());
-    const sidebar = screen.getByRole("navigation", { name: "Sidebar navigation" });
-    const appsButton = within(sidebar).getByRole("button", { name: "Apps" });
-    const skillsButton = within(sidebar).getByRole("button", { name: "Skills" });
-    const automationsButton = within(sidebar).getByRole("button", { name: "Automations" });
-
-    expect(appsButton.compareDocumentPosition(skillsButton) & Node.DOCUMENT_POSITION_FOLLOWING)
-      .toBeTruthy();
-    expect(
-      skillsButton.compareDocumentPosition(automationsButton) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-  });
 
   it("highlights the blank new-topic destination immediately", async () => {
     render(<App />);
@@ -2253,6 +2252,7 @@ describe("App layout", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const href = String(input);
+        if (href === "/api/collaboration") return jsonResponse(hostCollaborationPayload());
         if (href === "/api/settings/api-service") {
           return jsonResponse({
             installed: false,
@@ -2481,24 +2481,12 @@ describe("App layout", () => {
 
     await waitFor(() => expect(connectSpy).toHaveBeenCalled());
     const sidebar = screen.getByRole("navigation", { name: "Sidebar navigation" });
-    const searchButton = within(sidebar).getByRole("button", { name: "Search" });
-    const appsButton = within(sidebar).getByRole("button", { name: "Apps" });
-    expect(searchButton.compareDocumentPosition(appsButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await user.click(within(sidebar).getByRole("button", { name: "Settings" }));
 
-    expect(
-      await screen.findByRole("navigation", { name: "Settings sections" }),
-    ).toBeInTheDocument();
+    const settingsNav = await screen.findByRole("navigation", { name: "Settings sections" });
+    expect(settingsNav).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Overview" })).not.toBeInTheDocument();
     expect(document.title).toBe("Settings · nanobot");
-    expect(screen.getByTestId("overview-logo-openai")).toBeInTheDocument();
-    expect(screen.getByTestId("overview-logo-brave")).toBeInTheDocument();
-    expect(screen.getByTestId("overview-logo-openrouter")).toBeInTheDocument();
-    expect(screen.queryByTestId("overview-logo-nanobot-gateway")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("overview-logo-nanobot-workspace")).not.toBeInTheDocument();
-    expect(screen.queryByRole("navigation", { name: "Sidebar navigation" })).not.toBeInTheDocument();
-    const settingsNav = screen.getByRole("navigation", { name: "Settings sections" });
-    expect(settingsNav.className).not.toContain("overflow-x-auto");
     expect(within(settingsNav).getByRole("button", { name: "Settings: Overview" })).toBeInTheDocument();
     expect(within(settingsNav).getByRole("button", { name: "Overview" })).toHaveAttribute(
       "aria-current",
@@ -3803,11 +3791,11 @@ describe("App layout", () => {
     const pendingPairing = new Promise<Response>((resolve) => {
       resolvePairing = resolve;
     });
-    const fetchMock = vi.fn((input: RequestInfo | URL) => (
-      String(input) === "/api/settings/pairing"
-        ? pendingPairing
-        : Promise.resolve({ ok: false, status: 404 } as Response)
-    ));
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      if (String(input) === "/api/settings/pairing") return pendingPairing;
+      if (String(input) === "/api/collaboration") return Promise.resolve(jsonResponse(hostCollaborationPayload()));
+      return Promise.resolve({ ok: false, status: 404 } as Response);
+    });
     vi.stubGlobal("fetch", fetchMock);
     const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
 

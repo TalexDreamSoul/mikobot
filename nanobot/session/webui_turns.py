@@ -616,6 +616,7 @@ class WebuiTurnCoordinator:
             content="",
             metadata=dict(ctx.metadata or {}),
             session_key_override=ctx.session_key,
+            source="runtime",
         )
 
     @staticmethod

@@ -32,6 +32,11 @@ from nanobot.providers.image_generation import (
     get_image_gen_provider,
     image_gen_provider_configs,
 )
+from nanobot.security.member_access import (
+    current_member_attachment_files,
+    current_member_scope,
+    current_member_tool_scope,
+)
 from nanobot.security.workspace_access import current_tool_workspace
 from nanobot.security.workspace_policy import WorkspaceBoundaryError, resolve_allowed_path
 from nanobot.utils.artifacts import (
@@ -148,22 +153,44 @@ class ImageGenerationTool(Tool):
         return cls(**kwargs)
 
     def _resolve_reference_image(self, value: str) -> str:
-        access = current_tool_workspace(self.workspace, restrict_to_workspace=True)
-        workspace = access.project_path or self.workspace
-        try:
-            resolved = resolve_allowed_path(
-                value,
-                workspace=workspace,
-                allowed_root=access.allowed_root,
-                extra_allowed_roots=[get_media_dir()] if access.allowed_root is not None else None,
-                strict=True,
-            )
-        except WorkspaceBoundaryError as exc:
-            raise ImageGenerationError(
-                "reference_images must be inside the workspace or nanobot media directory"
-            ) from exc
-        except OSError as exc:
-            raise ImageGenerationError(f"reference image not found: {value}") from exc
+        if current_member_scope() is not None:
+            try:
+                member = current_member_tool_scope()
+            except PermissionError as exc:
+                raise ImageGenerationError("member image access is not authorized") from exc
+            if member is None:
+                raise ImageGenerationError("member image access is not authorized")
+            try:
+                resolved = resolve_allowed_path(
+                    value,
+                    workspace=member.project_root,
+                    allowed_root=member.project_root,
+                    extra_allowed_files=current_member_attachment_files(),
+                    strict=True,
+                )
+            except WorkspaceBoundaryError as exc:
+                raise ImageGenerationError(
+                    "reference_images must be inside the member project or be a current attachment"
+                ) from exc
+            except OSError as exc:
+                raise ImageGenerationError(f"reference image not found: {value}") from exc
+        else:
+            access = current_tool_workspace(self.workspace, restrict_to_workspace=True)
+            workspace = access.project_path or self.workspace
+            try:
+                resolved = resolve_allowed_path(
+                    value,
+                    workspace=workspace,
+                    allowed_root=access.allowed_root,
+                    extra_allowed_roots=[get_media_dir()] if access.allowed_root is not None else None,
+                    strict=True,
+                )
+            except WorkspaceBoundaryError as exc:
+                raise ImageGenerationError(
+                    "reference_images must be inside the workspace or nanobot media directory"
+                ) from exc
+            except OSError as exc:
+                raise ImageGenerationError(f"reference image not found: {value}") from exc
         if not resolved.is_file():
             raise ImageGenerationError(f"reference image is not a file: {value}")
         raw = resolved.read_bytes()
@@ -288,6 +315,7 @@ async def request_image_generation_reload(
             sender_id="webui-settings",
             chat_id="runtime",
             content=RUNTIME_CONTROL_IMAGE_GENERATION_RELOAD,
+            source="runtime",
             metadata={
                 INBOUND_META_RUNTIME_CONTROL: RUNTIME_CONTROL_IMAGE_GENERATION_RELOAD,
                 RUNTIME_CONTROL_ACK: ack,

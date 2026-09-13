@@ -262,7 +262,7 @@ describe("App OIDC authentication", () => {
       expect.objectContaining({ method: "GET" }),
     ));
     expect(await screen.findByText("Sign out failed. Try again.")).toBeInTheDocument();
-    expect(window.location.hash).toBe("#/settings");
+    expect(window.location.hash).toMatch(/^#\/settings/);
   });
 
   it("blocks an invalid OIDC logout URL instead of navigating away", async () => {

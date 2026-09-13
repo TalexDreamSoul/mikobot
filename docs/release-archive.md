@@ -2,7 +2,14 @@
 
 This page keeps release and daily update history outside the README so the project homepage can stay focused on what nanobot is, what it can do, and how to start.
 
-For tagged releases, see [GitHub Releases](https://github.com/HKUDS/nanobot/releases).
+For this fork's tagged releases, see [GitHub Releases](https://github.com/TalexDreamSoul/mikobot/releases).
+
+## Unreleased
+
+- Separate member/project profiles and automatic archives from shared files; revalidate tool and recovery authority, including explicit internal-message provenance.
+- Require fail-closed member execution, scoped private media, and process/network-isolated Linux Bubblewrap; preserve owner workflows and legacy project-qualified session keys.
+- Separate member navigation from host administration, make runtime health failures visible, and remove the unsupported Codex bridge export flags.
+- Handle kernels that do not expose `SO_ACCEPTCONN` without restarting an otherwise live WebSocket listener.
 
 ## Highlights
 

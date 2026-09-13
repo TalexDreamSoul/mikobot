@@ -35,6 +35,8 @@ class InboundMessage:
     session_key_override: str | None = None  # Optional override for thread-scoped sessions
     require_existing_session: bool = False
     input_role: Literal["user", "system"] | None = None
+    # Set only by internal producers, never decoded from client envelopes.
+    source: Literal["external", "runtime"] = "external"
 
     @property
     def session_key(self) -> str:

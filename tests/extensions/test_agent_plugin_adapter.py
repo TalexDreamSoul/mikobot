@@ -189,17 +189,55 @@ def test_snapshot_revalidates_fingerprint_before_publishing_enabled_package(
     assert package.lifecycle is ExtensionLifecycle.ENABLED
 
 
-def test_skills_only_plugin_is_projected_as_data_with_only_skill_components(tmp_path: Path) -> None:
+def test_skills_only_plugin_keeps_its_marker_driven_lifecycle_without_mcp_runtime(
+    tmp_path: Path,
+) -> None:
+    """An enabled Skills-only plugin stays available without an MCP runtime projection."""
     plugin = _plugin(tmp_path)
     _skill(plugin, "notes")
+    set_agent_plugin_enabled(tmp_path, "desktop", True)
 
-    [package] = AgentPluginExtensionAdapter(tmp_path).snapshot().packages
+    [package] = AgentPluginExtensionAdapter(
+        tmp_path,
+        mcp_runtime_status=lambda: (_ for _ in ()).throw(AssertionError("must not query MCP state")),
+    ).snapshot().packages
 
     assert package.execution is ExtensionExecution.DATA
+    assert package.lifecycle is ExtensionLifecycle.ENABLED
     assert {(component.kind, component.name) for component in package.components} == {
         (ExtensionComponentKind.SKILL, "notes")
     }
 
+
+@pytest.mark.parametrize(
+    ("runtime_status", "expected"),
+    [
+        ("connected", ExtensionLifecycle.ENABLED),
+        ("connecting", ExtensionLifecycle.RELOADING),
+        ("failed", ExtensionLifecycle.FAILED),
+        ("unknown", ExtensionLifecycle.UNAVAILABLE),
+        (None, ExtensionLifecycle.UNAVAILABLE),
+    ],
+)
+def test_enabled_plugin_mcp_inventory_reports_current_runtime_health(
+    tmp_path: Path,
+    runtime_status: str | None,
+    expected: ExtensionLifecycle,
+) -> None:
+    """An enabled MCP plugin never presents its activation marker as a healthy runtime."""
+    plugin = _plugin(tmp_path)
+    _mcp(plugin, "desktop", marker="mcp-was-started")
+    set_agent_plugin_enabled(tmp_path, "desktop", True)
+    statuses = {} if runtime_status is None else {"desktop": runtime_status}
+
+    [package] = AgentPluginExtensionAdapter(
+        tmp_path,
+        mcp_runtime_status=lambda: statuses,
+    ).snapshot().packages
+    [component] = package.components
+
+    assert package.lifecycle is expected
+    assert component.lifecycle is expected
 
 @pytest.mark.asyncio
 async def test_registry_actions_change_only_marker_and_return_adapter_owned_results(
@@ -229,7 +267,14 @@ async def test_registry_actions_change_only_marker_and_return_adapter_owned_resu
     assert len(_marker_paths(tmp_path)) == 1
     assert not (plugin / "mcp-was-started").exists()
 
-    disabled = await registry.execute(_request(package.id, ExtensionAction.DISABLE))
+    [enabled_package] = registry.snapshot().packages
+    disabled = await registry.execute(
+        _request(
+            package.id,
+            ExtensionAction.DISABLE,
+            expected_revision=enabled_package.revision,
+        )
+    )
 
     assert disabled.ok is True
     assert disabled.action is ExtensionAction.DISABLE

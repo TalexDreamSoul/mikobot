@@ -9,6 +9,7 @@ from typing import Any, cast
 from loguru import logger
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
+from nanobot.agent.tools.context import require_tool_authorization
 from nanobot.agent.tools.registry import ToolRegistry, is_tool_error_result
 from nanobot.providers.base import ToolCallRequest
 from nanobot.utils.runtime import (
@@ -145,6 +146,7 @@ async def _execute_tool_call(
 
     await hook.before_execute_tool(context, tool_call, tool, params)
     try:
+        await require_tool_authorization()
         if tool is not None:
             result = await tool.execute(**params)
         else:

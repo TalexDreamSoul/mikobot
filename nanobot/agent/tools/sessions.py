@@ -14,7 +14,7 @@ from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import ToolContext, current_request_session_key
 from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
 from nanobot.session.manager import SessionManager
-from nanobot.session.privacy import same_privacy_scope, session_privacy_scope
+from nanobot.session.privacy import same_privacy_scope, same_project_owner, session_privacy_scope
 from nanobot.session.session_handles import (
     SessionHandleResolver,
     normalize_session_handle,
@@ -54,7 +54,24 @@ def _session_ref(session_key: str) -> str:
 
 class _SessionTool(Tool):
     def __init__(self, sessions: SessionManager) -> None:
+        self._sessions = sessions
         self._access = WebuiSessionAccess(sessions)
+
+    def _allowed(self, source_key: str | None, target_key: str) -> bool:
+        source = self._sessions.peek(source_key) if source_key else None
+        target = self._sessions.peek(target_key)
+        source_metadata = source.metadata if source is not None else None
+        target_metadata = target.metadata if target is not None else None
+        if same_project_owner(source_metadata, target_metadata):
+            return True
+        scoped = (
+            source_metadata is not None
+            and any(key.startswith("collaboration_") for key in source_metadata)
+        ) or (
+            target_metadata is not None
+            and any(key.startswith("collaboration_") for key in target_metadata)
+        )
+        return not scoped and same_privacy_scope(source_key, target_key)
 
     @classmethod
     def create(cls, ctx: ToolContext) -> Tool:
@@ -135,7 +152,7 @@ class SearchSessionsTool(_SessionTool):
                     ],
                 }
                 for match in matches
-                if same_privacy_scope(current_key, match["session_key"])
+                if self._allowed(current_key, match["session_key"])
             ],
         }
         return json.dumps(result, ensure_ascii=False)
@@ -201,8 +218,8 @@ class ReadSessionTool(_SessionTool):
         if current_key is None:
             if session_privacy_scope(session_key) is not None:
                 return ToolResult.error("Error: scoped session access requires a request context")
-        elif not same_privacy_scope(current_key, session_key):
-            return ToolResult.error("Error: cross-user session access is not authorized")
+        elif not self._allowed(current_key, session_key):
+            return ToolResult.error("Error: cross-project session access is not authorized")
         query_text = query.strip() if query else ""
         if query_text in _UNSUPPORTED_MATCH_ALL_QUERIES:
             return ToolResult.error(

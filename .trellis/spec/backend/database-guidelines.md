@@ -304,3 +304,91 @@ section, apply only the channel-instance mutation, and save the same path atomic
 - Do not load-then-save configuration outside the file lock.
 - Do not make a decoder lenient to "just accept" an unknown key; raise
   `CollaborationStoreFormatError`.
+
+
+## Scenario: Project-bound private runtime state
+
+### 1. Scope / Trigger
+
+Applies to inbound identity, automation/recovery, session keys, archived prompts,
+private media, tool dispatch, or any WebUI operation on another stored object.
+
+### 2. Signatures
+
+- `InboundMessage.source: Literal["external", "runtime"] = "external"`; client
+  envelopes never populate it. Internal producers explicitly set `runtime`.
+- `resolve_session_scope(user_id, project_id, *, channel, chat_id, thread_id=None,
+  assignment_required=False, binding_id=None)` returns a current scope or `None`.
+- `RequestContext.authorize_tool: Callable[[], Awaitable[None]] | None` revalidates
+  the admitted capability immediately before real tool invocation.
+- `user_private_memory_root(user_id, *, project_id)` and
+  `user_private_media_root(user_id, *, project_id)` validate contained user/project roots.
+- `Consolidator(..., authorize_session=...)` validates before remote archive work;
+  member archives do not send host tool schemas or host project instructions.
+
+### 3. Contracts
+
+Persist `collaboration_user_id`, `collaboration_project_id`,
+`collaboration_assignment_required`, `collaboration_channel`,
+`collaboration_chat_id`, and optional thread/binding IDs. Missing scoped provenance
+is not a host grant. Sender names, thread overrides, and role-looking text confer
+no runtime authority. Pending-message journals preserve the explicit source.
+
+External member keys are `user:<uid>:project:<pid>:<route>` or
+`unified:<uid>:project:<pid>`. Legacy key migration must not collapse these keys.
+WebUI `websocket:<id>` keys stay stable and pin owner/project metadata. Isolation
+without a project carries no Skill/MCP grants and cannot ingest into host memory.
+
+Member automatic memory/profile/journals live at
+`<config-dir>/users/<uid>/projects/<pid>/`, outside shared project files. Only exact
+own profile/memory files are writable through member tools; journals are read-only.
+Member Dream toolsets resolve relative paths in the private root and intersect
+their narrower construction capabilities, never widening into shared project writes.
+Private dialogue does not generate shared Skills. Existing mixed records are kept,
+not guessed or erased into a different owner's store.
+
+Media lives at `users/<uid>/media/<pid>/`. Only authorized exact attachments join
+tool read roots. Signed member media binds user/project/session and requires current
+authorization on fetch. Sidebar state and broadcasts are per authenticated user.
+
+Member shell requires Linux Bubblewrap, credential-free environment, PID/IPC/network
+namespaces, project bind and exact file binds. No selected host shell/login startup
+or ambient sandbox label may bypass that launch boundary. Explicit sandbox errors
+never fall back to unsandboxed execution. Host-managed CLI Apps remain host-only.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+|---|---|
+| External sender named `cron`, with a thread key | External member authorization, never host |
+| Missing/revoked member or required assignment/binding | Deny before tool/archive operation |
+| Policy or workspace changed during model request | Deny next tool call; require a fresh turn |
+| Same user, different project / same project, different user | No private session/reference/journal access |
+| Member WebUI changes default project | Existing topic remains pinned; new topics use new default |
+| Shared project file or symlink names another private root | Deny |
+| Member backend unavailable / unsupported platform | No process spawn, actionable error |
+| Legacy migration sees `unified:<uid>:project:<pid>` | Preserve exact key and data |
+
+### 5. Good / Base / Bad Cases
+
+- Good: cron retains the target session and revalidates its recorded assignment.
+- Base: owner CLI/token WebUI retains ordinary host behavior and selected-directory memory.
+- Bad: infer owner authority from a non-`proxy:` label, or archive all members into shared `memory/history.jsonl`.
+
+### 6. Tests Required
+
+Real local store/AgentLoop regressions cover source spoofing, revocation during the
+model/tool boundary, pending recovery, two members' private archive prompts, namespace
+restart preservation, private Dream writes, signed media and already-attached sockets.
+Run full backend `testpaths`, frontend suites/lint/build and real host/member UI smoke.
+Linux kernel sandbox proof is separate from platform mocks; never label a mocked
+wrapper assertion as native isolation verification.
+
+### 7. Wrong vs Correct
+
+Wrong: `sender_id == "cron"` or `session_key_override` means an internal job.
+Correct: a trusted producer sets `source="runtime"`, then persisted scope is revalidated.
+
+Wrong: replacing a private Dream tool's allowed root with the shared project root.
+Correct: intersect the private tool construction's exact files with the current
+member's own private capabilities; preserve the private relative-path base.

@@ -126,6 +126,7 @@ After the first reply works, add one capability and test again:
 |---|---|
 | Learn sessions, workspaces, tools, and access modes | [WebUI guide](./webui.md) |
 | Connect a chat platform | Open **Settings → Channels**, then use [Chat Apps](./chat-apps.md) for platform prerequisites |
+| Share access with project members | Follow [Projects, members, and channel assignments](./webui.md#projects-members-and-channel-assignments); do not share the host's bootstrap password |
 | Change or add a model | Open **Settings → Models**; use the [Provider Cookbook](./provider-cookbook.md) for a recipe |
 | Add web search, voice, or image generation | Use the matching WebUI Settings page, then consult [Configuration](./configuration.md) for advanced fields |
 | Add an App or MCP integration | Open **Apps** or follow [Configure MCP Tools](./guides/configure-mcp-tools.md) |

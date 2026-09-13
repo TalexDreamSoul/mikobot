@@ -249,7 +249,7 @@ def test_snapshot_maps_runtime_statuses_for_a_desired_enabled_instance(
 def test_snapshot_prioritizes_dependency_desired_configuration_and_local_state_truth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dependency, desired state, setup, and local-state facts each control lifecycle before runtime state."""
+    """Prerequisite failures veto runtime, but a running instance overrides stale desired disablement."""
     configured = _configured_setup()
     missing_dependency = _plugin("Dependency", setup=configured, dependencies=("sdk>=1",))
     disabled = _plugin("Disabled", setup=configured)
@@ -283,8 +283,8 @@ def test_snapshot_prioritizes_dependency_desired_configuration_and_local_state_t
     packages = {package.display_name.split()[0]: package for package in adapter.snapshot().packages}
 
     assert packages["Dependency"].components[0].lifecycle is ExtensionLifecycle.UNAVAILABLE
-    assert packages["Disabled"].components[0].lifecycle is ExtensionLifecycle.DISABLED
-    assert packages["Unconfigured"].components[0].lifecycle is ExtensionLifecycle.UNAVAILABLE
+    assert packages["Disabled"].components[0].lifecycle is ExtensionLifecycle.ENABLED
+    assert packages["Unconfigured"].components[0].lifecycle is ExtensionLifecycle.ENABLED
     assert packages["Local"].components[0].lifecycle is ExtensionLifecycle.ENABLED
 
 

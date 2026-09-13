@@ -150,6 +150,7 @@ async def _deliver_delivery(
         content=delivery.content,
         metadata=_delivery_metadata(trigger, delivery),
         session_key_override=trigger.session_key,
+        source="runtime",
     )
     response = await submit_turn(msg)
     store.record_delivery(

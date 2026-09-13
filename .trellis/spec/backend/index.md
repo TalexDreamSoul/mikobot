@@ -33,7 +33,7 @@ should be fixed.
 | Guide | Description | Status |
 |-------|-------------|--------|
 | [Directory Structure](./directory-structure.md) | The 26 subpackages, channel/provider/tool layout, test placement | Documented |
-| [Database Guidelines](./database-guidelines.md) | No ORM; config JSON, dual-backend collaboration store, migrations, RLS, locks | Documented |
+| [Database Guidelines](./database-guidelines.md) | Local JSON persistence, project authorization, private state, migrations and locks | Documented |
 | [Error Handling](./error-handling.md) | Domain exception families, edge mapping, redaction, known leaks | Documented |
 | [Quality Guidelines](./quality-guidelines.md) | Lint/type/test commands, forbidden patterns, review checklist | Documented |
 | [Extension Registry](./extension-registry.md) | Canonical package/component IDs, adapters, snapshots, actions, bounds, trust disclosure | Documented |

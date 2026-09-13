@@ -13,7 +13,10 @@ import {
 } from "lucide-react";
 
 import { CapabilitiesPanel } from "@/components/projects/CapabilitiesPanel";
-import { ProjectMembersPanel } from "@/components/projects/ProjectMembersPanel";
+import {
+  CurrentUserIdCard,
+  ProjectMembersPanel,
+} from "@/components/projects/ProjectMembersPanel";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -305,6 +308,16 @@ export function ProjectsView({
 
           <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="mx-auto w-full max-w-5xl space-y-5 p-4 pb-10 sm:p-6 lg:p-8">
+              <div role="note" className="rounded-control border border-border/55 bg-settings-surface px-4 py-3">
+                <p className="text-sm font-medium text-foreground">
+                  {t("projects.sharedSpacesTitle")}
+                </p>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  {t("projects.sharedSpacesDescription")}
+                </p>
+              </div>
+
+              <CurrentUserIdCard currentUserId={currentUserId} />
               {projects.error ? (
                 <div role="alert" className="flex items-start justify-between gap-3 rounded-control border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
                   <span>{projects.error}</span>

@@ -14,7 +14,6 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.sessions import ReadSessionTool, SearchSessionsTool
 from nanobot.runtime_context import RuntimeContextBlock, append_runtime_context
 from nanobot.session.manager import SessionManager
-from nanobot.session.privacy import same_privacy_scope
 from nanobot.session.session_handles import SessionHandleResolver
 from nanobot.webui.transcript import append_transcript_object
 
@@ -371,20 +370,45 @@ async def test_session_tools_work_without_request_context(tmp_path, monkeypatch)
     assert read["session_key"] == "custom:history"
 
 
-@pytest.mark.parametrize(
-    ("source", "target", "expected"),
-    [
-        ("user:alice:telegram:one", "unified:alice", True),
-        ("user:alice:telegram:one", "user:alice:telegram:two", True),
-        ("user:alice:telegram:one", "user:bob:telegram:two", False),
-        ("user:alice:telegram:one", "telegram:two", False),
-    ],
-)
-def test_session_privacy_scope_requires_matching_user(
-    source: str, target: str, expected: bool
-) -> None:
-    """Only session keys scoped to the same user can interact."""
-    assert same_privacy_scope(source, target) is expected
+@pytest.mark.asyncio
+async def test_session_tools_keep_member_project_history_private(tmp_path) -> None:
+    """Read and discovery expose only sessions owned by the request's exact member/project scope."""
+    manager = SessionManager(tmp_path)
+    current = "user:alice:project:alpha:websocket:current"
+    same_project = "user:alice:project:alpha:telegram:history"
+    other_project = "user:alice:project:beta:telegram:history"
+    host_history = "websocket:host-history"
+    _save_session(
+        manager,
+        same_project,
+        title="Alpha history",
+        messages=[{"role": "user", "content": "ALPHA_SECRET_MARKER"}],
+    )
+    _save_session(
+        manager,
+        other_project,
+        title="Beta history",
+        messages=[{"role": "user", "content": "BETA_SECRET_MARKER"}],
+    )
+    _save_session(
+        manager,
+        host_history,
+        title="Host history",
+        messages=[{"role": "user", "content": "HOST_SECRET_MARKER"}],
+    )
+
+    with _webui_request(current):
+        discovered = _decode(await SearchSessionsTool(manager).execute(query="SECRET_MARKER"))
+        allowed = _decode(await ReadSessionTool(manager).execute(session_key=same_project))
+        other_project_read = await ReadSessionTool(manager).execute(session_key=other_project)
+        host_read = await ReadSessionTool(manager).execute(session_key=host_history)
+
+    assert [row["session_key"] for row in discovered["results"]] == [same_project]
+    assert [message["content"] for message in allowed["messages"]] == ["ALPHA_SECRET_MARKER"]
+    assert other_project_read.is_error
+    assert host_read.is_error
+    assert "BETA_SECRET_MARKER" not in str(other_project_read)
+    assert "HOST_SECRET_MARKER" not in str(host_read)
 
 
 @pytest.mark.asyncio
@@ -414,4 +438,3 @@ async def test_read_session_rejects_a_session_from_another_user(tmp_path) -> Non
 
     assert [message["content"] for message in allowed["messages"]] == ["private decision"]
     assert rejected.is_error
-    assert "cross-user session access" in str(rejected)

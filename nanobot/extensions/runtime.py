@@ -96,6 +96,7 @@ def build_core_extension_registry(
         AgentPluginExtensionAdapter(
             config.workspace_path,
             owned_plugin_names=cli_apps.owned_plugin_names,
+            mcp_runtime_status=mcp_runtime_status,
         )
     )
     registry.register(EffectiveSkillsExtensionAdapter(skills_loader))

@@ -7,6 +7,7 @@ does not modify agent sessions.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -33,8 +34,13 @@ _ALLOWED_WORKBENCH_LAYOUTS = {"columns", "rows", "grid", "bsp", "main-stack"}
 _SIDEBAR_STATE_WRITE_LOCK = threading.Lock()
 
 
-def webui_sidebar_state_path() -> Path:
-    return get_webui_dir() / "sidebar-state.json"
+def webui_sidebar_state_path(owner_user_id: str | None = None) -> Path:
+    root = get_webui_dir()
+    if owner_user_id is not None:
+        if not owner_user_id:
+            raise ValueError("sidebar owner must not be empty")
+        root = root / "users" / hashlib.sha256(owner_user_id.encode("utf-8")).hexdigest()
+    return root / "sidebar-state.json"
 
 
 def default_webui_sidebar_state() -> dict[str, Any]:
@@ -221,8 +227,8 @@ def normalize_webui_sidebar_state(raw: Any) -> dict[str, Any]:
     return state
 
 
-def read_webui_sidebar_state() -> dict[str, Any]:
-    path = webui_sidebar_state_path()
+def read_webui_sidebar_state(owner_user_id: str | None = None) -> dict[str, Any]:
+    path = webui_sidebar_state_path(owner_user_id)
     if not path.is_file():
         return default_webui_sidebar_state()
     try:
@@ -237,12 +243,16 @@ def read_webui_sidebar_state() -> dict[str, Any]:
     return normalize_webui_sidebar_state(raw)
 
 
-def write_webui_sidebar_state(raw: dict[str, Any]) -> dict[str, Any]:
+def write_webui_sidebar_state(
+    raw: dict[str, Any], owner_user_id: str | None = None
+) -> dict[str, Any]:
     with _SIDEBAR_STATE_WRITE_LOCK:
-        return _write_webui_sidebar_state(raw)
+        return _write_webui_sidebar_state(raw, owner_user_id)
 
 
-def _write_webui_sidebar_state(raw: dict[str, Any]) -> dict[str, Any]:
+def _write_webui_sidebar_state(
+    raw: dict[str, Any], owner_user_id: str | None = None
+) -> dict[str, Any]:
     state = normalize_webui_sidebar_state(raw)
     state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     encoded = json.dumps(
@@ -254,7 +264,7 @@ def _write_webui_sidebar_state(raw: dict[str, Any]) -> dict[str, Any]:
     if len(encoded) > _MAX_STATE_FILE_BYTES:
         raise ValueError("sidebar state is too large")
 
-    path = webui_sidebar_state_path()
+    path = webui_sidebar_state_path(owner_user_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     with open(tmp, "wb") as f:

@@ -16,6 +16,7 @@ import {
 
 interface SystemSettingsEffectsOptions {
   state: SystemSettingsState;
+  enabled: boolean;
   activeSection: SettingsSectionKey;
   getToken: () => string;
   pageVisible: boolean;
@@ -25,6 +26,7 @@ const MCP_RUNTIME_STATUS_REFRESH_MS = 1_000;
 
 export function useSystemSettingsEffects({
   state,
+  enabled,
   activeSection,
   getToken,
   pageVisible,
@@ -48,7 +50,7 @@ export function useSystemSettingsEffects({
   } = state;
 
   useEffect(() => {
-    if (activeSection !== "apps") return;
+    if (!enabled || activeSection !== "apps") return;
     let cancelled = false;
     let retry: number | null = null;
     let retryCount = 0;
@@ -80,11 +82,12 @@ export function useSystemSettingsEffects({
       cancelled = true;
       if (retry !== null) window.clearTimeout(retry);
     };
-  }, [activeSection, getToken]);
+  }, [activeSection, enabled, getToken]);
 
   useEffect(() => {
     if (
-      !pageVisible
+      !enabled
+      || !pageVisible
       || !["channels", "models", "browser", "runtime"].includes(activeSection)
     ) {
       return;
@@ -126,10 +129,10 @@ export function useSystemSettingsEffects({
       window.removeEventListener("focus", refreshOnFocus);
       document.removeEventListener("visibilitychange", refreshOnFocus);
     };
-  }, [activeSection, getToken, pageVisible]);
+  }, [activeSection, enabled, getToken, pageVisible]);
 
   useEffect(() => {
-    if (activeSection !== "runtime") return;
+    if (!enabled || activeSection !== "runtime") return;
     let cancelled = false;
     setApiServiceLoading(true);
     fetchApiService(getToken())
@@ -148,10 +151,10 @@ export function useSystemSettingsEffects({
     return () => {
       cancelled = true;
     };
-  }, [activeSection, getToken]);
+  }, [activeSection, enabled, getToken]);
 
   useEffect(() => {
-    if (activeSection !== "apps" || !pageVisible) return;
+    if (!enabled || activeSection !== "apps" || !pageVisible) return;
     let cancelled = false;
     let retry: number | null = null;
     const loadMcpPresets = (showLoading: boolean) => {
@@ -180,7 +183,7 @@ export function useSystemSettingsEffects({
       cancelled = true;
       if (retry !== null) window.clearTimeout(retry);
     };
-  }, [activeSection, getToken, pageVisible]);
+  }, [activeSection, enabled, getToken, pageVisible]);
 
   const refreshAutomations = useCallback(
     async (showLoading = false) => {

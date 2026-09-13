@@ -7,13 +7,23 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nanobot.agent.runner import AgentRunResult
-from nanobot.agent.subagent import SubagentManager, SubagentStatus
+from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.context import RequestContext, request_context
 from nanobot.agent.tools.filesystem import FileToolsConfig
+from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.bus.queue import MessageBus
+from nanobot.collaboration.models import ConversationScope, ConversationScopeKind, Project, User
 from nanobot.config.schema import ToolsConfig
 from nanobot.llm_usage.context import llm_usage_source
 from nanobot.providers.base import GenerationSettings, LLMProvider, LLMResponse, ToolCallRequest
-from nanobot.security.workspace_access import build_workspace_scope
+from nanobot.security.member_access import current_member_tool_scope
+from nanobot.security.workspace_access import (
+    bind_workspace_scope,
+    build_workspace_scope,
+    reset_workspace_scope,
+)
 from nanobot.utils.llm_runtime import LLMRuntime
 
 
@@ -85,32 +95,6 @@ def test_subagent_respects_file_tool_toggle(tmp_path):
     assert file_tools.isdisjoint(tools.tool_names)
 
 
-def test_subagent_prompt_keeps_agent_paths_for_selected_project(tmp_path):
-    agent_workspace = tmp_path / "agent"
-    project = tmp_path / "project"
-    global_skill = agent_workspace / "skills" / "global-custom" / "SKILL.md"
-    project_skill = project / "skills" / "project-custom" / "SKILL.md"
-    global_skill.parent.mkdir(parents=True)
-    project_skill.parent.mkdir(parents=True)
-    global_skill.write_text("---\ndescription: global skill\n---\nGlobal", encoding="utf-8")
-    project_skill.write_text("---\ndescription: project skill\n---\nProject", encoding="utf-8")
-    manager = SubagentManager(
-        workspace=agent_workspace,
-        bus=MessageBus(),
-        max_tool_result_chars=16_000,
-    )
-
-    prompt = manager._build_subagent_prompt(workspace=project)
-
-    assert "one root and relative SKILL.md paths" in prompt
-    assert "Join them when using `read_file`" in prompt
-    assert str(project.resolve()) not in prompt
-    assert f"Nanobot's agent workspace: {agent_workspace.resolve()}" in prompt
-    assert f"History log: {agent_workspace.resolve() / 'memory' / 'history.jsonl'}" in prompt
-    assert "global-custom" in prompt
-    assert "project-custom" not in prompt
-
-
 def test_subagent_prompt_uses_relative_paths_in_agent_workspace(tmp_path):
     skill = tmp_path / "skills" / "custom" / "SKILL.md"
     skill.parent.mkdir(parents=True)
@@ -129,43 +113,83 @@ def test_subagent_prompt_uses_relative_paths_in_agent_workspace(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_subagent_keeps_project_runtime_scope_with_agent_owned_tools(tmp_path):
+async def test_spawned_subagent_keeps_the_parent_member_capability(tmp_path, monkeypatch):
+    """SpawnTool preserves trusted member authorization for a real subagent tool execution."""
     agent_workspace = tmp_path / "agent"
     project = tmp_path / "project"
     agent_workspace.mkdir()
     project.mkdir()
+    (agent_workspace / "USER.md").write_text("HOST_SUBAGENT_SECRET", encoding="utf-8")
     provider = MagicMock(spec=LLMProvider)
     provider.get_default_model.return_value = "test"
+    provider.chat_with_retry = AsyncMock(side_effect=[
+        LLMResponse(
+            content="checking scope",
+            tool_calls=[ToolCallRequest(id="scope-1", name="scope_probe", arguments={})],
+        ),
+        LLMResponse(content="ok", tool_calls=[]),
+    ])
     manager = SubagentManager(
         workspace=agent_workspace,
         bus=MessageBus(),
         max_tool_result_chars=16_000,
     )
-    manager.runner.run = AsyncMock(
-        return_value=AgentRunResult(final_content="ok", messages=[], stop_reason="completed")
+    user = User("member", "Member", "project", 0, 0)
+    project_model = Project("project", "Project", str(project), "owner", 0, 0)
+    collaboration_scope = ConversationScope(
+        ConversationScopeKind.DIRECT,
+        user.id,
+        project_model.id,
+        user,
+        project_model,
+        None,
+        None,
+        project_model.workspace_path,
+        "member-chat",
     )
-    manager._announce_result = AsyncMock()
-    status = SubagentStatus(
-        task_id="t1",
-        label="label",
-        task_description="task",
-        started_at=0.0,
-    )
+    observed: list[ConversationScope] = []
 
-    await manager._run_subagent(
-        "t1",
-        "task",
-        "label",
-        {"channel": "websocket", "chat_id": "direct"},
-        status,
-        _runtime(provider),
-        workspace_scope=build_workspace_scope(project, "restricted"),
-    )
+    class ScopeProbeTool(Tool):
+        @property
+        def name(self) -> str:
+            return "scope_probe"
 
-    spec = manager.runner.run.call_args.args[0]
-    assert spec.workspace == project
-    assert spec.tools.get("read_file")._workspace == agent_workspace.resolve()
+        @property
+        def description(self) -> str:
+            return "Record the request capability."
 
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, **kwargs: object) -> str:
+            member_scope = current_member_tool_scope()
+            assert member_scope is not None
+            observed.append(member_scope.scope)
+            return "captured"
+
+    tools = ToolRegistry()
+    tools.register(ScopeProbeTool())
+    monkeypatch.setattr(manager, "_build_tools", lambda **_kwargs: tools)
+    workspace_token = bind_workspace_scope(build_workspace_scope(project, "restricted"))
+    try:
+        with request_context(
+            RequestContext(
+                channel="websocket",
+                chat_id="member-chat",
+                session_key="user:member:project:project:websocket:member-chat",
+                runtime=_runtime(provider),
+                attributes={"collaboration_scope": collaboration_scope},
+            )
+        ):
+            result = await SpawnTool(manager).execute(task="inspect project", wait=True)
+    finally:
+        reset_workspace_scope(workspace_token)
+
+    assert result == "ok"
+    assert observed == [collaboration_scope]
+    prompt = provider.chat_with_retry.await_args_list[0].kwargs["messages"][0]["content"]
+    assert "HOST_SUBAGENT_SECRET" not in str(prompt)
 
 @pytest.mark.asyncio
 async def test_subagent_recovers_from_tool_error_in_same_run(tmp_path):

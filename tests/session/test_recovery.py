@@ -254,6 +254,32 @@ def test_followup_journal_keeps_every_uncommitted_message(tmp_path: Path) -> Non
     ]
 
 
+
+def test_pending_followup_round_trip_preserves_runtime_source(tmp_path: Path) -> None:
+    """A recovered internal follow-up stays runtime-originated rather than becoming a spoofable user turn."""
+    sessions = SessionManager(tmp_path)
+    session = sessions.get_or_create("websocket:chat")
+    followup_id = record_pending_followup(
+        session,
+        InboundMessage(
+            channel="websocket",
+            sender_id="system:recovery",
+            chat_id="chat",
+            content="continue the authorized turn",
+            metadata={"webui": True},
+            source="runtime",
+        ),
+    )
+    assert followup_id is not None
+    sessions.save(session)
+
+    recovered = pending_followups(SessionManager(tmp_path).get_or_create("websocket:chat"))
+
+    assert len(recovered) == 1
+    assert recovered[0].source == "runtime"
+    assert recovered[0].metadata["_recovery_followup_id"] == followup_id
+
+
 def test_requeued_followup_preserves_its_journal_id(tmp_path: Path) -> None:
     """Routing a recovered follow-up into a live turn must remain idempotent."""
     sessions = SessionManager(tmp_path)

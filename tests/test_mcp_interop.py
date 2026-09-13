@@ -3,6 +3,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from nanobot.cli import commands as cli_commands
@@ -161,3 +162,17 @@ def test_codex_config_cli_prints_redacted_fragment_without_creating_codex_files(
     assert secret not in result.output
     assert not config_path.exists()
     assert not (project / ".codex" / "config.toml").exists()
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--include-nanobot"],
+        ["--project-id", "project-1"],
+    ],
+    ids=["removed-bridge-export", "removed-bridge-project-scope"],
+)
+def test_codex_config_refuses_removed_nanobot_bridge_options(arguments: list[str]) -> None:
+    """Codex export cannot advertise the unsupported nanobot MCP bridge."""
+    result = runner.invoke(app, ["mcp", "codex-config", *arguments])
+
+    assert result.exit_code == 2

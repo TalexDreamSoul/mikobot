@@ -28,6 +28,9 @@ from websockets.http11 import Response
 from nanobot.agent.plugins import agent_plugin_mcp_servers
 from nanobot.agent.skills import SkillsLoader
 from nanobot.collaboration import (
+    COLLABORATION_ASSIGNMENT_METADATA_KEY,
+    COLLABORATION_BINDING_METADATA_KEY,
+    COLLABORATION_PROJECT_METADATA_KEY,
     COLLABORATION_USER_METADATA_KEY,
     CollaborationConflictError,
     CollaborationRepository,
@@ -38,8 +41,13 @@ from nanobot.command.builtin import builtin_command_palette
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.cron.session_turns import is_bound_cron_job
 from nanobot.cron.types import CronJob, CronSchedule
-from nanobot.security.workspace_access import WorkspaceScope
+from nanobot.security.workspace_access import (
+    WORKSPACE_SCOPE_METADATA_KEY,
+    WorkspaceScope,
+    build_workspace_scope,
+)
 from nanobot.session.manager import SessionManager
+from nanobot.session.privacy import same_project_owner
 from nanobot.session.recovery import RecoveryActionError
 from nanobot.session.session_handles import (
     SessionHandleResolver,
@@ -135,7 +143,7 @@ from nanobot.webui.session_automations import (
     session_automations_payload,
 )
 from nanobot.webui.session_context import session_context_payload
-from nanobot.webui.session_identity import is_webui_session_key
+from nanobot.webui.session_identity import is_webui_session_key, webui_session_key
 from nanobot.webui.session_list_index import (
     WEBUI_SESSION_INDEX_INTERNAL_FIELDS,
     indexed_workspace_scope,
@@ -573,6 +581,14 @@ class GatewayHTTPHandler:
             self._collaboration_closed = True
 
     def workspace_controls_available(self, connection: Any) -> bool:
+        request = getattr(connection, "request", None)
+        headers = getattr(request, "headers", {})
+        if (
+            getattr(connection, "_nanobot_oidc_principal", None)
+            or (self.oidc.enabled and self.oidc.session(headers) is not None)
+            or _is_trusted_proxy_authenticated_request(connection, headers, self.config)
+        ):
+            return False
         return self._runtime_surface == "native" or _is_localhost(connection)
 
     def workspace_folder_picker_available(
@@ -581,6 +597,8 @@ class GatewayHTTPHandler:
         request: WsRequest,
     ) -> bool:
         return (
+            self.workspace_controls_available(connection)
+            and
             _is_loopback_host(self.config.host)
             and _is_local_browser_request(connection, request.headers)
             and native_folder_picker_available()
@@ -884,30 +902,66 @@ class GatewayHTTPHandler:
             extra_headers=_NO_STORE_HEADERS,
         )
 
-    def _session_owned_by_user_sync(
+    async def _session_owned_by_user(
         self, session_key: str, user: User, local_owner: bool
     ) -> bool:
+        """Check the persisted owner and current project authorization together."""
         if not _is_websocket_channel_session_key(session_key):
             return False
         if self.session_manager is None:
             return local_owner
-        snapshot = self.session_manager.read_session_metadata(session_key)
+        cached = self.session_manager.get_cached(session_key)
+        snapshot = (
+            {"metadata": dict(cached.metadata)}
+            if cached is not None and not cached.policy.persist
+            else await asyncio.to_thread(self.session_manager.read_session_metadata, session_key)
+        )
         if snapshot is None:
             return local_owner
         raw_metadata: object = snapshot.get("metadata")
         metadata = raw_metadata if _is_string_dict(raw_metadata) else {}
         owner = metadata.get(COLLABORATION_USER_METADATA_KEY)
-        return owner == user.id or (local_owner and owner is None)
+        project_id = metadata.get(COLLABORATION_PROJECT_METADATA_KEY)
+        if not any(key in metadata for key in (
+            COLLABORATION_USER_METADATA_KEY, COLLABORATION_PROJECT_METADATA_KEY,
+            COLLABORATION_BINDING_METADATA_KEY, COLLABORATION_ASSIGNMENT_METADATA_KEY,
+        )):
+            return local_owner
+        if owner != user.id or not isinstance(project_id, str) or not project_id:
+            return False
+        binding_id = metadata.get(COLLABORATION_BINDING_METADATA_KEY)
+        if binding_id is not None and not isinstance(binding_id, str):
+            return False
+        if COLLABORATION_ASSIGNMENT_METADATA_KEY in metadata and not isinstance(
+            metadata[COLLABORATION_ASSIGNMENT_METADATA_KEY], bool
+        ):
+            return False
+        try:
+            scope = await self.collaboration.resolve_session_scope(
+                user.id,
+                project_id,
+                channel="websocket",
+                chat_id=session_key.removeprefix("websocket:"),
+                assignment_required=metadata.get(COLLABORATION_ASSIGNMENT_METADATA_KEY) is True,
+                binding_id=binding_id,
+            )
+        except (CollaborationStoreError, ValueError):
+            return False
+        if scope is None or scope.workspace_path is None:
+            return False
+        workspace_metadata = build_workspace_scope(
+            scope.workspace_path, "restricted", source_channel="websocket"
+        ).metadata()
+        if metadata.get(WORKSPACE_SCOPE_METADATA_KEY) != workspace_metadata:
+            # Older WebUI clients saved the host's working-directory projection.
+            # Only an already-authorized project may repair that derived field.
+            session = cached or self.session_manager.get_or_create(session_key)
+            session.metadata[WORKSPACE_SCOPE_METADATA_KEY] = workspace_metadata
+            self.session_manager.save(session)
+        return True
 
-    async def _session_owned_by_user(
-        self, session_key: str, user: User, local_owner: bool
-    ) -> bool:
-        return await asyncio.to_thread(
-            self._session_owned_by_user_sync, session_key, user, local_owner
-        )
-
-    async def can_access_webui_session(self, connection: Any, session_key: str) -> bool:
-        """Enforce per-user ownership for persisted WebUI session operations."""
+    async def prepare_webui_session(self, connection: Any, session_key: str) -> bool:
+        """Pin a server-minted member chat before it is attached or receives input."""
         if not _is_websocket_channel_session_key(session_key):
             return False
         request = getattr(connection, "request", None)
@@ -915,6 +969,72 @@ class GatewayHTTPHandler:
             return False
         try:
             setattr(request, "_nanobot_connection", connection)
+            setattr(request, _WEBUI_MUTATION_REQUEST_ATTR, True)
+            setattr(
+                request,
+                "_nanobot_trusted_proxy_authenticated",
+                _is_trusted_proxy_authenticated_request(connection, request.headers, self.config),
+            )
+            identity = await self._collaboration_identity(request)
+            if identity is None:
+                return False
+            user, local_owner = identity
+            if local_owner:
+                return await self._session_owned_by_user(session_key, user, True)
+            if self.session_manager is None or not user.default_project_id:
+                return False
+            scope = await self.collaboration.resolve_session_scope(
+                user.id, user.default_project_id,
+                channel="websocket", chat_id=session_key.removeprefix("websocket:"),
+            )
+            if scope is None or scope.workspace_path is None:
+                return False
+            existing = self.session_manager.peek(session_key)
+            if existing is not None and (existing.policy.persist or existing.metadata):
+                return False
+            session = existing or self.session_manager.get_or_create(session_key)
+            session.metadata[COLLABORATION_USER_METADATA_KEY] = user.id
+            session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = scope.project_id
+            session.metadata[WORKSPACE_SCOPE_METADATA_KEY] = build_workspace_scope(
+                scope.workspace_path, "restricted", source_channel="websocket"
+            ).metadata()
+            self.session_manager.save(session)
+            return True
+        except (CollaborationStoreError, OSError, ValueError):
+            return False
+
+    async def same_webui_user(self, origin: Any, target: Any) -> bool:
+        """Compare server-derived identities for private UI state fan-out."""
+        users: list[str] = []
+        for connection in (origin, target):
+            request = getattr(connection, "request", None)
+            if request is None:
+                return False
+            setattr(request, "_nanobot_connection", connection)
+            setattr(request, _WEBUI_MUTATION_REQUEST_ATTR, True)
+            setattr(
+                request, "_nanobot_trusted_proxy_authenticated",
+                _is_trusted_proxy_authenticated_request(connection, request.headers, self.config),
+            )
+            try:
+                identity = await self._collaboration_identity(request)
+            except (CollaborationStoreError, ValueError):
+                return False
+            if identity is None:
+                return False
+            users.append(identity[0].id)
+        return users[0] == users[1]
+
+    async def can_access_webui_session(self, connection: Any, session_key: str) -> bool:
+        """Recheck both ownership and membership for every WebUI operation."""
+        if not _is_websocket_channel_session_key(session_key):
+            return False
+        request = getattr(connection, "request", None)
+        if request is None:
+            return False
+        try:
+            setattr(request, "_nanobot_connection", connection)
+            setattr(request, _WEBUI_MUTATION_REQUEST_ATTR, True)
             setattr(
                 request,
                 "_nanobot_trusted_proxy_authenticated",
@@ -929,6 +1049,27 @@ class GatewayHTTPHandler:
             return await self._session_owned_by_user(session_key, user, local_owner)
         except (CollaborationStoreError, ValueError):
             return False
+
+    async def can_reference_webui_session(
+        self, connection: Any, source_key: str, target_key: str
+    ) -> bool:
+        if not await self.can_access_webui_session(connection, source_key):
+            return False
+        if not await self.can_access_webui_session(connection, target_key):
+            return False
+        if self.session_manager is None:
+            return False
+        source = self.session_manager.peek(source_key)
+        target = self.session_manager.peek(target_key)
+        if target is None:
+            return False
+        source_meta = source.metadata if source is not None else {}
+        if (
+            COLLABORATION_USER_METADATA_KEY not in source_meta
+            and COLLABORATION_USER_METADATA_KEY not in target.metadata
+        ):
+            return True
+        return same_project_owner(source_meta, target.metadata)
 
     async def _request_can_access_session(
         self, request: WsRequest, session_key: str
@@ -1150,7 +1291,7 @@ class GatewayHTTPHandler:
             return response
 
         # Media routes
-        response = self._dispatch_media_routes(request, got)
+        response = await self._dispatch_media_routes(request, got)
         if response is not None:
             return response
 
@@ -1885,6 +2026,11 @@ class GatewayHTTPHandler:
         payload = _mutation_payload(request)
         if payload is None:
             return _http_error(400, "invalid recovery payload")
+        chat_id = payload.get("chat_id")
+        if not isinstance(chat_id, str) or not await self._request_can_access_session(
+            request, webui_session_key(chat_id)
+        ):
+            return _http_error(404, "session not found")
         try:
             result = await self.recovery_action(match.group(1), payload)
         except RecoveryActionError as exc:
@@ -1920,25 +2066,27 @@ class GatewayHTTPHandler:
         if isinstance(identity, Response):
             return identity
         user, local_owner = identity
-        payload = await asyncio.to_thread(self._sessions_list_payload, user, local_owner)
+        payload = await self._sessions_list_payload(user, local_owner)
         return _http_json_response(
             payload,
             accept_encoding=_combined_list_header(request.headers, "Accept-Encoding"),
         )
 
-    def _sessions_list_payload(self, user: Any, local_owner: bool) -> dict[str, Any]:
+    async def _sessions_list_payload(self, user: User, local_owner: bool) -> dict[str, Any]:
         assert self.session_manager is not None
         from nanobot.session.webui_turns import websocket_turn_wall_started_at
 
-        sessions = list_webui_sessions(self.session_manager)
-        handles = SessionHandleResolver(self.session_manager).list_all_by_key()
+        sessions = await asyncio.to_thread(list_webui_sessions, self.session_manager)
+        handles = await asyncio.to_thread(
+            SessionHandleResolver(self.session_manager).list_all_by_key
+        )
         cleaned: list[dict[str, Any]] = []
         default_scope: WorkspaceScope | None = None
         for s in sessions:
             key = s.get("key")
             if not (isinstance(key, str) and is_webui_session_key(key)):
                 continue
-            if not self._session_owned_by_user_sync(key, user, local_owner):
+            if not await self._session_owned_by_user(key, user, local_owner):
                 continue
             row = {
                 k: v
@@ -2020,11 +2168,16 @@ class GatewayHTTPHandler:
         )
         data = build_webui_thread_response(
             decoded_key,
-            augment_user_media=self.media.augment_transcript_media,
-            augment_assistant_media=self.media.augment_transcript_media,
+            augment_user_media=lambda paths: self.media.augment_transcript_media(
+                paths, session_key=decoded_key
+            ),
+            augment_assistant_media=lambda paths: self.media.augment_transcript_media(
+                paths, session_key=decoded_key
+            ),
             augment_assistant_text=lambda text: self.media.rewrite_local_markdown_images(
                 text,
                 workspace_path=scope.project_path,
+                session_key=decoded_key,
             ),
             session_messages_loader=load_session_messages,
             active_turn_started_at=active_turn_started_at,
@@ -2347,20 +2500,27 @@ class GatewayHTTPHandler:
 
     # -- Media routes -------------------------------------------------------
 
-    def _dispatch_media_routes(self, request: WsRequest, got: str) -> Response | None:
+    async def _dispatch_media_routes(self, request: WsRequest, got: str) -> Response | None:
         m = re.match(r"^/api/media/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)$", got)
         if m:
-            return self._handle_media_fetch(m.group(1), m.group(2), request)
+            return await self._handle_media_fetch(m.group(1), m.group(2), request)
         return None
 
-    def _handle_media_fetch(
+    async def _handle_media_fetch(
         self, sig: str, payload: str, request: WsRequest | None = None
     ) -> Response:
-        return self.media.serve_signed_media(
-            sig,
-            payload,
-            request=request,
-        )
+        session_key = _query_first(_parse_query(request.path), "session_key") if request else None
+        if session_key is not None:
+            if request is None or not self.check_api_token(request):
+                return _http_error(401, "Unauthorized")
+            if not await self._request_can_access_session(request, session_key):
+                return _http_error(404, "media not found")
+        try:
+            return self.media.serve_signed_media(
+                sig, payload, request=request, session_key=session_key
+            )
+        except (OSError, ValueError):
+            return _http_error(404, "media not found")
 
     # -- Misc routes --------------------------------------------------------
 
@@ -2374,7 +2534,7 @@ class GatewayHTTPHandler:
         if got == "/api/workspaces/pick-folder":
             return await self._handle_workspace_folder_picker(connection, request)
         if got == "/api/workspaces":
-            return self._handle_workspaces(connection, request)
+            return await self._handle_workspaces(connection, request)
         if got == "/api/webui/skills/search":
             return await self._handle_webui_skills_search(request)
         if got == "/api/webui/skills/trending":
@@ -2393,9 +2553,9 @@ class GatewayHTTPHandler:
         if m:
             return self._handle_webui_skill_detail(request, m.group(1))
         if got == "/api/webui/sidebar-state":
-            return self._handle_webui_sidebar_state(request)
+            return await self._handle_webui_sidebar_state(request)
         if got == "/api/webui/sidebar-state/update":
-            return self._handle_webui_sidebar_state_update(request)
+            return await self._handle_webui_sidebar_state_update(request)
         return None
 
     def _handle_commands(self, request: WsRequest) -> Response:
@@ -2403,9 +2563,33 @@ class GatewayHTTPHandler:
             return _http_error(401, "Unauthorized")
         return _http_json_response({"commands": builtin_command_palette()})
 
-    def _handle_workspaces(self, connection: Any, request: WsRequest) -> Response:
+    async def _handle_workspaces(self, connection: Any, request: WsRequest) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
+        identity = await self._collaboration_user_or_error(request)
+        if isinstance(identity, Response):
+            return identity
+        user, local_owner = identity
+        if not local_owner:
+            project = (
+                await self.collaboration.get_project(user.id, user.default_project_id)
+                if user.default_project_id else None
+            )
+            if project is None:
+                return _http_error(403, "project authorization is unavailable")
+            scope = build_workspace_scope(
+                project.workspace_path, "restricted", source_channel="websocket"
+            )
+            return _http_json_response({
+                "schema_version": 1,
+                "default_access_mode": "default",
+                "default_scope": scope.payload(),
+                "controls": {
+                    "can_change_project": False,
+                    "can_use_full_access": False,
+                    "can_pick_folder": False,
+                },
+            })
         return _http_json_response(
             self.workspaces.payload(
                 controls_available=self.workspace_controls_available(connection),
@@ -2620,14 +2804,25 @@ class GatewayHTTPHandler:
             return _http_error(404, "skill not found")
         return _http_json_response(payload)
 
-    def _handle_webui_sidebar_state(self, request: WsRequest) -> Response:
+    async def _handle_webui_sidebar_state(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
-        return _http_json_response(read_webui_sidebar_state())
+        identity = await self._collaboration_user_or_error(request)
+        if isinstance(identity, Response):
+            return identity
+        user, local_owner = identity
+        state = await asyncio.to_thread(
+            read_webui_sidebar_state, None if local_owner else user.id
+        )
+        return _http_json_response(state, extra_headers=_NO_STORE_HEADERS)
 
-    def _handle_webui_sidebar_state_update(self, request: WsRequest) -> Response:
+    async def _handle_webui_sidebar_state_update(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
+        identity = await self._collaboration_user_or_error(request)
+        if isinstance(identity, Response):
+            return identity
+        user, local_owner = identity
         payload = _mutation_payload(request)
         state_value = payload.get("state") if payload is not None else None
         if state_value is None:
@@ -2635,7 +2830,9 @@ class GatewayHTTPHandler:
         if not _is_string_dict(state_value):
             return _http_error(400, "state must be an object")
         try:
-            state = write_webui_sidebar_state(state_value)
+            state = await asyncio.to_thread(
+                write_webui_sidebar_state, state_value, None if local_owner else user.id
+            )
         except ValueError as e:
             return _http_error(400, str(e))
         except OSError:

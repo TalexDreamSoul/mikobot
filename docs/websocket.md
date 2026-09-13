@@ -401,13 +401,19 @@ Legacy clients that only send plain text or `{"content": ...}` keep working unch
 
 ### Security boundary
 
-`chat_id` is a *capability*: anyone holding a valid WebSocket auth credential and the chat_id can attach to that conversation and see its output. This is safe for nanobot's local, single-user model. Multi-tenant deployments should namespace chat_ids per user (or introduce a per-tenant auth gate) — nanobot does not do this today.
+For local token-authenticated owner sessions, `chat_id` retains the inherited
+single-user capability model. OIDC and trusted-proxy member sessions additionally
+require persisted user/project ownership and current project authorization. Knowing
+another chat ID is not sufficient. The server rechecks attach, message, replay,
+recovery and streaming access; a previously attached socket is not a permanent grant.
+Context references require the same user and project. Member media URLs are bound
+to that session and checked again when fetched.
 
 ## Security Notes
 
 - **Timing-safe comparison**: Static token validation uses `hmac.compare_digest` to prevent timing attacks.
 - **Defense in depth**: `allowFrom` is checked at both the HTTP handshake level and the message level.
-- **chat_id as capability**: see [Multi-chat multiplexing](#multi-chat-multiplexing). Auth on the WebSocket handshake is the single line of defense; callers who pass it can attach to any chat_id they know.
+- **Member object authorization**: session ownership and project membership supplement handshake authentication; see [Security boundary](#security-boundary).
 - **TLS enforcement**: When SSL is enabled, TLSv1.2 is the minimum allowed version.
 - **Default-secure**: `websocketRequiresToken` defaults to `true`. Explicitly set it to `false` only on trusted networks.
 

@@ -38,6 +38,8 @@ import { cn } from "@/lib/utils";
 interface SettingsPageProps {
   controller: SettingsController;
   theme: "light" | "dark";
+  isAdmin: boolean;
+  restrictedNotice: boolean;
   showSidebar: boolean;
   onToggleTheme: () => void;
   onBackToChat: () => void;
@@ -50,6 +52,8 @@ interface SettingsPageProps {
 export function SettingsPage({
   controller,
   theme,
+  isAdmin,
+  restrictedNotice,
   showSidebar,
   onToggleTheme,
   onBackToChat,
@@ -219,6 +223,36 @@ export function SettingsPage({
   } = controller;
 
   const renderSection = () => {
+    if (activeSection === "appearance") {
+      return (
+        <AppearanceSettings
+          theme={theme}
+          onToggleTheme={onToggleTheme}
+          localPrefs={localPrefs}
+          onChangeLocalPrefs={setLocalPrefs}
+        />
+      );
+    }
+    if (activeSection === "automations") {
+      return (
+        <AutomationsSettings
+          payload={automations}
+          loading={automationsLoading}
+          query={automationsQuery}
+          filter={automationsFilter}
+          sort={automationsSort}
+          actionKey={automationAction}
+          error={automationsError}
+          onQueryChange={setAutomationsQuery}
+          onFilterChange={setAutomationsFilter}
+          onSortChange={setAutomationsSort}
+          onAction={handleAutomationAction}
+          onRequestEdit={setAutomationPendingEdit}
+          onRequestDelete={setAutomationPendingDelete}
+          onBackToChat={onBackToChat}
+        />
+      );
+    }
     if (!settings) return null;
     switch (activeSection) {
       case "overview":
@@ -228,15 +262,6 @@ export function SettingsPage({
             requiresRestart={hasPendingRestart}
             showBrandLogos={localPrefs.brandLogos}
             onSelectSection={selectSection}
-          />
-        );
-      case "appearance":
-        return (
-          <AppearanceSettings
-            theme={theme}
-            onToggleTheme={onToggleTheme}
-            localPrefs={localPrefs}
-            onChangeLocalPrefs={setLocalPrefs}
           />
         );
       case "models":
@@ -460,25 +485,6 @@ export function SettingsPage({
             isRestarting={isRestarting || hostEngineApplying}
           />
         );
-      case "automations":
-        return (
-          <AutomationsSettings
-            payload={automations}
-            loading={automationsLoading}
-            query={automationsQuery}
-            filter={automationsFilter}
-            sort={automationsSort}
-            actionKey={automationAction}
-            error={automationsError}
-            onQueryChange={setAutomationsQuery}
-            onFilterChange={setAutomationsFilter}
-            onSortChange={setAutomationsSort}
-            onAction={handleAutomationAction}
-            onRequestEdit={setAutomationPendingEdit}
-            onRequestDelete={setAutomationPendingDelete}
-            onBackToChat={onBackToChat}
-          />
-        );
       case "skills":
         return <SkillsCatalogSettings skills={skills} />;
       case "extensions":
@@ -533,6 +539,7 @@ export function SettingsPage({
           onSelectSection={selectSection}
           onBackToChat={onBackToChat}
           onLogout={onLogout}
+          isAdmin={isAdmin}
           hostChromeInset={hostChromeInset}
         />
       ) : null}
@@ -638,6 +645,16 @@ export function SettingsPage({
             </div>
           ) : null}
 
+          {restrictedNotice ? (
+            <div role="status" className="mb-5 rounded-control border border-border/55 bg-settings-surface px-4 py-3">
+              <p className="text-sm font-medium text-foreground">
+                {t("settings.memberAccess.title")}
+              </p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                {t("settings.memberAccess.description")}
+              </p>
+            </div>
+          ) : null}
           {loading ? (
             <div className="flex h-48 items-center justify-center rounded-panel bg-settings-surface text-sm text-muted-foreground">
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -649,7 +666,7 @@ export function SettingsPage({
                 <span className="max-w-[520px] text-sm text-muted-foreground">{error}</span>
               </SettingsRow>
             </SettingsGroup>
-          ) : settings ? (
+          ) : settings || activeSection === "appearance" || activeSection === "automations" ? (
             <div
               className={cn(
                 "space-y-5",

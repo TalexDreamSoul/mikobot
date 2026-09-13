@@ -71,6 +71,7 @@ interface SidebarProps {
   onProjectsIntent?: () => void;
   onChannelsIntent?: () => void;
   onSettingsIntent?: () => void;
+  showAdminNavigation?: boolean;
   onOpenSearch: () => void;
   activeUtility?: "projects" | "channels" | "apps" | "skills" | "automations" | null;
   onToggleArchived: () => void;
@@ -221,24 +222,28 @@ export function Sidebar(props: SidebarProps) {
           selectionRef={activeActionRef}
           icon={<Cable className="h-4 w-4" />}
         />
-        <SidebarActionButton
-          collapsed={collapsed}
-          label={t("sidebar.apps")}
-          onClick={props.onOpenApps}
-          onIntent={props.onSettingsIntent}
-          active={props.activeUtility === "apps"}
-          selectionRef={activeActionRef}
-          icon={<Blocks className="h-4 w-4" />}
-        />
-        <SidebarActionButton
-          collapsed={collapsed}
-          label={t("sidebar.skills.title")}
-          onClick={props.onOpenSkills}
-          onIntent={props.onSettingsIntent}
-          active={props.activeUtility === "skills"}
-          selectionRef={activeActionRef}
-          icon={<Brain className="h-4 w-4" />}
-        />
+        {props.showAdminNavigation ? (
+          <>
+            <SidebarActionButton
+              collapsed={collapsed}
+              label={t("sidebar.apps")}
+              onClick={props.onOpenApps}
+              onIntent={props.onSettingsIntent}
+              active={props.activeUtility === "apps"}
+              selectionRef={activeActionRef}
+              icon={<Blocks className="h-4 w-4" />}
+            />
+            <SidebarActionButton
+              collapsed={collapsed}
+              label={t("sidebar.skills.title")}
+              onClick={props.onOpenSkills}
+              onIntent={props.onSettingsIntent}
+              active={props.activeUtility === "skills"}
+              selectionRef={activeActionRef}
+              icon={<Brain className="h-4 w-4" />}
+            />
+          </>
+        ) : null}
         <SidebarActionButton
           collapsed={collapsed}
           label={t("sidebar.automations", { defaultValue: "Automations" })}

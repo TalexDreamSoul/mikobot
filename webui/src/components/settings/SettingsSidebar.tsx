@@ -60,17 +60,22 @@ export function SettingsSidebar({
   onBackToChat,
   onLogout,
   hostChromeInset,
+  isAdmin,
 }: {
   activeSection: SettingsSectionKey;
   onSelectSection: (section: SettingsSectionKey) => void;
   onBackToChat: () => void;
   onLogout?: () => void;
   hostChromeInset?: boolean;
+  isAdmin: boolean;
 }) {
   const { t } = useTranslation();
   const activeNavItemRef = useRef<HTMLButtonElement>(null);
-  const activeItem = SETTINGS_NAV_ITEMS.find((item) => item.key === activeSection)
-    ?? SETTINGS_NAV_ITEMS[0];
+  const navItems = isAdmin
+    ? SETTINGS_NAV_ITEMS
+    : SETTINGS_NAV_ITEMS.filter((item) => item.key === "appearance");
+  const activeItem = navItems.find((item) => item.key === activeSection)
+    ?? navItems[0];
   const ActiveIcon = activeItem.icon;
   const activeLabel = t(`settings.nav.${activeItem.key}`, {
     defaultValue: activeItem.fallback,
@@ -118,7 +123,7 @@ export function SettingsSidebar({
             sideOffset={6}
             className="w-[var(--radix-dropdown-menu-trigger-width)] max-w-[calc(100vw-1.5rem)]"
           >
-            {SETTINGS_NAV_ITEMS.map(({ key, icon: Icon, fallback }) => {
+            {navItems.map(({ key, icon: Icon, fallback }) => {
               const active = key === activeSection;
               return (
                 <DropdownMenuItem
@@ -147,7 +152,7 @@ export function SettingsSidebar({
           scope="settings"
           className="relative hidden space-y-1 lg:block"
         >
-          {SETTINGS_NAV_ITEMS.map(({ key, icon: Icon, fallback }) => {
+          {navItems.map(({ key, icon: Icon, fallback }) => {
             const active = key === activeSection;
             return (
               <button

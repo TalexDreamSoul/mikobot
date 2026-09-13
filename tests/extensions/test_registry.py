@@ -104,6 +104,7 @@ def _component(
     name: str = "operate",
     *,
     actions: frozenset[ExtensionAction] = frozenset({_ENABLE}),
+    revision: str | None = None,
 ) -> ExtensionComponentDescriptor:
     return ExtensionComponentDescriptor(
         id=extension_component_id(package_id, _TOOL, name),
@@ -112,6 +113,7 @@ def _component(
         name=name,
         display_name=f"{name} tool",
         actions=actions,
+        revision=revision,
     )
 
 
@@ -612,7 +614,7 @@ async def test_external_enable_and_install_require_current_revision_and_acknowle
 async def test_execute_dispatches_only_to_the_exact_owner_and_normalizes_result_message() -> None:
     first = _package("first")
     second = _package("second")
-    target = _component(second.id, "operate")
+    target = _component(second.id, "operate", revision="revision-1")
     second = _package("second", actions=frozenset(), components=(target,))
     untrusted_result = ExtensionActionResult(
         ok=True,
@@ -633,7 +635,7 @@ async def test_execute_dispatches_only_to_the_exact_owner_and_normalizes_result_
     registry.register(first_adapter)
     registry.register(second_adapter)
 
-    result = await registry.execute(_request(target.id))
+    result = await registry.execute(_request(target.id, expected_revision=target.revision))
 
     assert first_adapter.requests == []
     assert [request.target_id for request in second_adapter.requests] == [target.id]
@@ -645,7 +647,7 @@ async def test_execute_dispatches_only_to_the_exact_owner_and_normalizes_result_
 
 @pytest.mark.asyncio
 async def test_execute_rejects_adapter_result_for_another_target() -> None:
-    package = _package("owner")
+    package = _package("owner", revision="revision-1")
     other = _package("other")
     adapter = _Adapter(
         "owner",
@@ -663,7 +665,7 @@ async def test_execute_rejects_adapter_result_for_another_target() -> None:
     registry.register(adapter)
 
     with pytest.raises(ExtensionRegistryError):
-        await registry.execute(_request(package.id))
+        await registry.execute(_request(package.id, expected_revision=package.revision))
 
     assert [request.target_id for request in adapter.requests] == [package.id]
 

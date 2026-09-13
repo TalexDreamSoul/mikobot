@@ -47,7 +47,6 @@ from nanobot.webui.session_access import (
     session_mentions_runtime_context,
 )
 from nanobot.webui.session_identity import is_valid_webui_chat_id, webui_session_key
-from nanobot.webui.sidebar_state import write_webui_sidebar_state
 from nanobot.webui.temporary_chats import TemporaryChatError
 from nanobot.webui.transcription_ws import webui_transcription_event
 
@@ -210,9 +209,12 @@ class WebUICommandRouter:
         self.gateway.endpoint.discard_connection(connection)
         self.discard_request_lock_if_idle(connection)
 
-    async def broadcast_webui_event(self, event: str, **fields: Any) -> None:
+    async def broadcast_webui_event(
+        self, event: str, *, origin: ServerConnection, **fields: Any
+    ) -> None:
         for connection in tuple(self._webui_connections):
-            await self._transport.webui_send_event(connection, event, **fields)
+            if connection is origin or await self.gateway.same_webui_user(origin, connection):
+                await self._transport.webui_send_event(connection, event, **fields)
 
     async def broadcast_user_message(
         self,
@@ -236,7 +238,9 @@ class WebUICommandRouter:
         }
         if turn_id is not None:
             body["turn_id"] = turn_id
-        media = self._media.augment_transcript_user_media(media_paths)
+        media = self._media.augment_transcript_user_media(
+            media_paths, session_key=webui_session_key(chat_id)
+        )
         for attachment, name in zip(media, media_names, strict=False):
             if name:
                 attachment["name"] = name
@@ -295,11 +299,22 @@ class WebUICommandRouter:
             return
         if command_type == "new_chat":
             new_id = str(uuid.uuid4())
+            if trusted_principal is not None and not await self.gateway.prepare_webui_session(
+                connection, webui_session_key(new_id)
+            ):
+                await self._transport.webui_send_event(connection, "error", detail="access_denied")
+                return
             scope = await self.workspace_scope_or_error(
                 connection,
-                lambda: self._workspaces.scope_for_new_chat(
-                    envelope,
-                    controls_available=self.workspace_controls_available(connection),
+                lambda: (
+                    self._workspaces.scope_from_envelope(
+                        envelope, session_key=webui_session_key(new_id), controls_available=False
+                    )
+                    if trusted_principal is not None
+                    else self._workspaces.scope_for_new_chat(
+                        envelope,
+                        controls_available=self.workspace_controls_available(connection),
+                    )
                 ),
             )
             if scope is None:
@@ -329,6 +344,12 @@ class WebUICommandRouter:
                 )
             except TemporaryChatError as exc:
                 await self._transport.webui_send_event(connection, "error", detail=exc.detail)
+                return
+            if trusted_principal is not None and not await self.gateway.prepare_webui_session(
+                connection, webui_session_key(new_id)
+            ):
+                await self.discard_owned_chat(connection, new_id)
+                await self._transport.webui_send_event(connection, "error", detail="access_denied")
                 return
             self._transport.webui_attach(connection, new_id)
             await self._transport.webui_send_event(
@@ -410,19 +431,11 @@ class WebUICommandRouter:
                     detail="invalid_sidebar_state",
                 )
                 return
-            try:
-                saved_state = await asyncio.to_thread(
-                    write_webui_sidebar_state,
-                    cast(dict[str, Any], state),
-                )
-            except (OSError, ValueError):
+            result = await self.execute_webui_request(connection, "sidebar.update", {"state": state})
+            if result.status is not None and result.status >= 400:
                 await self._transport.webui_send_event(
-                    connection,
-                    "error",
-                    detail="invalid_sidebar_state",
+                    connection, "error", detail="invalid_sidebar_state"
                 )
-                return
-            await self.broadcast_webui_event("sidebar_state_updated", state=saved_state)
             return
         if command_type == "set_workspace_scope":
             chat_id = envelope.get("chat_id")
@@ -431,6 +444,13 @@ class WebUICommandRouter:
                     connection,
                     "error",
                     detail="invalid chat_id",
+                )
+                return
+            if not await self.gateway.can_access_webui_session(
+                connection, webui_session_key(chat_id)
+            ):
+                await self._transport.webui_send_event(
+                    connection, "error", detail="session_not_found", chat_id=chat_id
                 )
                 return
             try:
@@ -513,14 +533,10 @@ class WebUICommandRouter:
                 **rejection_fields,
             )
             return
-        # A verified proxy principal is confined to sessions it has already
-        # attached through an authorized command, or owns persistently. This
-        # runs before attachment, transcript hydration, or message routing.
-        if trusted_principal is not None and (
-            chat_id not in self._transport.webui_connection_chats(connection)
-            and not await self.gateway.can_access_webui_session(
-                connection, webui_session_key(chat_id)
-            )
+        # An attachment is a subscription, not a durable grant. Recheck before
+        # storing media/transcripts or routing a message, including after revocation.
+        if trusted_principal is not None and not await self.gateway.can_access_webui_session(
+            connection, webui_session_key(chat_id)
         ):
             await self._transport.webui_send_event(
                 connection,
@@ -577,7 +593,7 @@ class WebUICommandRouter:
                 )
                 return
             media_paths, reason = self._media.store_inbound_attachments(
-                cast(list[Any], raw_media)
+                cast(list[Any], raw_media), session_key=webui_session_key(chat_id)
             )
             if reason is not None:
                 await self._transport.webui_send_event(
@@ -664,8 +680,8 @@ class WebUICommandRouter:
         if trusted_webui and self._session_access is not None:
             permitted_mentions: list[dict[str, str]] = []
             for mention in normalize_session_mentions_metadata(envelope.get("session_mentions")):
-                if await self.gateway.can_access_webui_session(
-                    connection, mention["session_key"]
+                if await self.gateway.can_reference_webui_session(
+                    connection, webui_session_key(chat_id), mention["session_key"]
                 ):
                     permitted_mentions.append(mention)
             session_mentions = await asyncio.to_thread(
@@ -963,6 +979,7 @@ class WebUICommandRouter:
                     if action == "sidebar.update" and isinstance(result, dict):
                         await self.broadcast_webui_event(
                             "sidebar_state_updated",
+                            origin=connection,
                             state=result,
                         )
                     return WebUIRequestResult(result=result)

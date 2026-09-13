@@ -24,6 +24,22 @@ def _isolate_nanobot_log_activation() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_home_and_runtime_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Keep implicit config and home-derived runtime state inside each test."""
+    home = tmp_path.parent / f"{tmp_path.name}-home"
+    home.mkdir()
+    config_path = home / ".nanobot" / "config.json"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOMEDRIVE", str(home.anchor))
+    monkeypatch.setenv("HOMEPATH", str(home))
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+    yield
+
+@pytest.fixture(autouse=True)
 def _isolate_sessions_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Redirect session storage away from the real active config data directory.
 

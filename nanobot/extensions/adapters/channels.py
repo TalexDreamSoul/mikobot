@@ -701,19 +701,20 @@ class ChannelExtensionAdapter:
     ) -> ExtensionLifecycle:
         if not dependencies_ready:
             return ExtensionLifecycle.UNAVAILABLE
+        if status is not None:
+            if status.get("pairing_only") is True:
+                return ExtensionLifecycle.RELOADING
+            state = status.get("state")
+            if state == "running":
+                # The runtime owner is authoritative while a requested stop is still
+                # active; desired config alone must not claim that it is disabled.
+                return ExtensionLifecycle.ENABLED
+            if state == "starting":
+                return ExtensionLifecycle.ENABLING
         if not desired:
             return ExtensionLifecycle.DISABLED
         if not configured:
             return ExtensionLifecycle.UNAVAILABLE
-        if status is None:
-            return ExtensionLifecycle.FAILED
-        if status.get("pairing_only") is True:
-            return ExtensionLifecycle.RELOADING
-        state = status.get("state")
-        if state == "starting":
-            return ExtensionLifecycle.ENABLING
-        if state == "running":
-            return ExtensionLifecycle.ENABLED
         return ExtensionLifecycle.FAILED
 
     @staticmethod

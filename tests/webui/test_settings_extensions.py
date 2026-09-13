@@ -857,9 +857,8 @@ async def test_a_failed_reload_after_a_successful_marker_write_is_reported_truth
     status, body = await _dispatch(router, _enable_request())
 
     assert status == 200
-    # The adapter succeeded, so the marker stands and the lifecycle is real; only the
-    # running toolset is behind, which is what `requires_restart` has to say.
-    assert body["lifecycle"] == "enabled"
+    # The durable marker remains, but a runtime that requires restart is never displayed as live.
+    assert body["lifecycle"] == "restart_required"
     assert body["ok"] is False
     assert body["hot_reload"]["ok"] is False
     assert body["requires_restart"] is True

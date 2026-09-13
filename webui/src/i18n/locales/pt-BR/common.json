@@ -653,7 +653,7 @@
       "enable": "Habilitar suporte a tracing"
     },
     "apps": {
-      "description": "Adicione ferramentas ao nanobot e mencione-as com @ na conversa.",
+      "description": "Apps gerencia os recursos que você pode chamar no chat. Os pacotes do runtime do host e a integridade atual são mostrados separadamente em Extensões.",
       "cliLabel": "Aplicativo",
       "mcpLabel": "MCP",
       "channelLabel": "Canal",

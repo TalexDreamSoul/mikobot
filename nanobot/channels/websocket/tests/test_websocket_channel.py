@@ -1,6 +1,7 @@
 """Unit and lightweight integration tests for the WebSocket channel."""
 
 import asyncio
+import errno
 import json
 import time
 import uuid
@@ -232,6 +233,53 @@ async def test_start_extends_http_open_timeout_for_slow_settings_routes(
     await channel.start()
 
     assert seen["open_timeout"] >= 300
+
+
+class _ListenerSocket:
+    def __init__(self, *, accepting: int | OSError = 1, fd: int = 7) -> None:
+        self._accepting = accepting
+        self._fd = fd
+
+    def fileno(self) -> int:
+        return self._fd
+
+    def getsockopt(self, _level: int, _option: int) -> int:
+        if isinstance(self._accepting, OSError):
+            raise self._accepting
+        return self._accepting
+
+
+def _listener_server(sock: _ListenerSocket, *, serving: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(sockets=[sock], is_serving=lambda: serving)
+
+
+@pytest.mark.parametrize(
+    "unsupported_errno",
+    [errno.ENOPROTOOPT, errno.ENOTSUP],
+    ids=["protocol-option-unsupported", "socket-option-unsupported"],
+)
+def test_listener_readiness_accepts_live_server_when_kernel_hides_acceptconn(
+    unsupported_errno: int,
+) -> None:
+    """A live asyncio server stays ready on platforms that do not expose SO_ACCEPTCONN."""
+    server = _listener_server(_ListenerSocket(accepting=OSError(unsupported_errno, "unsupported")))
+
+    assert WebSocketChannel._listener_is_serving(server)
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        _listener_server(_ListenerSocket(accepting=0)),
+        _listener_server(_ListenerSocket(), serving=False),
+        _listener_server(_ListenerSocket(fd=-1)),
+        _listener_server(_ListenerSocket(accepting=OSError(errno.EINVAL, "invalid"))),
+    ],
+    ids=["not-accepting", "not-serving", "closed-descriptor", "unexpected-socket-error"],
+)
+def test_listener_readiness_rejects_non_listening_or_unexpected_error(server: SimpleNamespace) -> None:
+    """Only the two documented unsupported-option errors may bypass an accept-state read."""
+    assert not WebSocketChannel._listener_is_serving(server)
 
 
 @pytest.fixture(autouse=True)
@@ -1500,6 +1548,7 @@ async def test_webui_message_scope_inherits_persisted_session_scope(
     )
     conn = AsyncMock()
     conn.remote_address = ("127.0.0.1", 50123)
+    conn._nanobot_oidc_principal = None
 
     await channel._dispatch_envelope(
         conn,
@@ -1669,6 +1718,7 @@ async def test_webui_scope_expands_home_project_path(
     )
     conn = AsyncMock()
     conn.remote_address = ("127.0.0.1", 50123)
+    conn._nanobot_oidc_principal = None
 
     await channel._dispatch_envelope(
         conn,
@@ -1743,6 +1793,7 @@ async def test_webui_scope_rejects_running_scope_change(bus: MagicMock, tmp_path
     )
     conn = AsyncMock()
     conn.remote_address = ("127.0.0.1", 50123)
+    conn._nanobot_oidc_principal = None
 
     await channel._dispatch_envelope(
         conn,
@@ -1801,6 +1852,7 @@ async def test_webui_set_workspace_scope_rejects_running_chat(bus: MagicMock, tm
     )
     conn = AsyncMock()
     conn.remote_address = ("127.0.0.1", 50123)
+    conn._nanobot_oidc_principal = None
 
     await channel._dispatch_envelope(
         conn,
@@ -2028,6 +2080,7 @@ async def test_native_webui_scope_allows_custom_scope_without_loopback(
     )
     conn = AsyncMock()
     conn.remote_address = None
+    conn._nanobot_oidc_principal = None
 
     await channel._dispatch_envelope(
         conn,
@@ -5999,3 +6052,44 @@ async def test_handle_webui_thread_get_does_not_backfill_hidden_subagent_result(
     body = json.loads(resp.body.decode())
     assert [message["role"] for message in body["messages"]] == ["assistant"]
     assert [message["content"] for message in body["messages"]] == ["subagent summary"]
+
+
+@pytest.mark.asyncio
+async def test_attached_proxy_socket_rechecks_session_authorization_before_message(
+    bus: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revocation after attach prevents the next member message from persisting or running."""
+    channel = _ch(bus)
+    connection = AsyncMock()
+    connection.remote_address = ("127.0.0.1", 50123)
+    channel._attach(connection, "revoked-after-attach")
+    authorize = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        type(channel.gateway),
+        "can_access_webui_session",
+        authorize,
+    )
+
+    await channel._dispatch_envelope(
+        connection,
+        "browser-client",
+        {
+            "type": "message",
+            "chat_id": "revoked-after-attach",
+            "content": "must not persist or run",
+            "webui": True,
+            "turn_id": "revoked-turn",
+        },
+        trusted_principal="proxy:member",
+    )
+
+    assert json.loads(connection.send.await_args.args[0]) == {
+        "event": "error",
+        "detail": "session_not_found",
+        "chat_id": "revoked-after-attach",
+        "turn_id": "revoked-turn",
+    }
+    authorize.assert_awaited_once()
+    bus.publish_inbound.assert_not_awaited()
+    assert read_transcript_lines("websocket:revoked-after-attach") == []

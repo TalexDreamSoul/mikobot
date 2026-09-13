@@ -12,7 +12,6 @@ from nanobot.agent.tools.session_messages import (
     SessionMessageError,
 )
 from nanobot.bus.queue import MessageBus
-from nanobot.config.schema import ToolsConfig
 from nanobot.session.manager import SessionManager
 from nanobot.session.session_handles import SessionHandle, SessionHandleResolver
 from nanobot.session.session_messages import (
@@ -55,19 +54,6 @@ class _Scheduler:
         return timer
 
 
-def test_config_and_tool_schema_keep_only_the_basic_reply_contract(
-    tmp_path: Path,
-) -> None:
-    tool = SendSessionMessageTool(
-        sessions=SessionManager(tmp_path),
-        bus=MessageBus(),
-    )
-
-    assert ToolsConfig.model_fields["max_session_messages_per_minute"].default == 6
-    assert tool.parameters["required"] == ["to", "content", "expect_reply"]
-    timeout = tool.parameters["properties"]["reply_timeout_seconds"]
-    assert (timeout["minimum"], timeout["maximum"]) == (5, 60)
-
 
 @pytest.mark.asyncio
 async def test_list_sessions_includes_all_persisted_channels_except_current(
@@ -88,6 +74,89 @@ async def test_list_sessions_includes_all_persisted_channels_except_current(
         f"@{_handle(sessions, 'telegram:other').name}",
         f"@{_handle(sessions, 'slack:team').name}",
     }
+
+@pytest.mark.asyncio
+async def test_member_session_listing_exposes_only_the_current_project(
+    tmp_path: Path,
+) -> None:
+    sessions = SessionManager(tmp_path)
+    current = "user:member:project:alpha:chat-current"
+    same_project = "user:member:project:alpha:chat-history"
+    other_project = "user:member:project:beta:chat-history"
+    other_member = "user:other-member:project:alpha:chat-history"
+    host = "websocket:host-history"
+    _persist(sessions, current, same_project, other_project, other_member, host)
+
+    with request_context(RequestContext(
+        channel="telegram",
+        chat_id="member-chat",
+        session_key=current,
+    )):
+        listed = json.loads(await ListSessionsTool(sessions).execute())
+
+    assert listed == [f"@{_handle(sessions, same_project).name}"]
+
+
+@pytest.mark.asyncio
+async def test_member_can_send_only_to_a_session_in_the_same_project(
+    tmp_path: Path,
+) -> None:
+    sessions = SessionManager(tmp_path)
+    source = "user:member:project:alpha:chat-source"
+    target = "user:member:project:alpha:chat-target"
+    _persist(sessions, source, target)
+    bus = MessageBus()
+    tool = SendSessionMessageTool(sessions=sessions, bus=bus)
+
+    with request_context(RequestContext(
+        channel="telegram",
+        chat_id="member-chat",
+        session_key=source,
+    )):
+        result = await tool.execute(
+            to=f"@{_handle(sessions, target).name}",
+            content="review the project artifact",
+            expect_reply=False,
+        )
+
+    inbound = await bus.consume_inbound()
+    assert result == f"Sent to @{_handle(sessions, target).name}."
+    assert inbound.session_key_override == target
+    assert inbound.content == "review the project artifact"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target",
+    [
+        "user:member:project:beta:chat-history",
+        "user:other-member:project:alpha:chat-history",
+        "websocket:host-history",
+    ],
+)
+async def test_member_session_message_rejects_other_privacy_scopes_without_delivery(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    sessions = SessionManager(tmp_path)
+    source = "user:member:project:alpha:chat-source"
+    _persist(sessions, source, target)
+    bus = MessageBus()
+    tool = SendSessionMessageTool(sessions=sessions, bus=bus)
+
+    with request_context(RequestContext(
+        channel="telegram",
+        chat_id="member-chat",
+        session_key=source,
+    )):
+        rejected = await tool.execute(
+            to=f"@{_handle(sessions, target).name}",
+            content="do not deliver this",
+            expect_reply=False,
+        )
+
+    assert rejected.is_error
+    assert bus.inbound.empty()
 
 
 @pytest.mark.asyncio

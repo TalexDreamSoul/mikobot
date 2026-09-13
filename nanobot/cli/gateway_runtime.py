@@ -644,64 +644,79 @@ def _run_gateway(
         async def _silent(*_args: Any, **_kwargs: Any) -> None:
             pass
 
-        # Dream is an internal job — run directly, not through the agent loop.
+        # Dream journals are owner-scoped. Never feed a member row from the
+        # legacy host journal into host Dream; each live member project receives
+        # its own authorized project MemoryStore.
         if job.name == "dream":
             from nanobot.agent.memory import MemoryStore
 
-            dream_session_key = MemoryStore.dream_session_key
-            prune_dream_sessions = MemoryStore.prune_dream_sessions
+            targets: list[tuple[MemoryStore, object | None]] = [(agent.context.memory, None)]
+            seen = {agent.context.memory.workspace.expanduser().resolve()}
+            for info in agent.sessions.list_sessions():
+                key = info.get("key")
+                if not isinstance(key, str):
+                    continue
+                session = agent.sessions.peek(key)
+                if session is None:
+                    continue
+                try:
+                    store = await agent.memory_store_for_session(session)
+                    scope = await agent.collaboration_scope_for_session(session)
+                except Exception:
+                    continue
+                if store is None or store.workspace.expanduser().resolve() in seen:
+                    continue
+                seen.add(store.workspace.expanduser().resolve())
+                targets.append((store, scope))
 
-            store = agent.context.memory
-            resp = None
-            diff_body = ""
-            try:
-                result = store.build_dream_prompt()
-                if result is None:
-                    logger.info("Dream: nothing to process")
-                    return None
-                prompt, last_cursor = result
-                key = dream_session_key()
-                dream_runtime = agent.dream_runtime()
-                await mcp_provider.connect()
-                resp = await agent.process_direct(
-                    prompt,
-                    session_key=key,
-                    ephemeral=True,
-                    tools=store.build_dream_tools(),
-                    on_progress=_silent,
-                    runtime=dream_runtime,
-                )
-                # The real file delta grounds the audit record; normal completion
-                # decides whether this history batch has finished processing.
-                diff_body = store.dream_content_diff()
-                completed = MemoryStore.dream_run_completed(resp)
-                if completed:
-                    store.set_last_dream_cursor(last_cursor)
-                    if diff_body:
-                        logger.info(
-                            "Dream cron job completed, cursor advanced to {}",
-                            last_cursor,
+            for store, scope in targets:
+                try:
+                    def _host_entry(entry: dict[str, Any]) -> bool:
+                        if scope is not None:
+                            return True
+                        key = entry.get("session_key")
+                        if not isinstance(key, str):
+                            return True
+                        session = agent.sessions.peek(key)
+                        return (
+                            not (
+                                key.startswith(("user:", "vault:"))
+                                or (key.startswith("unified:") and key != UNIFIED_SESSION_KEY)
+                            )
+                            and (session is None or not agent.session_has_collaboration_provenance(session.metadata))
                         )
-                    else:
-                        logger.info(
-                            "Dream cron job completed with no memory changes; "
-                            "cursor advanced to {}",
-                            last_cursor,
-                        )
-                else:
-                    logger.warning(
-                        "Dream cron job did not complete ({}); cursor remains at {}",
-                        MemoryStore.dream_incompletion_reason(resp),
-                        store.get_last_dream_cursor(),
+
+                    result = store.build_dream_prompt(entry_filter=_host_entry)
+                    if result is None:
+                        continue
+                    prompt, last_cursor = result
+                    await mcp_provider.connect()
+                    response = await agent.process_direct(
+                        prompt,
+                        session_key=MemoryStore.dream_session_key(),
+                        ephemeral=True,
+                        tools=store.build_dream_tools(allow_skill_generation=scope is None),
+                        on_progress=_silent,
+                        runtime=agent.dream_runtime(),
+                        attributes={"collaboration_scope": scope} if scope is not None else None,
+                        source="runtime",
                     )
-            except Exception:
-                logger.exception("Dream cron job failed")
-            finally:
-                sha = _commit_dream_changes(store)
-                if sha:
-                    logger.info("Dream commit: {}", sha)
-                store.compact_history()
-                prune_dream_sessions(agent.sessions)
+                    if MemoryStore.dream_run_completed(response):
+                        store.set_last_dream_cursor(last_cursor)
+                    else:
+                        logger.warning(
+                            "Dream cron job did not complete ({}); cursor remains at {}",
+                            MemoryStore.dream_incompletion_reason(response),
+                            store.get_last_dream_cursor(),
+                        )
+                    sha = _commit_dream_changes(store)
+                    if sha:
+                        logger.info("Dream commit: {}", sha)
+                except Exception:
+                    logger.exception("Dream cron job failed")
+                finally:
+                    store.compact_history()
+            MemoryStore.prune_dream_sessions(agent.sessions)
             return None
 
         # Heartbeat is a system job that checks HEARTBEAT.md for active tasks.
@@ -738,6 +753,7 @@ def _run_gateway(
                     channel=channel,
                     chat_id=chat_id,
                     on_progress=_silent,
+                    source="runtime",
                 )
             finally:
                 if isinstance(message_tool, MessageTool) and suppress_token is not None:

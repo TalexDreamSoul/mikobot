@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import urlsplit
 
 import pytest
 from websockets.datastructures import Headers
@@ -13,12 +15,17 @@ from websockets.http11 import Request as WsRequest
 
 from nanobot.channels.websocket.runtime import TrustedProxyAuthConfig, WebSocketConfig
 from nanobot.collaboration import AsyncLocalCollaborationRepository, CollaborationStore
-from nanobot.collaboration.models import COLLABORATION_USER_METADATA_KEY
+from nanobot.collaboration.models import (
+    COLLABORATION_PROJECT_METADATA_KEY,
+    COLLABORATION_USER_METADATA_KEY,
+    MembershipRole,
+)
 from nanobot.cron.types import CronJob, CronPayload, CronSchedule
 from nanobot.session.manager import SessionManager
 from nanobot.webui.forking import handle_webui_fork_chat
 from nanobot.webui.http_utils import http_json_response
 from nanobot.webui.inbound_commands import WebUICommandRouter
+from nanobot.webui.media_gateway import WebUIMediaGateway
 from nanobot.webui.oidc_auth import OidcAuthenticator
 from nanobot.webui.session_access import WebuiSessionAccess
 from nanobot.webui.ws_http import GatewayHTTPHandler
@@ -199,12 +206,15 @@ def _save_webui_session(
     key: str,
     *,
     owner_id: str | None,
+    project_id: str | None,
     title: str,
 ) -> None:
     session = sessions.get_or_create(key)
     session.metadata.update({"webui": True, "title": title})
     if owner_id is not None:
         session.metadata[COLLABORATION_USER_METADATA_KEY] = owner_id
+    if project_id is not None:
+        session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = project_id
     session.add_message("user", f"{title} history")
     sessions.save(session)
 
@@ -334,15 +344,37 @@ async def test_proxy_session_boundary_hides_foreign_legacy_and_automation_resour
     handler = await _handler(tmp_path)
     alice = _proxy_connection("alice")
     bob = _proxy_connection("bob")
-    alice_id = (await _identity(handler, alice))["user"]["id"]
-    bob_id = (await _identity(handler, bob))["user"]["id"]
+    alice_index = await _identity(handler, alice)
+    bob_index = await _identity(handler, bob)
+    alice_id = alice_index["user"]["id"]
+    bob_id = bob_index["user"]["id"]
+    alice_project_id = alice_index["active_project_id"]
+    bob_project_id = bob_index["active_project_id"]
     await handler.collaboration.ensure_identity_user(
         "websocket", "webui-http", handler.skills_workspace_path, local_owner=True
     )
 
-    _save_webui_session(handler.session_manager, "websocket:alice", owner_id=alice_id, title="Alice")
-    _save_webui_session(handler.session_manager, "websocket:bob", owner_id=bob_id, title="Bob")
-    _save_webui_session(handler.session_manager, "websocket:legacy", owner_id=None, title="Legacy")
+    _save_webui_session(
+        handler.session_manager,
+        "websocket:alice",
+        owner_id=alice_id,
+        project_id=alice_project_id,
+        title="Alice",
+    )
+    _save_webui_session(
+        handler.session_manager,
+        "websocket:bob",
+        owner_id=bob_id,
+        project_id=bob_project_id,
+        title="Bob",
+    )
+    _save_webui_session(
+        handler.session_manager,
+        "websocket:legacy",
+        owner_id=None,
+        project_id=None,
+        title="Legacy",
+    )
 
     bob_list_request = _request("/api/sessions", bob.request.headers)
     bob_list = await handler.dispatch(_connection(bob_list_request), bob_list_request)
@@ -440,6 +472,195 @@ async def test_proxy_session_boundary_hides_foreign_legacy_and_automation_resour
     )
     fork_host.send_webui_protocol_error.assert_awaited_once_with(bob, "fork source not found")
     fork_host.attach_webui_fork.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_member_webui_session_pins_project_and_denies_reads_attach_and_recovery_after_revocation(
+    tmp_path,
+) -> None:
+    """A member keeps their pinned chat across default changes, but loses every surface on revocation."""
+    handler = await _handler(tmp_path)
+    alice = _proxy_connection("pinned-member")
+    identity = await _identity(handler, alice)
+    alice_id = identity["user"]["id"]
+    first_project_id = identity["active_project_id"]
+    assert isinstance(first_project_id, str)
+    key = "websocket:pinned-member-chat"
+
+    assert await handler.prepare_webui_session(alice, key) is True
+    session = handler.session_manager.get_or_create(key)
+    session.add_message("user", "pinned-project-private-history")
+    handler.session_manager.save(session)
+
+    list_request = _request("/api/sessions", alice.request.headers)
+    listed = await handler.dispatch(_connection(list_request), list_request)
+    assert listed is not None
+    assert [row["key"] for row in _json(listed)["sessions"]] == [key]
+    context_request = _request("/api/sessions/websocket%3Apinned-member-chat/context", alice.request.headers)
+    context = await handler.dispatch(_connection(context_request), context_request)
+    assert context is not None and context.status_code == 200
+    assert _json(context)["total_messages"] == 1
+
+    second = await handler.dispatch_webui_mutation(
+        alice,
+        "collaboration.project.create",
+        {"name": "Later default"},
+    )
+    second_project_id = _json(second)["project"]["id"]
+    changed_default = await handler.dispatch_webui_mutation(
+        alice,
+        "collaboration.user.defaults",
+        {"project_id": second_project_id},
+    )
+    assert changed_default.status_code == 200
+    assert await handler.can_access_webui_session(alice, key) is True
+
+    host, _host_project = await handler.collaboration.ensure_identity_user(
+        "websocket", "revocation-host", handler.skills_workspace_path, local_owner=True
+    )
+    await handler.collaboration.add_member(
+        first_project_id,
+        alice_id,
+        host.id,
+        MembershipRole.OWNER,
+    )
+    assert await handler.collaboration.remove_member(first_project_id, host.id, alice_id) is True
+
+    denied_list_request = _request("/api/sessions", alice.request.headers)
+    denied_list = await handler.dispatch(_connection(denied_list_request), denied_list_request)
+    assert denied_list is not None and _json(denied_list)["sessions"] == []
+    denied_thread_request = _request(
+        "/api/sessions/websocket%3Apinned-member-chat/webui-thread",
+        alice.request.headers,
+    )
+    denied_thread = await handler.dispatch(_connection(denied_thread_request), denied_thread_request)
+    assert denied_thread is not None and denied_thread.status_code == 404
+
+    attach_transport = SimpleNamespace(
+        webui_send_event=AsyncMock(),
+        webui_attach=MagicMock(),
+        webui_hydrate=AsyncMock(),
+    )
+    attach_router = object.__new__(WebUICommandRouter)
+    attach_router.gateway = SimpleNamespace(can_access_webui_session=handler.can_access_webui_session)
+    attach_router._transport = attach_transport
+    attach_router._temporary_chats = SimpleNamespace(validate_attach=lambda _chat_id: None)
+    await attach_router.dispatch(alice, "browser-client", {"type": "attach", "chat_id": "pinned-member-chat"})
+    attach_transport.webui_send_event.assert_awaited_once_with(
+        alice,
+        "error",
+        detail="session_not_found",
+        chat_id="pinned-member-chat",
+    )
+    attach_transport.webui_attach.assert_not_called()
+
+    handler.recovery_action = AsyncMock(return_value={"recovered": True})
+    denied_recovery = await handler.dispatch_webui_mutation(
+        alice,
+        "recovery.continue",
+        {"chat_id": "pinned-member-chat"},
+    )
+    assert denied_recovery.status_code == 404
+    handler.recovery_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_member_webui_session_scope_metadata_fails_closed_when_incomplete_or_mismatched(tmp_path) -> None:
+    """A member cannot recover a session if either persisted scope identity is absent or forged."""
+    handler = await _handler(tmp_path)
+    alice = _proxy_connection("scope-member")
+    identity = await _identity(handler, alice)
+    alice_id = identity["user"]["id"]
+    project_id = identity["active_project_id"]
+    assert isinstance(project_id, str)
+    _save_webui_session(
+        handler.session_manager,
+        "websocket:missing-project",
+        owner_id=alice_id,
+        project_id=None,
+        title="Missing project",
+    )
+    _save_webui_session(
+        handler.session_manager,
+        "websocket:mismatched-owner",
+        owner_id="another-user",
+        project_id=project_id,
+        title="Mismatched owner",
+    )
+
+    for key in ("websocket:missing-project", "websocket:mismatched-owner"):
+        assert await handler.can_access_webui_session(alice, key) is False
+        encoded = key.replace(":", "%3A")
+        request = _request(f"/api/sessions/{encoded}/webui-thread", alice.request.headers)
+        response = await handler.dispatch(_connection(request), request)
+        assert response is not None and response.status_code == 404
+
+
+
+@pytest.mark.asyncio
+async def test_member_media_is_session_scoped_and_revocation_blocks_signed_fetches(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Member media neither stages host paths nor remains readable to another or revoked member."""
+    handler = await _handler(tmp_path)
+    handler.check_api_token = lambda _request: True
+    alice = _proxy_connection("media-member")
+    bob = _proxy_connection("media-other")
+    identity = await _identity(handler, alice)
+    alice_id = identity["user"]["id"]
+    project_id = identity["active_project_id"]
+    assert isinstance(project_id, str)
+    key = "websocket:media-member"
+    assert await handler.prepare_webui_session(alice, key) is True
+    session = handler.session_manager.get_or_create(key)
+    scope = session.metadata["workspace_scope"]
+    assert isinstance(scope, dict) and isinstance(scope.get("project_path"), str)
+    project_root = Path(scope["project_path"])
+    project_root.mkdir(parents=True, exist_ok=True)
+    member_media_root = tmp_path / "member-media"
+    monkeypatch.setattr(
+        "nanobot.webui.media_gateway.user_private_media_root",
+        lambda user_id, *, project_id: member_media_root / user_id / "media" / project_id,
+    )
+    handler.media = WebUIMediaGateway(
+        workspace_path=project_root,
+        logger=MagicMock(),
+        session_manager=handler.session_manager,
+    )
+
+    host_secret = tmp_path / "host-secret.png"
+    host_secret.write_bytes(b"host-only")
+    assert handler.media.sign_or_stage_media_path(host_secret, session_key=key) is None
+    rewritten = handler.media.rewrite_local_markdown_images(
+        f"![host secret]({host_secret})",
+        session_key=key,
+    )
+    assert "/api/media/" not in rewritten
+    assert not (member_media_root / alice_id / "media" / project_id).exists()
+
+    project_image = project_root / "project-image.png"
+    project_image.write_bytes(b"project-only")
+    signed = handler.media.sign_or_stage_media_path(project_image, session_key=key)
+    assert signed is not None
+    parsed = urlsplit(signed["url"])
+    assert parsed.query == "session_key=websocket%3Amedia-member"
+
+    own_request = _request(parsed.path + "?" + parsed.query, alice.request.headers)
+    own_response = await handler.dispatch(_connection(own_request), own_request)
+    assert own_response is not None and own_response.status_code == 200
+    foreign_request = _request(parsed.path + "?" + parsed.query, bob.request.headers)
+    foreign_response = await handler.dispatch(_connection(foreign_request), foreign_request)
+    assert foreign_response is not None and foreign_response.status_code == 404
+
+    host, _host_project = await handler.collaboration.ensure_identity_user(
+        "websocket", "media-revocation-host", handler.skills_workspace_path, local_owner=True
+    )
+    await handler.collaboration.add_member(project_id, alice_id, host.id, MembershipRole.OWNER)
+    assert await handler.collaboration.remove_member(project_id, host.id, alice_id) is True
+
+    revoked_response = await handler.dispatch(_connection(own_request), own_request)
+    assert revoked_response is not None and revoked_response.status_code == 404
 
 
 async def _assign_instance(

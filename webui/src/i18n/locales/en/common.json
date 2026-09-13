@@ -79,8 +79,12 @@
     "assignDescriptionAdmin": "Pick any connected instance and its project, and optionally name the member it is for. They send the Pair Code from that channel to finish.",
     "channelInstance": "Channel instance",
     "chooseChannel": "Choose a channel instance",
-    "assigneeUserId": "Assign to user ID (optional)",
-    "assigneePlaceholder": "Leave empty to assign to yourself",
+    "assigneeUserId": "Assign to project member",
+    "assigneeCurrentUser": "You · {{user}}",
+    "assigneeProjectMember": "{{user}} · {{role}}",
+    "assigneeHelp": "Choose a known member of the target project. Your own user ID is always available.",
+    "loadingProjectMembers": "Loading project members…",
+    "loadProjectMembersFailed": "Could not load project members: {{error}}",
     "generatePairCode": "Generate Pair Code",
     "loadingChannels": "Loading channel instances…",
     "loadChannelsFailed": "Could not load channel instances: {{error}}",
@@ -103,6 +107,9 @@
       "statusFailed": "Could not check verification: {{error}}",
       "retry": "Retry status",
       "regenerate": "Generate a new code",
+      "activationFailed": "Assignment saved, but activation failed",
+      "activationFailedDescription": "The channel remains assigned but is not running. A system administrator can retry it from Settings → Channels.",
+      "assignmentSaved": "The assignment is saved. Runtime health is reported separately.",
       "dismiss": "Dismiss Pair Code"
     }
   },
@@ -140,6 +147,8 @@
   "projects": {
     "title": "Projects",
     "workspaceLabel": "Project workspace",
+    "sharedSpacesTitle": "Projects are managed shared spaces",
+    "sharedSpacesDescription": "A project owns membership, channel assignments, capability limits, and a server-side workspace. It does not change the working directory selected in the chat composer.",
     "administrator": "Administrator",
     "listAria": "Projects",
     "sectionsAria": "Project sections",
@@ -166,6 +175,11 @@
       "roster": "Project roster",
       "add": "Add or update a project member",
       "currentRole": "Your role is {{role}}. User IDs are shown because no public directory exists.",
+      "yourUserId": "Your user ID",
+      "yourUserIdDescription": "Share this exact ID with a project owner when they add you. It is not a display name.",
+      "copyUserId": "Copy user ID",
+      "copiedUserId": "Copied",
+      "copyUserIdFailed": "Could not copy the user ID. Select it manually instead.",
       "notAvailable": "not available",
       "you": "you",
       "roles": {
@@ -207,9 +221,13 @@
       "title": "Settings",
       "ariaLabel": "Settings sections"
     },
+    "memberAccess": {
+      "title": "Host settings are administrator-only",
+      "description": "This account can still use local appearance preferences. Projects, Channels, and scoped Automations remain available from the main sidebar."
+    },
     "extensions": {
       "title": "Extensions",
-      "description": "Every package this gateway has loaded, who owns each component, and what it is trusted to do. nanobot does not sandbox or verify third-party extensions.",
+      "description": "Host runtime inventory for packages loaded by this gateway. Enabled is requested state, not proof that a runtime is healthy; current failures and restart requirements remain visible here. Apps manages chat capabilities. nanobot does not sandbox or verify third-party extensions.",
       "refresh": "Refresh",
       "loading": "Loading extensions…",
       "registryUnavailable": "This gateway composed no extension registry, so no inventory can be reported. This is not an empty host.",
@@ -903,7 +921,7 @@
       "enable": "Enable tracing support"
     },
     "apps": {
-      "description": "Add tools to nanobot, then @ them in chat.",
+      "description": "Apps manages capabilities you can invoke in chat. Host runtime packages and their current health are reported separately in Extensions.",
       "cliLabel": "App",
       "mcpLabel": "MCP",
       "channelLabel": "Channel",

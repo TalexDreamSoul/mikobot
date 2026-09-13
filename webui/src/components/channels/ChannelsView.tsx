@@ -7,6 +7,7 @@ import {
   Menu,
   RotateCcw,
   ShieldCheck,
+  TriangleAlert,
   Trash2,
   X,
 } from "lucide-react";
@@ -24,7 +25,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import type { CollaborationProjectsController } from "@/hooks/useCollaborationProjects";
 import {
@@ -36,6 +36,8 @@ import type {
   CollaborationChannelAssignment,
   CollaborationClaimableChannel,
   CollaborationPairingChallenge,
+  CollaborationPairingPayload,
+  CollaborationProjectMember,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useClient } from "@/providers/ClientProvider";
@@ -67,7 +69,13 @@ export function ChannelsView({
   const [selectedChannel, setSelectedChannel] = useState("");
   const [pairingProjectId, setPairingProjectId] = useState("");
   const [assigneeUserId, setAssigneeUserId] = useState("");
+  const [assigneeMembers, setAssigneeMembers] = useState<CollaborationProjectMember[]>([]);
+  const [assigneeMembersLoading, setAssigneeMembersLoading] = useState(false);
+  const [assigneeMembersError, setAssigneeMembersError] = useState<string | null>(null);
   const [pairing, setPairing] = useState<CollaborationPairingChallenge | null>(null);
+  const [channelActivation, setChannelActivation] = useState<
+    CollaborationPairingPayload["channel_activation"] | null
+  >(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
   const [pairingClock, setPairingClock] = useState(() => Date.now());
   const [assignmentToRemove, setAssignmentToRemove] =
@@ -102,6 +110,75 @@ export function ChannelsView({
     ) ?? manageableProjects[0];
     if (fallback) setPairingProjectId(fallback.id);
   }, [manageableProjects, pairingProjectId, projects.projectId]);
+
+  useEffect(() => {
+    if (!projects.isAdmin || !pairingProjectId) {
+      setAssigneeMembers([]);
+      setAssigneeMembersLoading(false);
+      setAssigneeMembersError(null);
+      return;
+    }
+    if (projects.detail?.project.id === pairingProjectId) {
+      setAssigneeMembers(projects.detail.members);
+      setAssigneeMembersLoading(false);
+      setAssigneeMembersError(null);
+      return;
+    }
+    let cancelled = false;
+    setAssigneeMembersLoading(true);
+    setAssigneeMembersError(null);
+    void projects.loadProjectMembers(pairingProjectId)
+      .then((members) => {
+        if (!cancelled) setAssigneeMembers(members);
+      })
+      .catch((reason) => {
+        if (!cancelled) {
+          setAssigneeMembers([]);
+          setAssigneeMembersError((reason as Error).message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAssigneeMembersLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    pairingProjectId,
+    projects.detail,
+    projects.isAdmin,
+    projects.loadProjectMembers,
+  ]);
+
+  const assigneeOptions = useMemo(() => {
+    const members = [...assigneeMembers].sort((left, right) => {
+      if (left.role !== right.role) return left.role === "owner" ? -1 : 1;
+      return left.user_id.localeCompare(right.user_id);
+    });
+    return [
+      ...(currentUserId ? [{
+        userId: currentUserId,
+        role: members.find((member) => member.user_id === currentUserId)?.role ?? null,
+        current: true,
+      }] : []),
+      ...members
+        .filter((member) => member.user_id !== currentUserId)
+        .map((member) => ({
+          userId: member.user_id,
+          role: member.role,
+          current: false,
+        })),
+    ];
+  }, [assigneeMembers, currentUserId]);
+
+  useEffect(() => {
+    if (!projects.isAdmin) return;
+    setAssigneeUserId((current) => (
+      current && assigneeOptions.some((member) => member.userId === current)
+        ? current
+        : currentUserId || assigneeOptions[0]?.userId || ""
+    ));
+  }, [assigneeOptions, currentUserId, projects.isAdmin]);
 
   useEffect(() => {
     setPairingClock(Date.now());
@@ -161,6 +238,7 @@ export function ChannelsView({
         if (payload.pairing.verified && !payload.pairing.consumed) {
           const completed = await projects.finishPairing(payload.pairing.id);
           if (!cancelled) {
+            setChannelActivation(completed.channel_activation ?? null);
             setPairing(withCode(completed.pairing));
             setDiscoveryRevision((value) => value + 1);
           }
@@ -195,6 +273,7 @@ export function ChannelsView({
   const beginAssignment = async () => {
     if (!selected || !pairingProjectId) return;
     setPairingError(null);
+    setChannelActivation(null);
     setPairingClock(Date.now());
     const assignee = assigneeUserId.trim();
     try {
@@ -202,9 +281,10 @@ export function ChannelsView({
         channelType: selected.channelType,
         instanceId: selected.instanceId,
         projectId: pairingProjectId,
-        assigneeUserId: projects.isAdmin && assignee ? assignee : null,
+        assigneeUserId: projects.isAdmin ? assignee || currentUserId : null,
       });
       setPairing(payload.pairing);
+      setChannelActivation(null);
     } catch {
       // The shared error region reports why the Pair Code was refused.
     }
@@ -455,7 +535,11 @@ export function ChannelsView({
                   <Select
                     id="channel-target-project"
                     value={pairingProjectId}
-                    onChange={(event) => setPairingProjectId(event.target.value)}
+                    onChange={(event) => {
+                      setPairingProjectId(event.target.value);
+                      setAssigneeUserId(currentUserId);
+                      setAssigneeMembersLoading(projects.isAdmin);
+                    }}
                     disabled={!manageableProjects.length}
                     containerClassName="mt-1.5"
                     className="h-11"
@@ -473,21 +557,51 @@ export function ChannelsView({
                     <label className="block text-xs font-medium" htmlFor="channel-assignee">
                       {t("channels.assigneeUserId")}
                     </label>
-                    <Input
+                    <Select
                       id="channel-assignee"
                       value={assigneeUserId}
                       onChange={(event) => setAssigneeUserId(event.target.value)}
-                      placeholder={t("channels.assigneePlaceholder")}
-                      autoComplete="off"
-                      maxLength={128}
-                      className="mt-1.5 h-11 bg-background"
-                    />
+                      disabled={assigneeMembersLoading || !assigneeOptions.length}
+                      containerClassName="mt-1.5"
+                      className="h-11"
+                    >
+                      {assigneeOptions.map((member) => (
+                        <option key={member.userId} value={member.userId}>
+                          {member.current
+                            ? t("channels.assigneeCurrentUser", { user: member.userId })
+                            : t("channels.assigneeProjectMember", {
+                              user: member.userId,
+                              role: member.role
+                                ? t(`projects.members.roles.${member.role}`)
+                                : "",
+                            })}
+                        </option>
+                      ))}
+                    </Select>
+                    {assigneeMembersLoading ? (
+                      <p className="mt-1.5 text-xs text-muted-foreground">
+                        {t("channels.loadingProjectMembers")}
+                      </p>
+                    ) : assigneeMembersError ? (
+                      <p role="alert" className="mt-1.5 text-xs text-destructive">
+                        {t("channels.loadProjectMembersFailed", { error: assigneeMembersError })}
+                      </p>
+                    ) : (
+                      <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
+                        {t("channels.assigneeHelp")}
+                      </p>
+                    )}
                   </div>
                 ) : null}
                 <Button
                   type="button"
                   onClick={() => void beginAssignment()}
-                  disabled={!selected || !pairingProjectId || projects.busyKey === "pairing:create"}
+                  disabled={
+                    !selected
+                    || !pairingProjectId
+                    || projects.busyKey === "pairing:create"
+                    || (projects.isAdmin && assigneeMembersLoading)
+                  }
                 >
                   <KeyRound className="mr-2 h-4 w-4" aria-hidden />
                   {t("channels.generatePairCode")}
@@ -498,7 +612,9 @@ export function ChannelsView({
             {pairing ? (
               <section className="rounded-panel border border-primary/25 bg-primary/5 p-4 sm:p-5" aria-live="polite">
                 <div className="flex items-start gap-3">
-                  {pairing.consumed ? (
+                  {pairing.consumed && channelActivation?.ok === false ? (
+                    <TriangleAlert className="mt-0.5 h-5 w-5 text-destructive" aria-hidden />
+                  ) : pairing.consumed ? (
                     <ShieldCheck className="mt-0.5 h-5 w-5 text-primary" aria-hidden />
                   ) : pairingExpired ? (
                     <KeyRound className="mt-0.5 h-5 w-5 text-muted-foreground" aria-hidden />
@@ -509,7 +625,9 @@ export function ChannelsView({
                     <div className="flex items-start justify-between gap-3">
                       <h2 className="font-semibold">
                         {pairing.consumed
-                          ? t("channels.pairing.completed")
+                          ? channelActivation?.ok === false
+                            ? t("channels.pairing.activationFailed")
+                            : t("channels.pairing.completed")
                           : pairingExpired
                             ? t("channels.pairing.expired")
                             : t("channels.pairing.title")}
@@ -520,7 +638,11 @@ export function ChannelsView({
                         variant="ghost"
                         className="h-7 w-7 shrink-0"
                         aria-label={t("channels.pairing.dismiss")}
-                        onClick={() => { setPairing(null); setPairingError(null); }}
+                        onClick={() => {
+                          setPairing(null);
+                          setPairingError(null);
+                          setChannelActivation(null);
+                        }}
                       >
                         <X className="h-4 w-4" aria-hidden />
                       </Button>
@@ -559,7 +681,19 @@ export function ChannelsView({
                           {t("channels.pairing.regenerate")}
                         </Button>
                       </div>
-                    ) : null}
+                    ) : channelActivation?.ok === false ? (
+                      <div role="alert" className="mt-2 rounded-control border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                        <p className="text-xs leading-5">
+                          {channelActivation.message
+                            || t("channels.pairing.activationFailedDescription")}
+                        </p>
+                      </div>
+                    ) : (
+                      <p role="status" className="mt-2 text-sm text-muted-foreground">
+                        {channelActivation?.message
+                          || t("channels.pairing.assignmentSaved")}
+                      </p>
+                    )}
                   </div>
                 </div>
               </section>

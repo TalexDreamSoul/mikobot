@@ -187,6 +187,8 @@ class CollaborationRepository(Protocol):
         channel: str,
         chat_id: str,
         thread_id: str | None = None,
+        assignment_required: bool = False,
+        binding_id: str | None = None,
     ) -> ConversationScope | None: ...
 
 

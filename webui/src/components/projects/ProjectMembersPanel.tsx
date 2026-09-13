@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, Shield, Trash2, UserPlus, Users } from "lucide-react";
+import { Check, Copy, Loader2, Shield, Trash2, UserPlus, Users } from "lucide-react";
 
 import {
   AlertDialog,
@@ -15,6 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import type {
   CollaborationProjectMember,
   CollaborationProjectPayload,
@@ -22,6 +23,57 @@ import type {
 } from "@/lib/types";
 
 const PROJECT_ROLES: CollaborationProjectRole[] = ["member", "owner"];
+
+export function CurrentUserIdCard({ currentUserId }: { currentUserId: string }) {
+  const { t } = useTranslation();
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+
+  const copyCurrentUserId = async () => {
+    if (!currentUserId) return;
+    const copied = await copyTextToClipboard(currentUserId);
+    setCopyStatus(copied ? "copied" : "failed");
+    window.setTimeout(() => setCopyStatus("idle"), 1_500);
+  };
+
+  return (
+    <section aria-labelledby="current-user-id-title" className="rounded-panel bg-settings-surface p-4 sm:p-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <h3 id="current-user-id-title" className="text-sm font-semibold">
+            {t("projects.members.yourUserId")}
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {t("projects.members.yourUserIdDescription")}
+          </p>
+          <code className="mt-2 block break-all font-mono text-xs text-foreground">
+            {currentUserId || t("projects.members.notAvailable")}
+          </code>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!currentUserId}
+          onClick={() => void copyCurrentUserId()}
+          aria-label={t("projects.members.copyUserId")}
+          className="h-9 shrink-0 gap-1.5"
+        >
+          {copyStatus === "copied"
+            ? <Check className="h-3.5 w-3.5" aria-hidden />
+            : <Copy className="h-3.5 w-3.5" aria-hidden />}
+          {copyStatus === "copied"
+            ? t("projects.members.copiedUserId")
+            : t("projects.members.copyUserId")}
+        </Button>
+      </div>
+      {copyStatus === "failed" ? (
+        <p role="alert" className="mt-2 text-xs text-destructive">
+          {t("projects.members.copyUserIdFailed")}
+        </p>
+      ) : null}
+    </section>
+  );
+}
 
 export function ProjectMembersPanel({
   detail,
@@ -43,6 +95,7 @@ export function ProjectMembersPanel({
   const currentMembership = detail.members.find((member) => member.user_id === currentUserId) ?? null;
   const canManage = detail.can_manage;
   const existingMember = detail.members.find((member) => member.user_id === memberUserId.trim()) ?? null;
+
 
   const addMember = async (event: FormEvent) => {
     event.preventDefault();
@@ -76,7 +129,6 @@ export function ProjectMembersPanel({
             {t("projects.members.description")}
           </p>
         </div>
-
         <section aria-labelledby="project-member-roster-title" className="overflow-hidden rounded-panel bg-settings-surface">
           <header className="flex items-start gap-3 px-4 py-4 sm:px-5">
             <Users className="mt-0.5 h-4 w-4 text-muted-foreground" aria-hidden />

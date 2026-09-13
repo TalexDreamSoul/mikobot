@@ -12,7 +12,10 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request as WsRequest
 
 from nanobot.channels.websocket.runtime import WebSocketChannel, WebSocketConfig
-from nanobot.collaboration.models import COLLABORATION_USER_METADATA_KEY
+from nanobot.collaboration.models import (
+    COLLABORATION_PROJECT_METADATA_KEY,
+    COLLABORATION_USER_METADATA_KEY,
+)
 from nanobot.session.manager import SessionManager
 from nanobot.webui.gateway_endpoint import WebUIGatewayEndpoint
 from nanobot.webui.gateway_services import build_gateway_services
@@ -57,7 +60,11 @@ def _proxy_config() -> WebSocketConfig:
 def _connection_loop_channel(endpoint: WebUIGatewayEndpoint) -> WebSocketChannel:
     """Construct only the ingress dependencies exercised by the connection loop."""
     channel = object.__new__(WebSocketChannel)
-    channel.gateway = SimpleNamespace(endpoint=endpoint)
+    channel.gateway = SimpleNamespace(
+        endpoint=endpoint,
+        prepare_webui_session=AsyncMock(return_value=True),
+        can_access_webui_session=AsyncMock(return_value=True),
+    )
     channel._subs = {}
     channel._conn_chats = {}
     channel._conn_default = {}
@@ -228,12 +235,13 @@ async def test_proxy_principal_routes_its_chat_after_authorized_attach(
         ) is None
         principal = endpoint.trusted_proxy_principal(connection)
         assert principal is not None
-        owner, _ = await channel.gateway.collaboration.ensure_identity_user(
+        owner, project = await channel.gateway.collaboration.ensure_identity_user(
             "websocket", principal, tmp_path / "workspace", local_owner=False
         )
         chat_id = "principal-owned-chat"
         session = sessions.get_or_create(f"websocket:{chat_id}")
         session.metadata[COLLABORATION_USER_METADATA_KEY] = owner.id
+        session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = project.id
         session.add_message("user", "owned history")
         sessions.save(session)
         channel._hydrate_after_subscribe = AsyncMock()

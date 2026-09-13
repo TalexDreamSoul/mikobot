@@ -16,6 +16,11 @@ from nanobot.agent.tools.path_utils import resolve_workspace_path
 from nanobot.agent.tools.schema import ArraySchema, StringSchema, tool_parameters_schema
 from nanobot.bus.events import OutboundMessage
 from nanobot.config.paths import get_workspace_path
+from nanobot.security.member_access import (
+    current_member_attachment_files,
+    current_member_scope,
+    current_member_tool_scope,
+)
 from nanobot.security.workspace_access import current_tool_workspace
 
 _CURRENT_MESSAGE_SENDS: ContextVar[set[tuple[str, str]] | None] = ContextVar(
@@ -131,8 +136,28 @@ class MessageTool(Tool):
         )
 
     def _resolve_media(self, media: list[str]) -> list[str]:
-        """Resolve local media attachments and enforce workspace restriction when enabled."""
-        resolved: list[str] = []
+        """Resolve media attachments without granting member host-file access."""
+        member_scope = current_member_scope()
+        if member_scope is not None:
+            member = current_member_tool_scope()
+            if member is None:
+                raise PermissionError("member authorization has no active project")
+            resolved: list[str] = []
+            for path in media:
+                if path.startswith(("http://", "https://")):
+                    resolved.append(path)
+                    continue
+                resolved.append(str(resolve_workspace_path(
+                    path,
+                    member.project_root,
+                    member.project_root,
+                    [],
+                    list(current_member_attachment_files()),
+                    include_media_dir=False,
+                )))
+            return resolved
+
+        resolved = []
         access = current_tool_workspace(
             self._workspace,
             restrict_to_workspace=self._restrict_to_workspace,

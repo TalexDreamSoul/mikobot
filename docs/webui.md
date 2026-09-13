@@ -181,9 +181,10 @@ MCP presets, or persisted topics. Topics have short, pronounceable handles such 
 from the menu, or drag it from the sidebar, to attach its structured reference.
 Typing the same text without selecting it remains plain text.
 
-The agent can inspect an attached topic with `read_session`. It can discover other
-persisted topics with `list_sessions` and send asynchronous messages with
-`send_session_message`; topic messaging is not limited by workspace scope.
+The agent can inspect an attached topic with `read_session`, discover persisted
+topics with `list_sessions`, and send asynchronous `send_session_message` requests.
+Member references and messages require the same user and project; membership in two
+projects does not merge their conversation contexts.
 The model badge shows the current model or preset and links to model settings when
 setup is incomplete.
 
@@ -204,6 +205,47 @@ Open **Settings → Channels** to connect chat apps without assembling JSON by h
 The platform itself may still require you to create a bot, enable event permissions, copy a token, or configure a webhook. Use [`chat-apps.md`](./chat-apps.md) for those platform-side prerequisites and for manual JSON/reference options.
 
 Test a new channel with a private DM. When a supported channel sends a pairing code, the WebUI surfaces the pending request so you can approve the sender. Keep access narrow; do not use a wildcard allowlist unless public access is intentional.
+
+### Projects, members, and channel assignments
+
+The top-level **Projects** page manages shared server-side workspaces, members,
+and Skill/MCP allowlists. It is not the host composer's working-directory picker.
+
+1. The host configures the model and connects the intended channel instance.
+2. A member signs in through configured OIDC or a trusted authenticated proxy.
+   They can copy their user ID from **Projects**, even before joining a shared project.
+3. A project owner or administrator adds that ID to the intended project's members.
+4. In top-level **Channels**, select an unassigned instance and its project. An
+   administrator chooses the assignee from that project's member list; a member
+   may pair only an instance they connected themselves, for themselves.
+5. Generate a Pair Code, send it through the exact channel instance, and complete
+   verification. Assignment and runtime activation are separate: an activation
+   failure remains visible and must be resolved through the channel controls.
+6. Send a private test message. Groups/threads require an explicit authorized
+   conversation binding instead of automatically inheriting a private conversation.
+
+An assignee proves control of the channel; the project's members form its access
+boundary. Disabling, removing, or moving a required assignment invalidates later
+automation authorization. Removing a member denies subsequent session reads,
+recovery, streaming, and tool operations, including already-connected browsers.
+
+Member WebUI topics pin their initial project. Changing the default project selects
+where new topics start; it never moves an existing topic's history. Old chat-channel
+history is not automatically imported into another project after reassignment.
+
+Member profiles, memory and automatic conversation archives live in private
+user/project storage, not the shared project folder. Shared project files are
+intentional collaboration material. Member Dream does not turn private dialogue
+into shared Skills. Sidebar state and signed attachment access are user-scoped.
+
+Members can use local Appearance, Projects, their Channels, and their Automations.
+Global model credentials, Skills/Apps installation, security settings, and runtime
+inventory remain administrator surfaces. A member's deep link to a host-only
+settings page opens Appearance with an explanation, without requesting host inventory.
+
+Member shell execution requires Linux Bubblewrap and fails closed when unavailable;
+macOS/Windows member requests do not run unsandboxed. Host-managed CLI Apps and host
+runtime scratchpad/configuration are not member capabilities. See [Security](../SECURITY.md).
 
 ## Apps
 
@@ -233,6 +275,11 @@ included in nanobot and activate automatically when a file is attached. The
 equivalent CLI for optional integrations remains `nanobot plugins`. See
 [`cli-reference.md`](./cli-reference.md#optional-features).
 That command manages nanobot runtime extras, not Agent Plugin packages.
+
+**Settings → Extensions** is the administrator's runtime inventory, not another
+Apps store. It shows actual connection/start/stop health where the runtime supplies
+it. A saved enabled marker is not proof of a healthy service; failed hot reloads,
+failed stops, and restart requirements remain visible.
 
 Some MCP presets connect to hosted keyless endpoints. For example, the Firecrawl
 preset uses Firecrawl's hosted MCP endpoint for search, scrape, crawl, and

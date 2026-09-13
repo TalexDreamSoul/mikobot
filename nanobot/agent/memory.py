@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import weakref
+from collections.abc import Awaitable
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -579,7 +580,12 @@ class MemoryStore:
             return text
         return self.default_dream_prompt()
 
-    def build_dream_prompt(self, *, max_entries: int = 20) -> tuple[str, int] | None:
+    def build_dream_prompt(
+        self,
+        *,
+        max_entries: int = 20,
+        entry_filter: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> tuple[str, int] | None:
         """Build the Dream prompt with unprocessed history context.
 
         Returns ``(prompt, last_cursor)`` or ``None`` if nothing to process.
@@ -591,6 +597,8 @@ class MemoryStore:
         """
         last_cursor = self.get_last_dream_cursor()
         entries = self.read_unprocessed_history(since_cursor=last_cursor)
+        if entry_filter is not None:
+            entries = [entry for entry in entries if entry_filter(entry)]
         if not entries:
             return None
 
@@ -630,17 +638,13 @@ class MemoryStore:
         return "## Current Memory Files\n" + "\n\n".join(blocks)
 
     def dream_content_diff(self) -> str:
-        """Structured summary of uncommitted changes to the durable memory files.
-
-        Returns "" when git is unavailable or no content file changed. This is
-        the ground-truth input for diff-grounded Dream commit messages.
-        """
+        """Return a diff summary of this owner's durable memory files."""
         if not self._git.is_initialized():
             return ""
         return self._git.summarize_working_tree(list(self._DREAM_CONTENT_PATHS))
 
-    def build_dream_tools(self) -> ToolRegistry:
-        """Build the restricted tool registry used by Dream runs."""
+    def build_dream_tools(self, *, allow_skill_generation: bool = True) -> ToolRegistry:
+        """Build Dream tools, suppressing skill writes for private member stores."""
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR
         from nanobot.agent.tools.apply_patch import ApplyPatchTool
         from nanobot.agent.tools.file_state import FileStates
@@ -650,10 +654,13 @@ class MemoryStore:
         tools = ToolRegistry()
         file_states = FileStates()
         workspace = self.workspace
-        skills_dir = workspace / "skills"
-        skills_dir.mkdir(parents=True, exist_ok=True)
-
-        extra_read = [BUILTIN_SKILLS_DIR] if BUILTIN_SKILLS_DIR.exists() else None
+        writable_root = workspace / "skills" if allow_skill_generation else self.memory_dir
+        writable_root.mkdir(parents=True, exist_ok=True)
+        extra_read = (
+            [BUILTIN_SKILLS_DIR]
+            if allow_skill_generation and BUILTIN_SKILLS_DIR.exists()
+            else None
+        )
         editable_files = [self.memory_file, self.soul_file, self.user_file]
 
         tools.register(ReadFileTool(
@@ -664,19 +671,19 @@ class MemoryStore:
         ))
         tools.register(EditFileTool(
             workspace=workspace,
-            allowed_dir=skills_dir,
+            allowed_dir=writable_root,
             extra_write_allowed_files=editable_files,
             file_states=file_states,
         ))
         tools.register(ApplyPatchTool(
             workspace=workspace,
-            allowed_dir=skills_dir,
+            allowed_dir=writable_root,
             extra_write_allowed_files=editable_files,
             file_states=file_states,
         ))
         tools.register(WriteFileTool(
             workspace=workspace,
-            allowed_dir=skills_dir,
+            allowed_dir=writable_root,
             extra_write_allowed_files=editable_files,
             file_states=file_states,
         ))
@@ -827,12 +834,14 @@ class MemoryArchiver:
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         resolve_prompt_context: Callable[[Session], tuple[str | None, Path | None]] | None = None,
         unified_session: bool = False,
+        store_for_session: Callable[[Session], MemoryStore | None] | None = None,
     ) -> None:
         self.store = store
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
         self._resolve_prompt_context = resolve_prompt_context
         self.unified_session = unified_session
+        self._store_for_session = store_for_session
 
     async def archive(
         self,
@@ -842,10 +851,12 @@ class MemoryArchiver:
         session_key: str,
         request_messages: list[dict[str, Any]],
         request_tools: list[dict[str, Any]],
+        store: MemoryStore | None = None,
     ) -> str | None:
         """Execute a prepared archive request and persist its result."""
         if not messages:
             return None
+        store = store or self.store
         try:
             with llm_usage_source("dream"):
                 response = await runtime.provider.chat_with_retry(
@@ -859,27 +870,27 @@ class MemoryArchiver:
                 )
         except Exception:
             logger.warning("Memory archive provider call failed, raw-dumping to history")
-            self.store.raw_archive(messages, session_key=session_key)
+            store.raw_archive(messages, session_key=session_key)
             return None
         if response.finish_reason in {"error", "length"}:
             logger.warning(
                 "Memory archive provider did not complete ({}), raw-dumping to history",
                 response.finish_reason,
             )
-            self.store.raw_archive(messages, session_key=session_key)
+            store.raw_archive(messages, session_key=session_key)
             return None
         if response.has_tool_calls is True:
             logger.warning("Memory archive provider returned tool calls, raw-dumping to history")
-            self.store.raw_archive(messages, session_key=session_key)
+            store.raw_archive(messages, session_key=session_key)
             return None
         summary = response.content
         if not summary or not summary.strip():
             logger.warning("Memory archive provider returned no summary, raw-dumping to history")
-            self.store.raw_archive(messages, session_key=session_key)
+            store.raw_archive(messages, session_key=session_key)
             return None
         if summary.strip() == "(nothing)":
             return "(nothing)"
-        self.store.append_history(
+        store.append_history(
             summary,
             max_chars=_ARCHIVE_SUMMARY_MAX_CHARS,
             session_key=session_key,
@@ -894,6 +905,10 @@ class MemoryArchiver:
         runtime: LLMRuntime,
         input_token_budget: int,
     ) -> str | None:
+        store = self._store_for_session(session) if self._store_for_session else self.store
+        if store is None:
+            logger.warning("Skipping memory archive for unauthorized session {}", session.key)
+            return None
         """Archive a captured session prefix without mutating the session."""
         messages = list(session.messages[session.last_archived:archive_end])
         if not messages:
@@ -903,7 +918,7 @@ class MemoryArchiver:
                 "Memory archive has no safe input budget for {}; raw-dumping",
                 session.key,
             )
-            self.store.raw_archive(messages, session_key=session.key)
+            store.raw_archive(messages, session_key=session.key)
             return None
         prefix = Session(
             key=session.key,
@@ -920,7 +935,7 @@ class MemoryArchiver:
                 "Memory archive cannot replay the full chunk for {}; raw-dumping",
                 session.key,
             )
-            self.store.raw_archive(messages, session_key=session.key)
+            store.raw_archive(messages, session_key=session.key)
             return None
         prompt = render_template(
             "agent/consolidator_archive.md",
@@ -941,9 +956,10 @@ class MemoryArchiver:
             ),
             workspace=workspace,
             session_key=session.key,
+            memory_workspace=store.workspace if store is not self.store else None,
             unified_session=self.unified_session,
         )
-        tools = self._get_tool_definitions()
+        tools = self._get_tool_definitions() if store is self.store else []
         estimated, source = estimate_prompt_tokens_chain(
             runtime.provider,
             runtime.model,
@@ -958,13 +974,14 @@ class MemoryArchiver:
                 input_token_budget,
                 source,
             )
-            self.store.raw_archive(messages, session_key=session.key)
+            store.raw_archive(messages, session_key=session.key)
             return None
         return await self.archive(
             messages,
             runtime=runtime,
             session_key=session.key,
             request_messages=request_messages,
+            store=store,
             request_tools=tools,
         )
 
@@ -982,10 +999,14 @@ class Consolidator:
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         resolve_prompt_context: Callable[[Session], tuple[str | None, Path | None]] | None = None,
         unified_session: bool = False,
+        store_for_session: Callable[[Session], MemoryStore | None] | None = None,
+        authorize_session: Callable[[Session], Awaitable[None]] | None = None,
     ):
         self.store = store
         self.sessions = sessions
         self.unified_session = unified_session
+        self._store_for_session = store_for_session
+        self._authorize_session = authorize_session
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
         self._resolve_prompt_context = resolve_prompt_context
@@ -995,6 +1016,7 @@ class Consolidator:
             get_tool_definitions=get_tool_definitions,
             resolve_prompt_context=resolve_prompt_context,
             unified_session=unified_session,
+            store_for_session=store_for_session,
         )
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
@@ -1045,6 +1067,9 @@ class Consolidator:
         runtime: LLMRuntime,
     ) -> tuple[int, str]:
         """Estimate prompt size from the full replayable session history."""
+        store = self._store_for_session(session) if self._store_for_session else self.store
+        if store is None:
+            return (0, "unauthorized")
         history = self._full_replay_history(session)
         channel = session.key.split(":", 1)[0] if ":" in session.key else None
         summary = session_summary_from_metadata(
@@ -1058,12 +1083,13 @@ class Consolidator:
             session_summary=summary,
             session_key=session.key,
             unified_session=self.unified_session,
+            memory_workspace=store.workspace if store is not self.store else None,
         )
         return estimate_prompt_tokens_chain(
             runtime.provider,
             runtime.model,
             probe_messages,
-            self._get_tool_definitions(),
+            self._get_tool_definitions() if store is self.store else [],
         )
 
     def _input_token_budget(self, runtime: LLMRuntime) -> int:
@@ -1084,6 +1110,8 @@ class Consolidator:
         request_tools: list[dict[str, Any]],
     ) -> str | None:
         """Compatibility wrapper for the extracted MemoryArchiver."""
+        if self._authorize_session is not None:
+            await self._authorize_session(self.sessions.peek(session_key) or Session(session_key))
         return await self.archiver.archive(
             messages,
             runtime=runtime,
@@ -1100,6 +1128,10 @@ class Consolidator:
         runtime: LLMRuntime,
     ) -> str | None:
         """Compatibility wrapper for the extracted MemoryArchiver."""
+        if self._store_for_session is not None and self._store_for_session(session) is None:
+            return None
+        if self._authorize_session is not None:
+            await self._authorize_session(session)
         return await self.archiver.archive_session(
             session,
             archive_end=archive_end,
@@ -1213,6 +1245,8 @@ class Consolidator:
         async with lock:
             self.sessions.invalidate(session_key)
             session = self.sessions.get_or_create(session_key)
+            if self._store_for_session is not None and self._store_for_session(session) is None:
+                return None
 
             archive_start = session.last_archived
             messages_to_archive = list(session.messages[archive_start:])

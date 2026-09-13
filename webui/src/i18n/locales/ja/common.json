@@ -639,7 +639,7 @@
       "thirdPartyBrands": "製品名、ロゴ、ブランドはそれぞれの所有者に帰属します。使用は識別のみを目的とし、承認を意味するものではありません。"
     },
     "apps": {
-      "description": "nanobot にツールを追加し、チャットで @ を付けて使用できます。",
+      "description": "Apps はチャットで呼び出せる機能を管理します。ホストのランタイムパッケージと現在の健全性は Extensions で別に確認できます。",
       "cliLabel": "アプリ",
       "mcpLabel": "MCP",
       "channelLabel": "チャンネル",

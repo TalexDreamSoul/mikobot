@@ -137,6 +137,7 @@ async def maybe_continue_turn(ctx: TurnContext) -> bool:
             media=[],
             metadata=metadata,
             session_key_override=ctx.session_key,
+            source="runtime",
         )
     )
     return True
