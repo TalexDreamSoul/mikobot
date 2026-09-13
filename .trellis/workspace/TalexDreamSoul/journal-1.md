@@ -28,3 +28,26 @@ Implemented Chinese-first collaboration control plane with organization and bot 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 2: Project privacy v0.6.0 release and GG migration
+<!-- trellis-session: v=2 fp=693ed011684a3b70 -->
+
+**Date**: 2026-09-13
+**Task**: Project privacy v0.6.0 release and GG migration
+**Branch**: `main`
+
+### Summary
+
+Released project-bound privacy and fail-closed member execution as v0.6.0, migrated 355 MB of runtime state from WLCB to GG, cut nanobot.tagzxia.com to an isolated tunnel, retained a stopped source rollback copy, and verified target health, channels, WebUI assets/auth, schema 9, Bubblewrap, and artifact hashes.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5a89ab0` | feat(security): isolate member project runtime state |
+| `0aba9af` | chore: release 0.6.0 |
+
+### Status
+
+[OK] **Completed**
