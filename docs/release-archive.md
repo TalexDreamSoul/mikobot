@@ -9,6 +9,7 @@ For this fork's tagged releases, see [GitHub Releases](https://github.com/TalexD
 
 ## Highlights
 
+- **2026-09-14** Released **v0.7.0** — project introductions and prompt context, read-only project materials, shared project knowledge, complete project workspace navigation, and the Mikobot product copy sweep. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.7.0) for details.
 - **2026-09-13** Released **v0.6.0** — member turns now use project-bound identities, isolated private profiles and archives, revocation-safe sessions, fail-closed Linux Bubblewrap execution, and a member surface separated from host administration. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.6.0) for details.
 - **2026-09-07** 🏠 Released **v0.5.2** — the host owner reaching in over a chat channel is no longer namespaced against themselves, so their WeChat or Telegram conversation keeps the history it already had instead of starting empty. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.5.2) for details.
 - **2026-09-07** 🔌 Released **v0.5.1** — channels move to their own WebUI surface where each instance picks its project, nanobot's own scheduled turns stop minting a user and an empty project apiece and instead inherit the session they run in, and the Pair Code no longer clears itself a second after it appears. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.5.1) for details.
