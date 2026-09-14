@@ -65,6 +65,7 @@ from nanobot.collaboration import (
     CollaborationPermissionError,
     CollaborationRepository,
     ConversationScope,
+    private_memory_root_for_scope,
 )
 from nanobot.collaboration.conversation import canonical_conversation_id
 from nanobot.collaboration.pairing import CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY
@@ -1601,22 +1602,9 @@ class AgentLoop:
             session_metadata=session.metadata if session is not None else None,
             attributes=request_ctx.attributes,
         )
-        member_memory_workspace = (
-            user_private_memory_root(
-                collaboration_scope.user_id,
-                project_id=collaboration_scope.project_id,
-            )
-            if (
-                collaboration_scope is not None
-                and collaboration_scope.user_id is not None
-                and collaboration_scope.project_id is not None
-                and not collaboration_scope.is_local_owner
-            )
-            else (
-                effective_scope.project_path
-                if collaboration_scope is not None and not collaboration_scope.is_local_owner
-                else None
-            )
+        member_memory_workspace = private_memory_root_for_scope(
+            collaboration_scope,
+            project_path=effective_scope.project_path,
         )
         include_agent_memory = (
             (session.policy.persist if session is not None else True)
@@ -1637,6 +1625,11 @@ class AgentLoop:
             session_key=session.key if session is not None else request_ctx.session_key,
             unified_session=self._unified_session,
             allowed_skills=self._profile_selection(collaboration_scope, "skills"),
+            project_description=(
+                collaboration_scope.project.description
+                if collaboration_scope is not None and collaboration_scope.project is not None
+                else None
+            ),
         )
         effective_tools = self._tools_for_conversation_scope(
             tools or self.tools,

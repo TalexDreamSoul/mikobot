@@ -250,7 +250,7 @@ async def test_group_send_uses_group_messages_api() -> None:
         "token",
         "group:conv123",
         "sampleMarkdown",
-        {"text": "hello", "title": "Nanobot Reply"},
+        {"text": "hello", "title": "Mikobot Reply"},
     )
 
     assert ok is True
@@ -1176,7 +1176,7 @@ async def test_send_batch_message_propagates_transport_error() -> None:
             "token",
             "user123",
             "sampleMarkdown",
-            {"text": "hello", "title": "Nanobot Reply"},
+            {"text": "hello", "title": "Mikobot Reply"},
         )
 
     # The POST was attempted exactly once

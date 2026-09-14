@@ -62,7 +62,7 @@ _MAX_FLAG_LENGTH = 64
 
 _DISCLOSURE = (
     "Third-party executable code installed from a package manager at an operator's "
-    "request. Nanobot does not verify, signature-check, or sandbox it: it runs as a "
+    "request. Mikobot does not verify, signature-check, or sandbox it: it runs as a "
     "child process with access to the files, network, and resources the nanobot "
     "process can reach. Any permissions it declares are self-declared and unenforced."
 )
@@ -489,7 +489,7 @@ class CliAppExtensionAdapter:
                 request,
                 package.id,
                 "The package manager reported success but the app's entry point still "
-                "resolves, so nanobot kept it installed and changed nothing else.",
+                "resolves, so Mikobot kept it installed and changed nothing else.",
                 lifecycle,
             )
         return ExtensionActionResult(
@@ -499,7 +499,7 @@ class CliAppExtensionAdapter:
             target_id=request.target_id,
             lifecycle=lifecycle,
             message=(
-                "The CLI app was removed from nanobot, but a command of the same name is "
+                "The CLI app was removed from Mikobot, but a command of the same name is "
                 "still on PATH because it is managed outside nanobot."
                 if last_action.get("still_available") is True
                 else "The CLI app and its generated Skill were removed."

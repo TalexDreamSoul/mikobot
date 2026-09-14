@@ -124,7 +124,7 @@ const TOKEN_REFRESH_MIN_DELAY_MS = 5_000;
 const PAIRING_POLL_INTERVAL_MS = 5_000;
 const PAIRING_IDLE_POLL_INTERVAL_MS = 15_000;
 const PAIRING_DISMISS_SNOOZE_MS = 30_000;
-type ShellView = "chat" | "projects" | "channels" | "settings" | "apps" | "automations" | "skills";
+type ShellView = "chat" | "projects" | "settings" | "apps" | "automations" | "skills";
 type ShellRoute = {
   view: ShellView;
   activeKey: string | null;
@@ -135,11 +135,6 @@ const loadProjectsView = () => import("@/components/projects/ProjectsView");
 const ProjectsView = lazy(async () => {
   const module = await loadProjectsView();
   return { default: module.ProjectsView };
-});
-const loadChannelsView = () => import("@/components/channels/ChannelsView");
-const ChannelsView = lazy(async () => {
-  const module = await loadChannelsView();
-  return { default: module.ChannelsView };
 });
 const loadSettingsView = () => import("@/components/settings/SettingsView");
 const SettingsView = lazy(async () => {
@@ -277,9 +272,6 @@ function readShellRoute(): ShellRoute {
   }
   if (path === "/projects") {
     return { view: "projects", activeKey, settingsSection: "overview" };
-  }
-  if (path === "/channels") {
-    return { view: "channels", activeKey, settingsSection: "overview" };
   }
   if (path === "/apps") {
     return { view: "apps", activeKey, settingsSection: "apps" };
@@ -1144,6 +1136,15 @@ function Shell({
   const { client, getToken } = useClient();
   const collaboration = useCollaborationProjects();
   const adminSurfacesEnabled = collaboration.loaded && collaboration.isAdmin;
+  // Conversations carry the project they run in; the sidebar shows that
+  // project's own name, so one rename reaches every surface.
+  const collaborationProjectNames = useMemo(() => {
+    const names: Record<string, string> = {};
+    for (const project of collaboration.summary?.projects ?? []) {
+      names[project.id] = project.name;
+    }
+    return names;
+  }, [collaboration.summary]);
   const collaborationResolved = collaboration.loaded || !collaboration.loading;
   const { theme, toggle } = useTheme();
   const {
@@ -2170,17 +2171,6 @@ function Shell({
     void loadProjectsView();
   }, []);
 
-  const onOpenChannels = useCallback(() => {
-    setRestrictedSettingsNotice(false);
-    setSessionSearchOpen(false);
-    navigate({ view: "channels", activeKey, settingsSection: "overview" });
-    setMobileSidebarOpen(false);
-  }, [activeKey, navigate]);
-
-  const onChannelsIntent = useCallback(() => {
-    void loadChannelsView();
-  }, []);
-
   const onOpenModelSettings = useCallback(() => {
     onOpenSettings("models");
   }, [onOpenSettings]);
@@ -2693,10 +2683,6 @@ function Shell({
       document.title = t("app.documentTitle.chat", { title: t("sidebar.projects") });
       return;
     }
-    if (view === "channels") {
-      document.title = t("app.documentTitle.chat", { title: t("sidebar.channels") });
-      return;
-    }
     if (view === "apps") {
       document.title = t("app.documentTitle.chat", {
         title: t("settings.nav.apps", { defaultValue: "Apps" }),
@@ -2768,18 +2754,15 @@ function Shell({
     onNewChatInProject,
     onOpenSettings,
     onOpenProjects,
-    onOpenChannels,
     onOpenApps,
     onOpenAutomations,
     onOpenSkills,
     onSettingsIntent,
     showAdminNavigation: adminSurfacesEnabled,
     onProjectsIntent,
-    onChannelsIntent,
     onOpenSearch: onOpenSessionSearch,
     activeUtility:
       view === "projects"
-      || view === "channels"
       || view === "apps"
       || view === "automations"
       || view === "skills"
@@ -2793,6 +2776,7 @@ function Shell({
     sessionOrder: sidebarState.session_order,
     titleOverrides: sidebarState.title_overrides,
     projectNameOverrides: sidebarState.project_name_overrides,
+    projectNames: collaborationProjectNames,
     collapsedGroups: sidebarState.collapsed_groups,
     runningChatIds: runningChatIdList,
     updatedChatIds: updatedChatIdList,
@@ -3089,17 +3073,9 @@ function Shell({
                 <Suspense fallback={<SurfaceLoadingFallback />}>
                   <ProjectsView
                     projects={collaboration}
+                    sessions={sessions}
                     onToggleSidebar={toggleSidebar}
-                    hostChromeInset={showHostChrome}
-                  />
-                </Suspense>
-              </div>
-            ) : view === "channels" ? (
-              <div className="absolute inset-0 flex flex-col">
-                <Suspense fallback={<SurfaceLoadingFallback />}>
-                  <ChannelsView
-                    projects={collaboration}
-                    onToggleSidebar={toggleSidebar}
+                    onOpenSession={onSelectChat}
                     hostChromeInset={showHostChrome}
                   />
                 </Suspense>

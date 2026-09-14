@@ -18,7 +18,7 @@
       },
       "userId": {
         "label": "사용자 ID",
-        "placeholder": "@nanobot:matrix.org"
+        "placeholder": "@Mikobot:matrix.org"
       },
       "password": {
         "label": "비밀번호",

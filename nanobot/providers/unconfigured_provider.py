@@ -26,7 +26,7 @@ class UnconfiguredProvider(LLMProvider):
     ) -> LLMResponse:
         return LLMResponse(
             content=(
-                "Nanobot needs a model before it can chat. Open Settings → Models "
+                "Mikobot needs a model before it can chat. Open Settings → Models "
                 "to configure a provider and model, then send your message again."
             ),
             finish_reason="error",

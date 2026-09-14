@@ -208,7 +208,7 @@ export class Transcript {
       paddingLeft: 1,
       paddingRight: 1,
     })
-    const title = this.createText(`>_  nanobot  v${options.version}`, "text", true)
+    const title = this.createText(`>_  Mikobot  v${options.version}`, "text", true)
     const context = this.createText([
       "",
       `${options.model}  ·  ${options.access}`,

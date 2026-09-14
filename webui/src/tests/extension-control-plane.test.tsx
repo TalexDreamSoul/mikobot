@@ -425,7 +425,7 @@ describe("Simplified Chinese", () => {
     expect(within(panel).getByText("未隔离")).toBeInTheDocument();
     expect(within(panel).getAllByText("运营者信任").length).toBeGreaterThan(0);
     expect(within(panel).getAllByText("在子进程中运行").length).toBeGreaterThan(0);
-    expect(within(panel).getByText(/由扩展包自行声明，nanobot 并不强制执行/)).toBeInTheDocument();
+    expect(within(panel).getByText(/由扩展包自行声明，Mikobot 并不强制执行/)).toBeInTheDocument();
     expect(within(panel).getByRole("button", { name: "启用" })).toBeInTheDocument();
     expect(within(panel).queryByText("Not isolated")).toBeNull();
     expect(within(panel).queryByText("Operator-trusted")).toBeNull();

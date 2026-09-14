@@ -183,28 +183,66 @@ class TestLoadBootstrapFiles:
 
 
 # ---------------------------------------------------------------------------
-# _is_template_content (static)
+# bundled_default_text / is_bundled_default
 # ---------------------------------------------------------------------------
 
 
-class TestIsTemplateContent:
-    def test_nonexistent_template_returns_false(self):
-        assert ContextBuilder._is_template_content("anything", "nonexistent/path.md") is False
+class TestBundledDefaultText:
+    def test_nonexistent_template_returns_none(self):
+        from nanobot.utils.helpers import bundled_default_text
+
+        assert bundled_default_text("anything", "nonexistent/path.md") is None
 
     def test_content_matching_template(self):
-        from importlib.resources import files as pkg_files
-        tpl = pkg_files("nanobot") / "templates" / "memory" / "MEMORY.md"
-        if not tpl.is_file():
+        from nanobot.utils.helpers import is_bundled_default, load_bundled_template
+
+        original = load_bundled_template("memory/MEMORY.md")
+        if original is None:
             pytest.skip("MEMORY.md template not bundled")
-        original = tpl.read_text(encoding="utf-8")
-        assert ContextBuilder._is_template_content(original, "memory/MEMORY.md") is True
+        assert is_bundled_default(original, "memory/MEMORY.md") is True
 
     def test_modified_content_returns_false(self):
-        from importlib.resources import files as pkg_files
-        tpl = pkg_files("nanobot") / "templates" / "memory" / "MEMORY.md"
-        if not tpl.is_file():
-            pytest.skip("MEMORY.md template not bundled")
-        assert ContextBuilder._is_template_content("totally different", "memory/MEMORY.md") is False
+        from nanobot.utils.helpers import is_bundled_default
+
+        assert is_bundled_default("totally different", "memory/MEMORY.md") is False
+
+    def test_previous_product_name_still_counts_as_the_default(self):
+        """A default written before the rename is not user-authored text."""
+        from nanobot.utils.helpers import bundled_default_text, load_bundled_template
+
+        current = load_bundled_template("SOUL.md")
+        if current is None:
+            pytest.skip("SOUL.md template not bundled")
+        previous = current.replace("Mikobot", "nanobot")
+        assert previous != current
+
+        assert bundled_default_text(previous, "SOUL.md") == current
+
+    def test_edited_default_is_kept(self):
+        from nanobot.utils.helpers import bundled_default_text, load_bundled_template
+
+        current = load_bundled_template("SOUL.md")
+        if current is None:
+            pytest.skip("SOUL.md template not bundled")
+
+        assert bundled_default_text(current + "\nAlways answer in Chinese.\n", "SOUL.md") is None
+
+    def test_previous_default_soul_is_upgraded_in_the_prompt(self, tmp_path):
+        """The model must not keep reading the previous product name."""
+        from nanobot.utils.helpers import is_bundled_default, load_bundled_template
+
+        current = load_bundled_template("SOUL.md")
+        if current is None:
+            pytest.skip("SOUL.md template not bundled")
+        assert is_bundled_default(current, "SOUL.md")
+        (tmp_path / "SOUL.md").write_text(
+            current.replace("Mikobot", "nanobot"), encoding="utf-8"
+        )
+
+        result = _builder(tmp_path)._load_bootstrap_files()
+
+        assert current.strip() in result
+        assert "nanobot" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +398,26 @@ class TestBuildSystemPrompt:
         result = builder.build_system_prompt()
         assert "## AGENTS.md" not in result
         assert "[Archived Context Summary]" not in result
+
+    def test_project_description_is_rendered_as_reference_context(self, tmp_path):
+        """A scoped project's introduction reaches the prompt under the Project Context section."""
+        result = _builder(tmp_path).build_system_prompt(
+            project_description="Release train\nShip every Friday.",
+            include_memory_recent_history=False,
+        )
+
+        assert "# Project Context" in result
+        assert "Ship every Friday." in result
+
+    @pytest.mark.parametrize("description", [None, "", "   \n\t "])
+    def test_no_project_description_adds_no_context_section(self, tmp_path, description):
+        """No introduction, or a blank one, leaves the prompt without a Project Context section."""
+        result = _builder(tmp_path).build_system_prompt(
+            project_description=description,
+            include_memory_recent_history=False,
+        )
+
+        assert "# Project Context" not in result
 
 
 # ---------------------------------------------------------------------------

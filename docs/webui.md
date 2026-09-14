@@ -82,10 +82,11 @@ This path avoids hand-editing `config.json` for normal setup. Use the reference 
 | Workspace | Pick the project workspace before asking for file or shell work |
 | Access | Choose the access mode for local capabilities allowed by your gateway configuration |
 | Composer | Send text, images, voice input, slash commands, and `@` mentions for topics, Apps, or MCP presets |
-| Channels | Connect and validate chat platforms, install their optional support, and manage saved channel setup |
+| Channels | In Settings: connect and validate chat platforms, install their optional support, and manage saved channel setup. Assigning a connected instance to a project happens in **Projects → Channels** |
 | Apps | Install, test, update, and use local CLI App adapters and MCP presets |
 | Skills | Inspect and manage installed skills, or discover skills from supported marketplaces |
 | Automations | Review, search, run, pause, edit, and delete scheduled and local-trigger agent turns |
+| Projects | Manage shared server-side workspaces: the task board, the project's conversations, approved apps, members, channel assignments, built-in automations, and Skill/MCP limits |
 | Settings | Adjust models, providers, image generation, voice, web tools, runtime, and safety options |
 
 ## Topic Workspace
@@ -209,15 +210,16 @@ Test a new channel with a private DM. When a supported channel sends a pairing c
 ### Projects, members, and channel assignments
 
 The top-level **Projects** page manages shared server-side workspaces, members,
-and Skill/MCP allowlists. It is not the host composer's working-directory picker.
+channel assignments, and Skill/MCP allowlists. It is not the host composer's
+working-directory picker.
 
 1. The host configures the model and connects the intended channel instance.
 2. A member signs in through configured OIDC or a trusted authenticated proxy.
    They can copy their user ID from **Projects**, even before joining a shared project.
 3. A project owner or administrator adds that ID to the intended project's members.
-4. In top-level **Channels**, select an unassigned instance and its project. An
+4. Open the project's **Channels** section and select an unassigned instance. An
    administrator chooses the assignee from that project's member list; a member
-   may pair only an instance they connected themselves, for themselves.
+   may pair only an instance they connected themselves, into a project they manage.
 5. Generate a Pair Code, send it through the exact channel instance, and complete
    verification. Assignment and runtime activation are separate: an activation
    failure remains visible and must be resolved through the channel controls.
@@ -238,7 +240,8 @@ user/project storage, not the shared project folder. Shared project files are
 intentional collaboration material. Member Dream does not turn private dialogue
 into shared Skills. Sidebar state and signed attachment access are user-scoped.
 
-Members can use local Appearance, Projects, their Channels, and their Automations.
+Members can use local Appearance, Projects (including the channel assignments they
+manage), and their Automations.
 Global model credentials, Skills/Apps installation, security settings, and runtime
 inventory remain administrator surfaces. A member's deep link to a host-only
 settings page opens Appearance with an explanation, without requesting host inventory.
@@ -246,6 +249,58 @@ settings page opens Appearance with an explanation, without requesting host inve
 Member shell execution requires Linux Bubblewrap and fails closed when unavailable;
 macOS/Windows member requests do not run unsandboxed. Host-managed CLI Apps and host
 runtime scratchpad/configuration are not member capabilities. See [Security](../SECURITY.md).
+
+### Project conversations
+
+Every conversation runs inside a project. **Projects → Conversations** lists the
+ones the project owns: a chat started with a project keeps it, and a chat with no
+project of its own belongs to the caller's default project — which is the built-in
+**MikoAssistant** project for the host. The sidebar shows the same attribution: a
+project's conversations are grouped under the project's own name, so renaming a
+project in **Projects** renames its group, and the host's unattributed chats are
+listed under the default project instead of a nameless bucket.
+
+The panel lists only the caller's own conversations, because transcripts stay
+private to their owner even inside a shared project.
+
+### Project overview, materials, and knowledge
+
+**Projects → Overview** stores a shared introduction and context for the project.
+Project owners can edit it; members can read it. The text is included in scoped
+Mikobot prompts as reference context, but it cannot override system, security,
+or authorization instructions.
+
+**Projects → Materials** lists shared files below the project workspace and
+previews text files in place. The response exposes relative paths only. Dotfiles,
+`SOUL.md`, `USER.md`, `memory/MEMORY.md`, raw history, symlinks, and traversal or
+absolute paths are not available through this surface.
+
+**Projects → Knowledge** shows the shared project's `memory/MEMORY.md`, which
+project Dream maintains. It is deliberately separate from member-private
+profiles, memory, and raw conversation history; those private stores are never
+rendered in the project page.
+
+### Project task board
+
+Every project owns a task board under **Projects → Tasks**: three columns
+(**To do**, **In progress**, **Done**) that every member of the project reads and
+writes. Cards hold a title and an optional note, and each card records who added
+it. The board is the project's own state, not a personal to-do list: another
+member may move your card, and only its author, a project owner, or an
+administrator may discard one.
+
+**Projects → Apps** lists the apps this host offers the project. An app is an
+Agent Plugin, and approving one grants the skills and MCP servers it contributes.
+The approval records the exact package revision the host ran at that moment.
+
+When the host later installs a different revision — or the app is disabled or
+removed — the project loses those capabilities and the row shows what to approve
+again. Adding the app back pins the revision the host runs then and restores the
+capabilities it contributes at that point. Only a project owner or an
+administrator can add, re-approve, or remove an app.
+
+Approving an app does not widen a project that already allows everything; the
+approval is recorded, and a later revocation writes the restriction explicitly.
 
 ## Apps
 

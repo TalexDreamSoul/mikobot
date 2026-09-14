@@ -1,11 +1,11 @@
 ---
 name: update-setup
-description: "One-time setup wizard for the nanobot upgrade skill. Triggers: setup update, configure update, 设置更新, 初始化更新."
+description: "One-time setup wizard for the Mikobot upgrade skill. Triggers: setup update, configure update, 设置更新, 初始化更新."
 ---
 
 # Update Setup
 
-Generate a personalized upgrade skill in Nanobot's agent workspace.
+Generate a personalized upgrade skill in Mikobot's agent workspace.
 
 Use the absolute `<agent-workspace>/skills/update/SKILL.md` path, where
 `<agent-workspace>` is shown in the system prompt. Never substitute a project-relative
@@ -40,7 +40,7 @@ likely install method. Do not treat them as confirmation.
 CRITICAL: Do not write `<agent-workspace>/skills/update/SKILL.md` until the install method is
 explicitly confirmed by the user. The install method must come from a user
 answer or confirmation, not from inference alone. If you cannot get a clear
-answer, stop and ask the user to rerun this setup when they know how nanobot was
+answer, stop and ask the user to rerun this setup when they know how Mikobot was
 installed.
 
 Ask the user the questions below, one at a time, in your response text. Wait for
@@ -58,7 +58,7 @@ If the user selected `not sure`, explain the difference between the options and
 stop. Do not generate the upgrade skill.
 
 If the user selected `source (git clone)`, ask for the local checkout path:
-`question: "Where is your nanobot source checkout? Enter an absolute path or a path relative to this workspace:"`.
+`question: "Where is your Mikobot source checkout? Enter an absolute path or a path relative to this workspace:"`.
 
 **Question 2 — Optional dependencies:**
 
@@ -111,19 +111,19 @@ Use `write_file` to write `<agent-workspace>/skills/update/SKILL.md` with this c
 ```
 ---
 name: update
-description: "Upgrade nanobot to the latest version. Triggers: upgrade nanobot, update nanobot, 升级nanobot, 更新nanobot."
+description: "Upgrade Mikobot to the latest version. Triggers: upgrade mikobot, update mikobot, 升级 mikobot, 更新 mikobot."
 ---
 
-# Update Nanobot
+# Update Mikobot
 
 1. (If proxy configured) Set proxy: `export http_proxy=URL && export https_proxy=URL`
 2. Use `exec` to run the preflight check: <PREFLIGHT_CHECK>. If it fails, stop and tell the user to rerun `update-setup` because the saved install method no longer matches this environment.
 3. Use `exec` to run the upgrade command: <UPGRADE_COMMAND>
 4. Use `exec` to verify: `nanobot --version`
-5. Tell the user the new version. Say: "Run `/restart` to restart nanobot and apply the update. If `/restart` is unavailable in this channel, restart the nanobot process manually."
+5. Tell the user the new version. Say: "Run `/restart` to restart Mikobot and apply the update. If `/restart` is unavailable in this channel, restart the Mikobot process manually."
 ```
 
 ## Step 5: Confirm
 
 Only after `write_file` succeeds, tell the user:
-"Upgrade skill created. Say 'upgrade nanobot' when you want to update."
+"Upgrade skill created. Say 'upgrade Mikobot' when you want to update."

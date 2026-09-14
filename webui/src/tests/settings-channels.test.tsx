@@ -610,13 +610,13 @@ describe("Settings channels", () => {
       "false",
     );
 
-    expect(screen.queryByText("cli_def...ault")).not.toBeInTheDocument();
+    expect(screen.queryByText("cli_def...ault · default")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Support Bot/ }));
     expect(screen.getByRole("button", { name: /Support Bot/ })).toHaveAttribute(
       "aria-expanded",
       "true",
     );
-    expect(screen.getAllByText("cli_def...ault").length).toBeGreaterThan(0);
+    expect(screen.getByText("cli_def...ault · default")).toBeInTheDocument();
     expect(screen.getByText("Advanced")).toBeInTheDocument();
     expect(screen.getByText("Topic isolation")).toBeInTheDocument();
 
@@ -768,9 +768,9 @@ describe("Settings channels", () => {
       "aria-checked",
       "true",
     );
-    expect(screen.queryByText("cli_sup...port")).not.toBeInTheDocument();
+    expect(screen.queryByText("cli_sup...port · default")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Support Bot" }));
-    expect(screen.getByText("cli_sup...port")).toBeInTheDocument();
+    expect(screen.getByText("cli_sup...port · default")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Replace assistant" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
     const confirmation = await screen.findByRole("dialog", { name: "Install support for Feishu?" });
@@ -794,6 +794,56 @@ describe("Settings channels", () => {
       150_000,
     ));
     expect(document.querySelector('img[src="https://example.com/support.png"]')).toBeTruthy();
+  });
+
+  it("summarizes a Feishu assistant that saved no App ID by its instance id", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/settings") return jsonResponse(settingsPayload());
+        if (url === "/api/settings/cli-apps") return jsonResponse({ apps: [], installed_count: 0 });
+        if (url === "/api/settings/mcp-presets") return jsonResponse({ presets: [], installed_count: 0 });
+        if (url === "/api/settings/nanobot-features") {
+          return jsonResponse({
+            features: [{
+              name: "feishu",
+              display_name: "Feishu",
+              webui: "webui/index.tsx",
+              type: "channel",
+              enabled: true,
+              configured: true,
+              installed: true,
+              ready: true,
+              status: "enabled",
+              running: true,
+              runtime_status: "running",
+              install_supported: true,
+              requires_restart: true,
+              instances: [{
+                id: "default",
+                name: "nanobot",
+                display_name: "Plain Bot",
+                enabled: true,
+                running: true,
+                runtime_status: "running",
+                configured: true,
+                config_values: { "channels.feishu.appSecret": "saved" },
+                configured_fields: ["channels.feishu.appSecret"],
+              }],
+            }],
+            enabled_count: 1,
+          });
+        }
+        return { ok: false, status: 404, json: async () => ({}) } as Response;
+      }),
+    );
+
+    renderSettingsView({ initialSection: "channels" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Plain Bot" }));
+
+    expect(screen.getByText("No App ID · default")).toBeInTheDocument();
   });
 
   it("does not call a configured Feishu assistant connected after runtime failure", async () => {

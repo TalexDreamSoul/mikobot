@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from typing import Any, Protocol, cast
 
 from nanobot.cron.types import CronJob
@@ -108,7 +108,7 @@ def all_automations_payload(
 
 
 def serialize_automation_jobs(
-    jobs: list[AutomationJob],
+    jobs: Sequence[AutomationJob],
     *,
     pending_job_ids: Collection[str] | None = None,
     include_details: bool = False,

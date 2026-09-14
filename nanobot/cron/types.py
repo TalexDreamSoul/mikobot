@@ -58,6 +58,9 @@ class CronPayload:
     to: str | None = None  # e.g. phone number
     channel_meta: dict[str, Any] = field(default_factory=dict)
     session_key: str | None = None  # original session key for correct session recording
+    # Set on a project's built-in automations (Heartbeat and Dream). The job runs
+    # for that project only: its workspace, its memory, its conversations.
+    project_id: str | None = None
     origin_channel: str | None = None
     origin_chat_id: str | None = None
     origin_metadata: dict[str, Any] = field(default_factory=dict)
@@ -74,6 +77,7 @@ class CronPayload:
                 get_camel_snake(data, "channelMeta", "channel_meta", {}) or {}
             ),
             session_key=get_camel_snake(data, "sessionKey", "session_key"),
+            project_id=get_camel_snake(data, "projectId", "project_id"),
             origin_channel=get_camel_snake(data, "originChannel", "origin_channel"),
             origin_chat_id=get_camel_snake(data, "originChatId", "origin_chat_id"),
             origin_metadata=dict(

@@ -1484,7 +1484,7 @@ class MCPProvider:
                 logger.warning("MCP hot reload could not read config: {}", exc)
                 return {
                     "ok": False,
-                    "message": "Could not reload MCP config. Restart nanobot to pick up changes.",
+                    "message": "Could not reload MCP config. Restart Mikobot to pick up changes.",
                     "requires_restart": True,
                 }
 

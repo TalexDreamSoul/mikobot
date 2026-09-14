@@ -11,7 +11,7 @@ class FeishuConfig(Base):
     """Feishu/Lark channel configuration using WebSocket long connection."""
 
     instance_id: str = "default"
-    name: str = "nanobot"
+    name: str = "Mikobot"
     identity_key: str = ""
     enabled: bool = False
     app_id: str = ""

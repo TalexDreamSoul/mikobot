@@ -167,7 +167,7 @@ describe("App OIDC authentication", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("main", { name: "Sign in to nanobot" })).toBeInTheDocument();
+    expect(await screen.findByRole("main", { name: "Sign in to Mikobot" })).toBeInTheDocument();
     const continueWithSso = screen.getByRole("link", { name: "Continue with SSO" });
     expect(continueWithSso).toHaveAttribute("href", "/auth/login?return_to=%2Fsettings");
     expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();

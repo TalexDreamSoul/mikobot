@@ -312,7 +312,7 @@ def test_onboard_fresh_install(mock_paths):
     assert result.exit_code == 0
     assert "Created config" in result.stdout
     assert "Created workspace" in result.stdout
-    assert "nanobot is ready" in result.stdout
+    assert "Mikobot is ready" in result.stdout
     assert config_file.exists()
     assert (workspace_dir / "AGENTS.md").exists()
     assert (workspace_dir / "memory" / "MEMORY.md").exists()
@@ -325,7 +325,7 @@ def test_onboard_recommends_webui(mock_paths):
     result = runner.invoke(app, ["onboard"])
 
     assert result.exit_code == 0
-    assert "✓ nanobot is ready. Run: nanobot webui" in result.stdout
+    assert "✓ Mikobot is ready. Run: nanobot webui" in result.stdout
 
 
 def test_onboard_existing_config_refresh(mock_paths):
@@ -2069,6 +2069,12 @@ def test_agent_uses_workspace_directory_for_cron_store(monkeypatch, tmp_path: Pa
         def __init__(self, store_path: Path) -> None:
             seen["cron_store"] = store_path
 
+        def get_job(self, _job_id: str):
+            return None
+        def list_jobs(self, include_disabled: bool = False) -> list:
+            del include_disabled
+            return []
+
     class _FakeAgentLoop:
         @classmethod
         def from_config(cls, config, bus=None, **extra):
@@ -2118,6 +2124,12 @@ def test_agent_workspace_override_does_not_migrate_legacy_cron(
     class _FakeCron:
         def __init__(self, store_path: Path) -> None:
             seen["cron_store"] = store_path
+
+        def get_job(self, _job_id: str):
+            return None
+        def list_jobs(self, include_disabled: bool = False) -> list:
+            del include_disabled
+            return []
 
     class _FakeAgentLoop:
         @classmethod
@@ -2174,6 +2186,12 @@ def test_agent_custom_config_workspace_does_not_migrate_legacy_cron(
     class _FakeCron:
         def __init__(self, store_path: Path) -> None:
             seen["cron_store"] = store_path
+
+        def get_job(self, _job_id: str):
+            return None
+        def list_jobs(self, include_disabled: bool = False) -> list:
+            del include_disabled
+            return []
 
     class _FakeAgentLoop:
         @classmethod
@@ -2533,6 +2551,9 @@ def test_heartbeat_empty_response_still_retains_recent_messages(
         def list_sessions(self) -> list[dict[str, str]]:
             return [{"key": "telegram:u1"}]
 
+        def flush_all(self) -> int:
+            return 0
+
     class _FakeCron:
         def __init__(self, _store_path: Path) -> None:
             self.on_job = None
@@ -2543,6 +2564,15 @@ def test_heartbeat_empty_response_still_retains_recent_messages(
 
         def register_system_job(self, _job: CronJob) -> None:
             raise _StopGatewayError("stop")
+
+        def stop(self) -> None:
+            return None
+
+        def get_job(self, _job_id: str):
+            return None
+        def list_jobs(self, include_disabled: bool = False) -> list:
+            del include_disabled
+            return []
 
     class _FakeAgentLoop(_GatewayAgentContractStub):
         @classmethod
@@ -2570,6 +2600,9 @@ def test_heartbeat_empty_response_still_retains_recent_messages(
     class _FakeChannelManager:
         def __init__(self, *_args, **_kwargs) -> None:
             self.enabled_channels = ["telegram"]
+
+        async def stop_all(self) -> None:
+            return None
 
     async def _unexpected_evaluator(*_args, **_kwargs) -> bool:
         raise AssertionError("empty heartbeat response must not be evaluated")
@@ -3212,7 +3245,7 @@ def test_webui_foreground_refuses_occupied_webui_port(monkeypatch, tmp_path: Pat
     result = runner.invoke(app, ["webui", "--config", str(config_file), "--yes"])
 
     assert result.exit_code == 1
-    assert "nanobot cannot start because one of its local ports is already in use" in result.stdout
+    assert "Mikobot cannot start because one of its local ports is already in use" in result.stdout
     assert "--port" in result.stdout
     assert "--gateway-port" in result.stdout
 
@@ -3417,6 +3450,12 @@ def test_gateway_unbound_agent_cron_is_skipped(
             self.on_job = None
             seen["cron"] = self
 
+        def get_job(self, _job_id: str):
+            return None
+        def list_jobs(self, include_disabled: bool = False) -> list:
+            del include_disabled
+            return []
+
     class _FakeAgentLoop(_GatewayAgentContractStub):
         @classmethod
         def from_config(cls, config, bus=None, **extra):
@@ -3532,6 +3571,12 @@ def test_gateway_bound_cron_runs_as_session_turn(
 
         def write_run_record(self, run_id: str, record: dict[str, object]) -> None:
             seen["run_records"].append((run_id, record))
+
+        def get_job(self, _job_id: str):
+            return None
+        def list_jobs(self, include_disabled: bool = False) -> list:
+            del include_disabled
+            return []
 
     class _FakeAgentLoop(_GatewayAgentContractStub):
         @classmethod
@@ -3754,6 +3799,20 @@ def test_gateway_local_trigger_queue_submits_agent_turns(
             seen.setdefault("cron_reconciliation", []).append(f"remove:{job_id}")
             return False
 
+        def get_job(self, _job_id: str):
+            return None
+
+        def list_jobs(self, include_disabled: bool = False) -> list:
+            del include_disabled
+            # The ids a pre-project release stored, still protected system jobs.
+            return [
+                SimpleNamespace(
+                    id=job_id,
+                    payload=SimpleNamespace(kind="system_event", project_id=None),
+                )
+                for job_id in ("dream", "heartbeat")
+            ]
+
     class _FakeAgentLoop(_GatewayAgentContractStub):
         @classmethod
         def from_config(cls, config, bus=None, **extra):
@@ -3830,7 +3889,7 @@ def test_gateway_local_trigger_queue_submits_agent_turns(
     turn_delivery_factory = agent_kwargs["turn_delivery_factory"]
     assert isinstance(turn_delivery_factory, TurnDeliveryFactory)
     assert turn_delivery_factory.bus is bus
-    assert seen["cron_reconciliation"] == ["remove:dream", "remove:heartbeat", "status"]
+    assert sorted(seen["cron_reconciliation"]) == ["remove:dream", "remove:heartbeat", "status"]
     assert isinstance(turn_delivery_factory.route_policy, WebuiTurnRoutePolicy)
     assert turn_delivery_factory.route_policy.sessions is agent.sessions
 
@@ -4055,6 +4114,12 @@ def test_gateway_health_endpoint_binds_and_serves_expected_responses(
 
         def register_system_job(self, _job) -> None:
             return None
+
+        def get_job(self, _job_id: str):
+            return None
+        def list_jobs(self, include_disabled: bool = False) -> list:
+            del include_disabled
+            return []
 
     class _FakeServer:
         async def __aenter__(self):
@@ -4291,6 +4356,12 @@ def test_gateway_agent_task_owns_initial_mcp_provider_close(
         def register_system_job(self, _job) -> None:
             return None
 
+        def get_job(self, _job_id: str):
+            return None
+        def list_jobs(self, include_disabled: bool = False) -> list:
+            del include_disabled
+            return []
+
     class _FakeServer:
         async def __aenter__(self):
             return self
@@ -4407,6 +4478,12 @@ def test_gateway_shutdown_event_exits_forever_runtime_tasks(
 
         def register_system_job(self, _job) -> None:
             return None
+
+        def get_job(self, _job_id: str):
+            return None
+        def list_jobs(self, include_disabled: bool = False) -> list:
+            del include_disabled
+            return []
 
     class _FakeServer:
         async def __aenter__(self):

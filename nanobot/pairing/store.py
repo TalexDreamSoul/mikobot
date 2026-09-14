@@ -282,7 +282,7 @@ def format_pairing_reply(code: str) -> str:
     return (
         "Hi there! This assistant only responds to approved users.\n\n"
         f"Your pairing code is: `{code}`\n\n"
-        "To get access, ask the owner to approve this request in the nanobot WebUI.\n"
+        "To get access, ask the owner to approve this request in the Mikobot WebUI.\n"
         f"If the WebUI is not available, the owner can also send `/pairing approve {code}`."
     )
 

@@ -1182,7 +1182,7 @@ description: {json.dumps(description, ensure_ascii=False)}
 
 # {display}
 
-Use this skill when the user asks nanobot to operate {display} through its installed CLI app.
+Use this skill when the user asks Mikobot to operate {display} through its installed CLI app.
 
 If the user attached `@{name}` in chat, treat that as the selected app for the current turn.
 
@@ -1209,7 +1209,7 @@ Prefer machine-readable output when the CLI supports `--json`.
         if marker in content:
             return content
         note = f"""{marker}
-## Nanobot execution
+## Mikobot execution
 
 Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not invoke this CLI through shell unless the user explicitly asks. Prefer this skill when Runtime Context mentions `@{name}` as a CLI App Attachment.
 """

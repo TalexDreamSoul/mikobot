@@ -347,7 +347,7 @@ def test_uninstall_delegates_once_and_reports_removal() -> None:
 
 
 def test_uninstall_that_leaves_the_entry_point_reports_a_truthful_partial_outcome() -> None:
-    """AC11: nanobot kept it installed, says so, and claims no rollback or path."""
+    """AC11: Mikobot kept it installed, says so, and claims no rollback or path."""
     owner = _Owner(
         outcomes={
             "uninstall": {

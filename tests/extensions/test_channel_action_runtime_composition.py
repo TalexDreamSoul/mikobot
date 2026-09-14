@@ -188,6 +188,13 @@ def test_gateway_channel_services_defer_manager_actions_and_scope_config_writes(
         def remove_system_job(self, _job_id: str) -> None:
             return None
 
+        def get_job(self, _job_id: str) -> None:
+            return None
+
+        def list_jobs(self, include_disabled: bool = False) -> list[object]:
+            del include_disabled
+            return []
+
         def status(self) -> dict[str, int]:
             raise StopGatewayError
 

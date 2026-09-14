@@ -211,7 +211,7 @@ export function ExtensionPackageDetail({
                 isolation: isolationLabel(t, pkg.isolated),
                 execution: executionLabel(t, pkg.execution),
                 defaultValue:
-                  "{{trust}} · {{isolation}} · {{execution}}. This code may read files, credentials, network, and any other resource visible to the nanobot process. nanobot does not verify it or make it safe.",
+                  "{{trust}} · {{isolation}} · {{execution}}. This code may read files, credentials, network, and any other resource visible to the Mikobot process. Mikobot does not verify it or make it safe.",
               })}
             </p>
           </div>
@@ -287,11 +287,11 @@ export function ExtensionPackageDetail({
         <p className="mt-1.5 text-[12px] leading-5 text-muted-foreground">
           {pkg.permissions_enforced
             ? t("settings.extensions.detail.permissionsEnforced", {
-              defaultValue: "These permissions are enforced by nanobot.",
+              defaultValue: "These permissions are enforced by Mikobot.",
             })
             : t("settings.extensions.detail.permissionsUnenforced", {
               defaultValue:
-                "Self-declared by the package and not enforced. nanobot does not restrict what this extension can reach.",
+                "Self-declared by the package and not enforced. Mikobot does not restrict what this extension can reach.",
             })}
         </p>
       </div>

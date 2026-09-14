@@ -510,8 +510,8 @@ class SystemSettingsHandler:
         except OptionalFeatureError as exc:
             return SettingsRouteResult.failure(exc.status, exc.message)
         except Exception:
-            self.logger.exception("failed to load nanobot features")
-            return SettingsRouteResult.failure(500, "failed to load nanobot features")
+            self.logger.exception("failed to load Mikobot features")
+            return SettingsRouteResult.failure(500, "failed to load Mikobot features")
 
     async def _features_action(
         self,
@@ -562,7 +562,7 @@ class SystemSettingsHandler:
         except OptionalFeatureError as exc:
             return SettingsRouteResult.failure(exc.status, exc.message)
         except Exception:
-            self.logger.exception("nanobot feature action '{}' failed", action)
+            self.logger.exception("Mikobot feature action '{}' failed", action)
             return SettingsRouteResult.failure(500, "extension action could not be completed")
         return SettingsRouteResult.success(payload, decorate_restart=True, restart_section="runtime")
 

@@ -733,7 +733,7 @@ class JsonlSessionStore:
         if not _WORKSPACE_ID_RE.fullmatch(value):
             raise RuntimeError(
                 f"workspace identity marker is invalid: {marker}; "
-                "restore its original 32-character identifier before starting nanobot"
+                "restore its original 32-character identifier before starting Mikobot"
             )
         return value
 
@@ -772,7 +772,7 @@ class JsonlSessionStore:
         if len(matches) > 1:
             raise RuntimeError(
                 f"multiple session namespaces claim workspace {workspace}; "
-                "remove the stale namespace marker before starting nanobot"
+                "remove the stale namespace marker before starting Mikobot"
             )
         return matches[0] if matches else None
 

@@ -32,11 +32,12 @@ from nanobot.collaboration import (
     COLLABORATION_BINDING_METADATA_KEY,
     COLLABORATION_PROJECT_METADATA_KEY,
     COLLABORATION_USER_METADATA_KEY,
+    CollaborationBuiltinProjectError,
     CollaborationConflictError,
     CollaborationRepository,
     CollaborationStoreError,
 )
-from nanobot.collaboration.models import ChannelProvision, MembershipRole, User
+from nanobot.collaboration.models import ChannelProvision, MembershipRole, TaskStatus, User
 from nanobot.command.builtin import builtin_command_palette
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.cron.session_turns import is_bound_cron_job
@@ -57,11 +58,14 @@ from nanobot.webui.collaboration_api import (
     capability_allowlists,
     channel_assignment_payload,
     claimable_channel_payload,
+    optional_description,
     optional_enabled,
     optional_string,
     pairing_challenge_payload,
     project_member_payload,
     project_payload,
+    project_task_payload,
+    project_task_status,
     required_string,
     user_payload,
 )
@@ -137,6 +141,16 @@ from nanobot.webui.native_folder_picker import (
     pick_native_folder,
 )
 from nanobot.webui.oidc_auth import OidcAuthenticator, OidcCapacityError, OidcError
+from nanobot.webui.project_apps import (
+    ProjectAppCatalog,
+    ProjectAppError,
+    reconcile_project_apps,
+)
+from nanobot.webui.project_materials import (
+    ProjectMaterialsError,
+    project_materials_payload,
+    project_memory_payload,
+)
 from nanobot.webui.session_automations import (
     serialize_automation_jobs,
     session_automation_jobs,
@@ -250,6 +264,11 @@ _WEBUI_MUTATION_PATHS = {
     "collaboration.project.member.remove": "/api/collaboration/mutations/project/member/remove",
     "collaboration.assignment.update": "/api/collaboration/mutations/assignment/update",
     "collaboration.assignment.delete": "/api/collaboration/mutations/assignment/delete",
+    "collaboration.project.app.join": "/api/collaboration/mutations/project/app/join",
+    "collaboration.project.app.leave": "/api/collaboration/mutations/project/app/leave",
+    "collaboration.task.create": "/api/collaboration/mutations/task/create",
+    "collaboration.task.update": "/api/collaboration/mutations/task/update",
+    "collaboration.task.delete": "/api/collaboration/mutations/task/delete",
 }
 
 _WEBUI_CHANNEL_CONNECT_ACTIONS = {
@@ -902,14 +921,10 @@ class GatewayHTTPHandler:
             extra_headers=_NO_STORE_HEADERS,
         )
 
-    async def _session_owned_by_user(
-        self, session_key: str, user: User, local_owner: bool
-    ) -> bool:
-        """Check the persisted owner and current project authorization together."""
-        if not _is_websocket_channel_session_key(session_key):
-            return False
+    async def _session_metadata(self, session_key: str) -> dict[str, object] | None:
+        """Return one WebUI session's persisted metadata, or None when unknown."""
         if self.session_manager is None:
-            return local_owner
+            return None
         cached = self.session_manager.get_cached(session_key)
         snapshot = (
             {"metadata": dict(cached.metadata)}
@@ -917,9 +932,38 @@ class GatewayHTTPHandler:
             else await asyncio.to_thread(self.session_manager.read_session_metadata, session_key)
         )
         if snapshot is None:
-            return local_owner
+            return None
         raw_metadata: object = snapshot.get("metadata")
-        metadata = raw_metadata if _is_string_dict(raw_metadata) else {}
+        return dict(raw_metadata) if _is_string_dict(raw_metadata) else {}
+
+    @staticmethod
+    def _session_project_id(metadata: dict[str, object] | None, user: User) -> str | None:
+        """Attribute one session to the project its turns actually run in.
+
+        A chat carrying collaboration metadata keeps that project. A chat without
+        it — the host's own, older, or directory-only conversations — resolves to
+        the caller's default project, exactly as an unbound direct turn does.
+        """
+        raw = metadata.get(COLLABORATION_PROJECT_METADATA_KEY) if metadata else None
+        return raw if isinstance(raw, str) and raw else user.default_project_id
+
+    async def _session_owned_by_user(
+        self,
+        session_key: str,
+        user: User,
+        local_owner: bool,
+        metadata: dict[str, object] | None = None,
+    ) -> bool:
+        """Check the persisted owner and current project authorization together."""
+        if not _is_websocket_channel_session_key(session_key):
+            return False
+        if self.session_manager is None:
+            return local_owner
+        cached = self.session_manager.get_cached(session_key)
+        if metadata is None:
+            metadata = await self._session_metadata(session_key)
+        if metadata is None:
+            return local_owner
         owner = metadata.get(COLLABORATION_USER_METADATA_KEY)
         project_id = metadata.get(COLLABORATION_PROJECT_METADATA_KEY)
         if not any(key in metadata for key in (
@@ -1273,6 +1317,14 @@ class GatewayHTTPHandler:
                 await self._track_member_connect_session(
                     request, connect_match.group(1), mutation_payload, response
                 )
+            if got in (
+                "/api/settings/nanobot-features/enable",
+                "/api/settings/nanobot-features/disable",
+                "/api/settings/extensions/action",
+            ):
+                # Enabling, replacing, or removing an app changes which revision
+                # the host runs, so reconcile the projects that approved it.
+                await self._reconcile_project_apps()
             return response
 
         # Collaboration routes
@@ -1330,6 +1382,12 @@ class GatewayHTTPHandler:
         match = re.fullmatch(r"/api/collaboration/pairing/([^/]+)", path)
         if match:
             return await self._handle_collaboration_pairing(request, unquote(match.group(1)))
+        match = re.fullmatch(r"/api/collaboration/projects/([^/]+)/materials", path)
+        if match:
+            return await self._handle_collaboration_project_materials(request, unquote(match.group(1)))
+        match = re.fullmatch(r"/api/collaboration/projects/([^/]+)/knowledge", path)
+        if match:
+            return await self._handle_collaboration_project_knowledge(request, unquote(match.group(1)))
         match = re.fullmatch(r"/api/collaboration/projects/([^/]+)", path)
         if match:
             return await self._handle_collaboration_project(request, unquote(match.group(1)))
@@ -1491,6 +1549,12 @@ class GatewayHTTPHandler:
                     "project": project_payload(project),
                     "members": [project_member_payload(member) for member in members[:256]],
                     "assignments": [channel_assignment_payload(item) for item in assignments[:256]],
+                    "automations": await self._project_automations_payload(project.id),
+                    "apps": self._project_app_catalog().payloads(project),
+                    "tasks": [
+                        project_task_payload(task)
+                        for task in (await self.collaboration.list_tasks(project.id, user.id))[:512]
+                    ],
                     "available": self._collaboration_available(),
                     "can_manage": self._is_admin_identity(identity) or any(
                         member.user_id == user.id and member.role is MembershipRole.OWNER
@@ -1501,6 +1565,48 @@ class GatewayHTTPHandler:
             )
         except (CollaborationStoreError, ValueError):
             return _http_error(404, "project not found")
+
+    async def _handle_collaboration_project_materials(
+        self, request: WsRequest, project_id: str
+    ) -> Response:
+        identity = await self._collaboration_user_or_error(request)
+        if isinstance(identity, Response):
+            return identity
+        user, _local_owner = identity
+        try:
+            project = await self.collaboration.get_project(user.id, project_id)
+            if project is None:
+                return _http_error(404, "project not found")
+            query = _parse_query(request.path)
+            raw_path = _query_first(query, "path")
+            payload = await asyncio.to_thread(
+                project_materials_payload,
+                project.workspace_path,
+                raw_path=raw_path,
+            )
+        except ProjectMaterialsError as exc:
+            return _http_error(exc.status, exc.message)
+        except (CollaborationStoreError, ValueError):
+            return _http_error(404, "project not found")
+        return _http_json_response(payload, extra_headers=_NO_STORE_HEADERS)
+
+    async def _handle_collaboration_project_knowledge(
+        self, request: WsRequest, project_id: str
+    ) -> Response:
+        identity = await self._collaboration_user_or_error(request)
+        if isinstance(identity, Response):
+            return identity
+        user, _local_owner = identity
+        try:
+            project = await self.collaboration.get_project(user.id, project_id)
+            if project is None:
+                return _http_error(404, "project not found")
+            payload = await asyncio.to_thread(project_memory_payload, project.workspace_path)
+        except ProjectMaterialsError as exc:
+            return _http_error(exc.status, exc.message)
+        except (CollaborationStoreError, ValueError):
+            return _http_error(404, "project not found")
+        return _http_json_response(payload, extra_headers=_NO_STORE_HEADERS)
 
     async def _handle_collaboration_pairing(
         self, request: WsRequest, challenge_id: str
@@ -1579,6 +1685,7 @@ class GatewayHTTPHandler:
                 deleted = await self.collaboration.delete_project(
                     required_string(payload, "project_id"), user.id
                 )
+                await self._sync_project_automations()
                 return _http_json_response({"deleted": deleted})
             if operation == "project/member/add":
                 raw_role = payload.get("role", MembershipRole.MEMBER.value)
@@ -1594,6 +1701,39 @@ class GatewayHTTPHandler:
                     required_string(payload, "project_id"),
                     user.id,
                     required_string(payload, "member_user_id"),
+                )
+                return _http_json_response({"deleted": deleted})
+            if operation == "project/app/join":
+                return await self._join_collaboration_project_app(user, payload)
+            if operation == "project/app/leave":
+                return await self._leave_collaboration_project_app(user, payload)
+            if operation == "task/create":
+                raw_status = payload.get("status")
+                task = await self.collaboration.create_task(
+                    required_string(payload, "project_id"),
+                    user.id,
+                    required_string(payload, "title"),
+                    detail=optional_string(payload, "detail") or "",
+                    status=(
+                        project_task_status(raw_status)
+                        if raw_status is not None
+                        else TaskStatus.TODO
+                    ),
+                )
+                return _http_json_response({"task": project_task_payload(task)})
+            if operation == "task/update":
+                raw_status = payload.get("status")
+                task = await self.collaboration.update_task(
+                    required_string(payload, "task_id"),
+                    user.id,
+                    title=optional_string(payload, "title"),
+                    detail=optional_string(payload, "detail"),
+                    status=project_task_status(raw_status) if raw_status is not None else None,
+                )
+                return _http_json_response({"task": project_task_payload(task)})
+            if operation == "task/delete":
+                deleted = await self.collaboration.delete_task(
+                    required_string(payload, "task_id"), user.id
                 )
                 return _http_json_response({"deleted": deleted})
             if operation == "assignment/update":
@@ -1614,6 +1754,8 @@ class GatewayHTTPHandler:
                 return _http_json_response({"deleted": deleted})
         except CollaborationConflictError:
             return _http_error(409, "collaboration revision conflict")
+        except CollaborationBuiltinProjectError:
+            return _http_error(409, "the built-in project cannot be deleted")
         except ValueError:
             return _http_error(400, "invalid collaboration payload")
         except CollaborationStoreError:
@@ -1693,6 +1835,7 @@ class GatewayHTTPHandler:
         except Exception:
             result = None
         if result is not None and result.ok:
+            await self._reconcile_project_apps()
             activation = {
                 "ok": True,
                 "action": result.action.value,
@@ -1706,6 +1849,136 @@ class GatewayHTTPHandler:
                 "pairing": pairing_challenge_payload(challenge),
                 "channel_activation": activation,
             }
+        )
+
+    def _project_app_catalog(self) -> ProjectAppCatalog:
+        """Return the host's joinable apps and what each contributes.
+
+        An app is an Agent Plugin, so the same workspace and the same inventory the
+        Capabilities panel lists decide what a project can approve.
+        """
+        available = self._collaboration_available()
+        return ProjectAppCatalog.load(
+            self.skills_workspace_path,
+            available_skills=[item["id"] for item in available["skills"]],
+            available_mcp_servers=[item["id"] for item in available["mcp_servers"]],
+        )
+
+    async def _reconcile_project_apps(self) -> None:
+        """Take back the capabilities of every app whose revision changed.
+
+        A project approves one immutable app revision. This runs where the host
+        owns the inventory — when Apps change, and when the gateway starts — so a
+        replaced or removed app stops reaching the projects that approved it.
+        """
+        try:
+            await reconcile_project_apps(
+                self.collaboration, self.skills_workspace_path, self._project_app_catalog()
+            )
+        except Exception:
+            self._log.warning("unable to reconcile project apps")
+
+    async def _join_collaboration_project_app(
+        self, user: User, payload: Mapping[str, object]
+    ) -> Response:
+        """Approve one app for a project at the revision the host runs now."""
+        name = required_string(payload, "name")
+        project_id = required_string(payload, "project_id")
+        catalog = self._project_app_catalog()
+        try:
+            project = await self.collaboration.get_project(user.id, project_id)
+        except (CollaborationStoreError, ValueError):
+            project = None
+        if project is None:
+            return _http_error(404, "project not found")
+        try:
+            change = catalog.join(project, name, revision=optional_string(payload, "revision"))
+        except ProjectAppError as exc:
+            return _http_error(exc.status, exc.message)
+        except CollaborationStoreError:
+            return _http_error(404, "project not found")
+        try:
+            updated = await self.collaboration.update_project(
+                project.id,
+                user.id,
+                allowed_skills=change.allowed_skills,
+                allowed_mcp_servers=change.allowed_mcp_servers,
+                app_grants=change.app_grants,
+            )
+        except CollaborationStoreError:
+            return _http_error(404, "project not found")
+        return _http_json_response(
+            {"project": project_payload(updated), "apps": catalog.payloads(updated)}
+        )
+
+    async def _leave_collaboration_project_app(
+        self, user: User, payload: Mapping[str, object]
+    ) -> Response:
+        """Take one app's capabilities back out of a project."""
+        name = required_string(payload, "name")
+        project_id = required_string(payload, "project_id")
+        catalog = self._project_app_catalog()
+        try:
+            project = await self.collaboration.get_project(user.id, project_id)
+        except (CollaborationStoreError, ValueError):
+            project = None
+        if project is None:
+            return _http_error(404, "project not found")
+        change = catalog.leave(project, name)
+        try:
+            updated = await self.collaboration.update_project(
+                project.id,
+                user.id,
+                allowed_skills=change.allowed_skills,
+                allowed_mcp_servers=change.allowed_mcp_servers,
+                app_grants=change.app_grants,
+            )
+        except CollaborationStoreError:
+            return _http_error(404, "project not found")
+        return _http_json_response(
+            {"project": project_payload(updated), "apps": catalog.payloads(updated)}
+        )
+
+    async def _sync_project_automations(self) -> None:
+        """Reconcile every project's built-in Heartbeat and Dream after a change.
+
+        A new project gets its automations and ``HEARTBEAT.md`` here; a deleted
+        project's jobs are removed with it.
+        """
+        if self.cron_service is None:
+            return
+        from nanobot.cron.project_jobs import schedules_from_config, sync_projects_automations
+
+        try:
+            config = self.settings.config.load()
+        except Exception:
+            self._log.warning("unable to load config for project automations")
+            return
+        heartbeat_schedule, dream_schedule = schedules_from_config(config)
+        try:
+            await sync_projects_automations(
+                self.cron_service,
+                self.collaboration,
+                self.skills_workspace_path,
+                heartbeat_schedule=heartbeat_schedule,
+                dream_schedule=dream_schedule,
+            )
+        except Exception:
+            self._log.warning("unable to sync project automations")
+
+    async def _project_automations_payload(self, project_id: str) -> list[dict[str, Any]]:
+        """Return one project's built-in automations, including their run state."""
+        if self.cron_service is None:
+            return []
+        jobs = [
+            job for job in self.cron_service.list_jobs(include_disabled=True)
+            if job.payload.project_id == project_id
+        ]
+        return serialize_automation_jobs(
+            jobs,
+            pending_job_ids=self._pending_cron_job_ids_for_all(),
+            include_details=True,
+            session_manager=self.session_manager,
         )
 
     async def _create_collaboration_project(
@@ -1728,6 +2001,7 @@ class GatewayHTTPHandler:
         except Exception:
             await asyncio.to_thread(workspace.rmdir)
             raise
+        await self._sync_project_automations()
         return _http_json_response({"project": project_payload(project)})
 
     async def _update_collaboration_project(
@@ -1735,6 +2009,9 @@ class GatewayHTTPHandler:
     ) -> Response:
         project_id = required_string(payload, "project_id")
         name = optional_string(payload, "name")
+        description: str | object = ...
+        if "description" in payload:
+            description = optional_description(payload)
         allowlists: dict[str, list[str] | None] = {}
         if "capabilities" in payload:
             available = self._collaboration_available()
@@ -1747,6 +2024,7 @@ class GatewayHTTPHandler:
             project_id,
             user.id,
             name=name,
+            description=description,
             allowed_skills=allowlists.get("allowed_skills", ...),
             allowed_mcp_servers=allowlists.get("allowed_mcp_servers", ...),
         )
@@ -2086,13 +2364,20 @@ class GatewayHTTPHandler:
             key = s.get("key")
             if not (isinstance(key, str) and is_webui_session_key(key)):
                 continue
-            if not await self._session_owned_by_user(key, user, local_owner):
+            metadata = await self._session_metadata(key)
+            if not await self._session_owned_by_user(key, user, local_owner, metadata):
                 continue
             row = {
                 k: v
                 for k, v in s.items()
                 if k != "path" and k not in WEBUI_SESSION_INDEX_INTERNAL_FIELDS
             }
+            # The sidebar attributes every conversation to the project it runs
+            # in, so an unbound host chat is shown as its default project's
+            # conversation instead of an unattributed one.
+            project_id = self._session_project_id(metadata, user)
+            if project_id is not None:
+                row["collaboration_project_id"] = project_id
             # Keep the additive recovery field absent for ordinary sessions so
             # older clients and compact list responses stay unchanged.
             if row.get("recovery_state") is None:
@@ -2359,7 +2644,12 @@ class GatewayHTTPHandler:
         pending_job_ids.update(self._pending_local_trigger_ids_for_all())
         jobs: list[CronJob | LocalTrigger] = []
         if self.cron_service is not None:
-            jobs.extend(self.cron_service.list_jobs(include_disabled=True))
+            # A project's built-in Heartbeat and Dream are shown with that project,
+            # so the instance-wide list stays limited to instance-wide automation.
+            jobs.extend(
+                job for job in self.cron_service.list_jobs(include_disabled=True)
+                if job.payload.project_id is None
+            )
         if self.local_trigger_store is not None:
             jobs.extend(self.local_trigger_store.list_triggers(include_disabled=True))
         authorized_jobs = [

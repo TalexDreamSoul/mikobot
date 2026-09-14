@@ -566,7 +566,7 @@ describe("webui API helpers", () => {
 
     await expect(fetchApiService("tok")).rejects.toMatchObject({
       status: 200,
-      message: "Gateway returned WebUI HTML instead of JSON. Restart nanobot gateway and try again.",
+      message: "Gateway returned WebUI HTML instead of JSON. Restart Mikobot gateway and try again.",
     });
   });
 

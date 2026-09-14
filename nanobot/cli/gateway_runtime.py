@@ -34,6 +34,8 @@ from nanobot.cli.webui_support import (
     _webui_endpoint_reachable,
 )
 from nanobot.collaboration import build_collaboration_repository
+from nanobot.collaboration.models import Project
+from nanobot.collaboration.store import BUILTIN_PROJECT_NAME
 from nanobot.config.paths import is_default_workspace
 from nanobot.config.schema import Config
 from nanobot.extensions.adapters import (
@@ -49,7 +51,7 @@ from nanobot.gateway.runtime import GatewayInstance
 from nanobot.security.network import is_loopback_host
 from nanobot.session.keys import UNIFIED_SESSION_KEY, last_channel_from_metadata
 from nanobot.utils.evaluator import evaluate_response, resolve_evaluator_prompt
-from nanobot.utils.helpers import sync_workspace_templates
+from nanobot.utils.helpers import bundled_default_text, sync_workspace_templates
 from nanobot.webui.build import BuildMode
 from nanobot.webui.dev import WebUIDevError, WebUIDevServer
 from nanobot.webui.sidebar_state import read_webui_sidebar_state
@@ -206,6 +208,27 @@ def _heartbeat_has_active_tasks(content: str) -> bool:
             continue
         return True
     return False
+
+
+def _instance_project(workspace: str | Path) -> Project:
+    """The instance itself as a built-in project.
+
+    An install without projects runs its Heartbeat and Dream against the agent's
+    own workspace and memory, which is exactly what those automations did before
+    they became project-owned.
+    """
+    return Project("", BUILTIN_PROJECT_NAME, str(workspace), "", 0, 0, is_builtin=True)
+
+
+def _session_belongs_to_project(scope: Any, project: Project) -> bool:
+    """Return whether a conversation is classified into *project*.
+
+    Work with no project provenance belongs to the instance's built-in project,
+    which is what makes it the default home for everything unclassified.
+    """
+    if scope is None:
+        return project.is_builtin
+    return getattr(scope, "project_id", None) == project.id
 
 
 def _pick_heartbeat_target_from_sessions(
@@ -644,14 +667,27 @@ def _run_gateway(
         async def _silent(*_args: Any, **_kwargs: Any) -> None:
             pass
 
-        # Dream journals are owner-scoped. Never feed a member row from the
-        # legacy host journal into host Dream; each live member project receives
-        # its own authorized project MemoryStore.
+        # Dream journals are owner-scoped. A project's Dream consolidates that
+        # project's own stores: its workspace store plus the private stores of the
+        # members whose conversations belong to it. Never feed a member row from
+        # the host journal into a shared project's Dream.
         if job.name == "dream":
             from nanobot.agent.memory import MemoryStore
 
-            targets: list[tuple[MemoryStore, object | None]] = [(agent.context.memory, None)]
-            seen = {agent.context.memory.workspace.expanduser().resolve()}
+            project = await _job_project(job)
+            if project is None:
+                logger.debug("Dream: automation {} has no project; skipped", job.id)
+                return None
+
+            host_store = agent.context.memory
+            project_store = host_store
+            if (
+                Path(project.workspace_path).expanduser().resolve()
+                != host_store.workspace.expanduser().resolve()
+            ):
+                project_store = MemoryStore(Path(project.workspace_path))
+            targets: list[tuple[MemoryStore, object | None]] = [(project_store, None)]
+            seen = {project_store.workspace.expanduser().resolve()}
             for info in agent.sessions.list_sessions():
                 key = info.get("key")
                 if not isinstance(key, str):
@@ -664,7 +700,9 @@ def _run_gateway(
                     scope = await agent.collaboration_scope_for_session(session)
                 except Exception:
                     continue
-                if store is None or store.workspace.expanduser().resolve() in seen:
+                if store is None or not _session_belongs_to_project(scope, project):
+                    continue
+                if store.workspace.expanduser().resolve() in seen:
                     continue
                 seen.add(store.workspace.expanduser().resolve())
                 targets.append((store, scope))
@@ -719,21 +757,32 @@ def _run_gateway(
             MemoryStore.prune_dream_sessions(agent.sessions)
             return None
 
-        # Heartbeat is a system job that checks HEARTBEAT.md for active tasks.
+        # Heartbeat is a project's system job that checks its own HEARTBEAT.md.
         if job.name == "heartbeat":
-            heartbeat_file = config.workspace_path / "HEARTBEAT.md"
+            project = await _job_project(job)
+            if project is None:
+                logger.debug("Heartbeat: automation {} has no project; skipped", job.id)
+                return None
+            project_workspace = Path(project.workspace_path)
+            heartbeat_file = project_workspace / "HEARTBEAT.md"
             try:
                 content = heartbeat_file.read_text(encoding="utf-8")
             except OSError:
                 logger.debug("Heartbeat: HEARTBEAT.md missing")
                 return None
+            # An untouched default keeps its wording from the release that wrote
+            # it; serve the current bundled text instead of the stale copy.
+            content = bundled_default_text(content, "HEARTBEAT.md") or content
             if not _heartbeat_has_active_tasks(content):
                 logger.debug("Heartbeat: HEARTBEAT.md has no active tasks")
                 return None
 
-            channel, chat_id = _pick_heartbeat_target()
-            if channel == "cli":
+            target = await _heartbeat_target_for_project(project)
+            if target is None:
+                logger.debug("Heartbeat: {} has no conversation to report to", project.id)
                 return None
+            channel, chat_id, scope = target
+            session_key = "heartbeat" if project.is_builtin else f"heartbeat:{project.id}"
 
             prompt = (
                 _HEARTBEAT_PREAMBLE
@@ -749,10 +798,11 @@ def _run_gateway(
                 await mcp_provider.connect()
                 resp = await agent.process_direct(
                     prompt,
-                    session_key="heartbeat",
+                    session_key=session_key,
                     channel=channel,
                     chat_id=chat_id,
                     on_progress=_silent,
+                    attributes={"collaboration_scope": scope} if scope is not None else None,
                     source="runtime",
                 )
             finally:
@@ -760,7 +810,7 @@ def _run_gateway(
                     message_tool.reset_suppress_delivery(suppress_token)
 
             # Keep a small tail of heartbeat history so the loop stays bounded.
-            session = agent.sessions.get_or_create("heartbeat")
+            session = agent.sessions.get_or_create(session_key)
             session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
             agent.sessions.save(session)
 
@@ -769,7 +819,7 @@ def _run_gateway(
 
             response = resp.content
 
-            evaluator_prompt = resolve_evaluator_prompt(config.workspace_path)
+            evaluator_prompt = resolve_evaluator_prompt(project_workspace)
 
             # Fail closed: stay silent on evaluator failure instead of notifying.
             with llm_usage_source("cron"):
@@ -841,20 +891,66 @@ def _run_gateway(
         config_path=Path(config_path),
     )
 
-    def _pick_heartbeat_target() -> tuple[str, str]:
-        """Pick a routable channel/chat target for heartbeat-triggered messages."""
+    async def _job_project(job: CronJob) -> Project | None:
+        """Resolve the project a built-in automation belongs to."""
+        repository = getattr(agent, "collaboration", None)
+        project_id = job.payload.project_id
+        if repository is None or project_id is None:
+            return _instance_project(config.workspace_path)
+        owner, _default = await repository.ensure_local_owner(config.workspace_path)
+        return await repository.get_project(owner.id, project_id)
+
+    async def _heartbeat_target_for_project(
+        project: Project,
+    ) -> tuple[str, str, object | None] | None:
+        """Pick the channel, chat, and scope a project's Heartbeat reports to.
+
+        Only conversations of that project are eligible. A shared project's run
+        carries the scope of the conversation it reports into, so the turn can
+        never act with more authority than that member.
+        """
         sidebar_state = read_webui_sidebar_state()
         unified_metadata = None
         if config.agents.defaults.unified_session:
             record = session_manager.read_session_metadata(UNIFIED_SESSION_KEY)
             if isinstance(record, dict) and isinstance(record.get("metadata"), dict):
                 unified_metadata = record["metadata"]
-        return _pick_heartbeat_target_from_sessions(
+        candidates: list[tuple[dict[str, Any], object | None]] = []
+        repository = getattr(agent, "collaboration", None)
+        for item in session_manager.list_sessions():
+            key = item.get("key")
+            if not isinstance(key, str):
+                continue
+            if repository is None:
+                # Without a project store every conversation belongs to the
+                # instance, so there is no scope to resolve.
+                candidates.append((item, None))
+                continue
+            session = agent.sessions.peek(key)
+            if session is None:
+                continue
+            try:
+                scope = await agent.collaboration_scope_for_session(session)
+            except Exception:
+                continue
+            if not _session_belongs_to_project(scope, project):
+                continue
+            candidates.append((item, scope))
+        if not candidates:
+            return None
+        channel, chat_id = _pick_heartbeat_target_from_sessions(
             enabled_channels=channels.enabled_channels,
-            sessions=session_manager.list_sessions(),
+            sessions=[item for item, _scope in candidates],
             archived_keys=sidebar_state.get("archived_keys", []),
             unified_session_metadata=unified_metadata,
         )
+        if channel == "cli":
+            return None
+        route_key = f"{channel}:{chat_id}"
+        for item, scope in candidates:
+            if item.get("key") in {route_key, UNIFIED_SESSION_KEY}:
+                return channel, chat_id, scope
+        return channel, chat_id, None
 
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
@@ -923,37 +1019,34 @@ def _run_gateway(
         _print_gateway_health_endpoint(host, health_port)
         async with server:
             await server.serve_forever()
-    # Register Dream system job (idempotent on restart)
-    from nanobot.cron.types import CronJob, CronPayload, CronSchedule
+    # Register the built-in automations of every project (idempotent on restart).
+    # Heartbeat and Dream belong to a project, so a new project is covered when it
+    # is created and a deleted project loses its jobs with it.
+    from nanobot.cron.project_jobs import (
+        ensure_project_heartbeat_file,
+        project_job_specs,
+        schedules_from_config,
+        sync_project_jobs,
+        sync_projects_automations,
+    )
     dream_cfg = config.agents.defaults.dream
-    if dream_cfg.enabled:
-        cron.register_system_job(CronJob(
-            id="dream",
-            name="dream",
-            schedule=dream_cfg.build_schedule(config.agents.defaults.timezone),
-            payload=CronPayload(kind="system_event"),
+    heartbeat_schedule, dream_schedule = schedules_from_config(config)
+    collaboration = getattr(agent, "collaboration", None)
+    if collaboration is None:
+        # Without a project store the instance itself is the only scope, so its
+        # automations register here instead of waiting on the runtime.
+        sync_project_jobs(cron, project_job_specs(
+            [None],
+            heartbeat_schedule=heartbeat_schedule,
+            dream_schedule=dream_schedule,
         ))
-        console.print(f"[green]✓[/green] Dream: {dream_cfg.describe_schedule()}")
+        ensure_project_heartbeat_file(config.workspace_path)
+    if dream_cfg.enabled:
+        console.print(f"[green]✓[/green] Dream: {dream_cfg.describe_schedule()} per project")
     else:
         console.print("[yellow]○[/yellow] Dream: disabled")
         # Cursor repair must not depend on a healthy cron store.
         _advance_dream_cursor_if_behind(agent.context.memory)
-        cron.remove_system_job("dream")
-
-    # Register Heartbeat system job (idempotent on restart)
-    if hb_cfg.enabled:
-        cron.register_system_job(CronJob(
-            id="heartbeat",
-            name="heartbeat",
-            schedule=CronSchedule(
-                kind="every",
-                every_ms=hb_cfg.interval_s * 1000,
-                tz=config.agents.defaults.timezone,
-            ),
-            payload=CronPayload(kind="system_event"),
-        ))
-    else:
-        cron.remove_system_job("heartbeat")
 
     cron_status = cron.status()
     cron_job_count = cast(int, cron_status["jobs"])
@@ -1017,6 +1110,14 @@ def _run_gateway(
         )
         try:
             await cron.start()
+            if collaboration is not None:
+                await sync_projects_automations(
+                    cron,
+                    collaboration,
+                    config.workspace_path,
+                    heartbeat_schedule=heartbeat_schedule,
+                    dream_schedule=dream_schedule,
+                )
             # Re-read once on first admission to close the watcher subscription window.
             agent.runtime_resolver.invalidate()
             # Recovery must finish before WebSocket and other channels begin

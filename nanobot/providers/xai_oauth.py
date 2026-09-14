@@ -498,11 +498,11 @@ def _make_callback_server(
             elif code:
                 result = _CallbackResult(error="OAuth state mismatch")
                 title = "Sign-in failed"
-                message = "The sign-in response could not be verified. Return to nanobot and retry."
+                message = "The sign-in response could not be verified. Return to Mikobot and retry."
             else:
                 result = _CallbackResult(error=error or "access denied")
                 title = "Access denied"
-                message = "Return to nanobot and try signing in again."
+                message = "Return to Mikobot and try signing in again."
             with suppress(queue.Full):
                 result_queue.put_nowait(result)
             body = _callback_page(title, message)

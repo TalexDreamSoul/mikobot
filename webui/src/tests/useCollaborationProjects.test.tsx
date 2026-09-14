@@ -108,7 +108,7 @@ describe("useCollaborationProjects", () => {
     await waitFor(() => expect(result.current.detail?.project.id).toBe(second.id));
   });
 
-  it("switches projects, persists the default, and clears stale detail", async () => {
+  it("inspects another project without re-homing the default project", async () => {
     const first = project("project-1", "First");
     const second = project("project-2", "Second");
     let resolveSecond!: (value: CollaborationProjectPayload) => void;
@@ -132,16 +132,45 @@ describe("useCollaborationProjects", () => {
     });
 
     await waitFor(() => expect(result.current.projectId).toBe(second.id));
+    // Inspecting another project drops the stale detail while the new one loads…
     expect(result.current.detail).toBeNull();
-    await waitFor(() => expect(client.requestMutation).toHaveBeenCalledWith(
-      "collaboration.user.defaults",
-      { project_id: second.id },
-      expect.any(Number),
-    ));
     await act(async () => {
       resolveSecond(projectPayload(second));
     });
     await waitFor(() => expect(result.current.detail?.project.id).toBe(second.id));
+    // …but browsing is side-effect free: no default-project write reaches the host,
+    // and the summary still homes new chats in the project the user chose before.
+    expect(client.requestMutation).not.toHaveBeenCalled();
+    expect(result.current.summary?.user.default_project_id).toBe(first.id);
+  });
+
+  it("re-homes the default project only when the explicit control activates one", async () => {
+    const first = project("project-1", "First");
+    const second = project("project-2", "Second");
+    const client = fakeClient();
+    client.requestMutation.mockResolvedValue({ user: collaboration([first, second], second.id).user });
+    vi.mocked(api.fetchCollaboration)
+      .mockResolvedValueOnce(collaboration([first, second], first.id))
+      .mockResolvedValue(collaboration([first, second], second.id));
+    vi.mocked(api.fetchCollaborationProject).mockImplementation(async (_token, id) => (
+      projectPayload(id === second.id ? second : first)
+    ));
+
+    const { result } = renderHook(useCollaborationProjects, { wrapper: wrap(client) });
+    await waitFor(() => expect(result.current.detail?.project.id).toBe(first.id));
+
+    await act(async () => {
+      await result.current.setActiveProject(second.id);
+    });
+
+    expect(client.requestMutation).toHaveBeenCalledTimes(1);
+    expect(client.requestMutation).toHaveBeenCalledWith(
+      "collaboration.user.defaults",
+      { project_id: second.id },
+      expect.any(Number),
+    );
+    // The published summary is what the rest of the UI reads the active project from.
+    expect(result.current.summary?.user.default_project_id).toBe(second.id);
   });
 
   it("creates a project and selects it", async () => {

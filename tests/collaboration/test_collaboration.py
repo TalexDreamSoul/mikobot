@@ -21,20 +21,27 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.collaboration import (
+    BUILTIN_PROJECT_NAME,
     COLLABORATION_ASSIGNMENT_METADATA_KEY,
     AsyncLocalCollaborationRepository,
+    CollaborationBuiltinProjectError,
     CollaborationConflictError,
     CollaborationNotFoundError,
     CollaborationPermissionError,
     CollaborationStore,
     CollaborationStoreFormatError,
+    ConversationScope,
     ConversationScopeKind,
     MembershipRole,
+    Project,
+    ProjectAppGrant,
+    private_memory_root_for_scope,
 )
 from nanobot.collaboration.links import IdentityLinkError, IdentityLinkStore
 from nanobot.collaboration.models import (
     COLLABORATION_PROJECT_METADATA_KEY,
     COLLABORATION_USER_METADATA_KEY,
+    TaskStatus,
 )
 from nanobot.collaboration.pairing import CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY
 from nanobot.providers.base import LLMResponse, ToolCallRequest
@@ -477,6 +484,84 @@ async def test_queued_message_with_other_authorization_is_redispatched_fresh(
 
 
 @pytest.mark.asyncio
+async def test_projects_tool_maintains_the_conversations_task_board(
+    tmp_path: Path,
+    local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
+) -> None:
+    """The assistant works the board of the conversation's project, and no other."""
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    store, repository = local_collaboration_repository
+    user, project = store.ensure_identity_user("telegram", "sender", workspace)
+    other_user, other_project = _user_and_project(store, tmp_path, "other")
+    store.update_user_default_project(user.id, project.id)
+    scope = ConversationScope(
+        ConversationScopeKind.BOUND, user.id, project.id, user, project, None, None,
+        str(project.workspace_path), "-project",
+    )
+    request = RequestContext(
+        channel="telegram", chat_id="chat", sender_id="sender",
+        attributes={"collaboration_scope": scope},
+    )
+    tool = ProjectsTool(repository)
+
+    with request_context(request):
+        created = json.loads(await tool.execute("create_task", title="Ship the board"))
+        task_id = created["task"]["id"]
+        assert created["task"]["project_id"] == project.id
+        assert json.loads(await tool.execute("update_task", task_id=task_id, status="done"))[
+            "task"]["status"] == "done"
+        listed = json.loads(await tool.execute("tasks"))
+        assert [(item["id"], item["status"]) for item in listed["tasks"]] == [(task_id, "done")]
+        assert json.loads(await tool.execute("delete_task", task_id=task_id)) == {"deleted": True}
+
+        assert json.loads(await tool.execute("tasks"))["tasks"] == []
+        assert "status must be one of" in await tool.execute(
+            "update_task", task_id="tsk_missing", status="archived"
+        )
+        assert "requires task_id" in await tool.execute("delete_task")
+        assert "requires a title" in await tool.execute("create_task")
+
+    other_scope = ConversationScope(
+        ConversationScopeKind.BOUND, other_user.id, other_project.id, other_user, other_project,
+        None, None, str(other_project.workspace_path), "-project",
+    )
+    other_request = RequestContext(
+        channel="telegram", chat_id="other", sender_id="other",
+        attributes={"collaboration_scope": other_scope},
+    )
+    kept = store.create_task(other_project.id, other_user.id, "Other project's card")
+    foreign = store.create_task(project.id, user.id, "Original project's card")
+    with request_context(other_request):
+        assert [item["id"] for item in json.loads(await tool.execute("tasks"))["tasks"]] == [kept.id]
+        assert await tool.execute("update_task", task_id=foreign.id, status="done") == (
+            "Error managing projects: project membership is required"
+        )
+        assert await tool.execute("delete_task", task_id=foreign.id) == (
+            "Error managing projects: only the author or a project manager may delete"
+        )
+        assert await tool.execute("tasks", project_id=project.id) == (
+            "Error managing projects: project membership is required"
+        )
+        assert await tool.execute("create_task", project_id=project.id, title="Outside") == (
+            "Error managing projects: project membership is required"
+        )
+        assert json.loads(await tool.execute("create_task", title="Mine only"))[
+            "task"]["project_id"] == other_project.id
+
+    isolated = ConversationScope(
+        ConversationScopeKind.ISOLATED, other_user.id, None, other_user, None, None, None,
+        str(workspace), "",
+    )
+    isolated_request = RequestContext(
+        channel="telegram", chat_id="isolated", sender_id="other",
+        attributes={"collaboration_scope": isolated},
+    )
+    with request_context(isolated_request):
+        assert "not in a project" in await tool.execute("tasks")
+
+
+@pytest.mark.asyncio
 async def test_feishu_p2p_binding_uses_source_chat_id_for_later_scope_lookup(
     tmp_path: Path,
     local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
@@ -741,13 +826,193 @@ def test_legacy_multi_tenant_store_collapses_to_projects_and_assignments(tmp_pat
     assert staged is not None and staged.enabled is False
     assert store.resolve_identity("weixin.release", "sender").id == "member"
     assert [item.instance_id for item in store.list_claimable_channels("member")] == []
-    assert persisted["schemaVersion"] == 9
+    # The owner's default project becomes the built-in one, keeping its name.
+    assert project.is_builtin is True
+    assert project.name == "Roadmap"
+    with pytest.raises(CollaborationBuiltinProjectError):
+        store.delete_project("proj", "owner")
+    assert persisted["schemaVersion"] == 13
     assert set(persisted) == {
         "schemaVersion", "localOwnerId", "users", "identities", "projects", "memberships",
         "channelProvisions", "channelAssignments", "pairingChallenges", "conversationBindings",
+        "tasks",
     }
     assert (root / "collaboration.v8.bak.json").exists()
     assert json.loads((root / "collaboration.v8.bak.json").read_text())["schemaVersion"] == 8
+
+
+def test_bootstrap_creates_the_builtin_project_and_refuses_to_delete_it(
+    tmp_path: Path,
+) -> None:
+    """Everything unassigned defaults into one named project, so it is permanent."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = store.ensure_local_owner(tmp_path / "workspace")
+
+    assert project.name == BUILTIN_PROJECT_NAME
+    assert project.is_builtin is True
+    assert store.get_user(owner.id).default_project_id == project.id
+
+    with pytest.raises(CollaborationBuiltinProjectError):
+        store.delete_project(project.id, owner.id)
+    assert store.get_project(owner.id, project.id) is not None
+
+    # A project the owner creates themselves stays deletable.
+    extra = store.create_project(owner.id, "Release train", tmp_path / "release")
+    assert extra.is_builtin is False
+    assert store.delete_project(extra.id, owner.id) is True
+
+
+def test_generated_default_project_name_migrates_to_the_builtin_one(
+    tmp_path: Path,
+) -> None:
+    """The pre-rename name is replaced; a project someone renamed is left alone."""
+    root = tmp_path / "collaboration"
+    root.mkdir()
+    (root / "collaboration.json").write_text(json.dumps({
+        "schemaVersion": 9,
+        "localOwnerId": "owner",
+        "users": {
+            "owner": {
+                "id": "owner", "displayName": "Local owner", "defaultProjectId": "default",
+                "isAdmin": True, "createdAtMs": 1, "updatedAtMs": 1,
+            },
+        },
+        "identities": {},
+        "projects": {
+            "default": {
+                "id": "default", "name": "Local project",
+                "workspacePath": str(tmp_path / "workspace"),
+                "createdByUserId": "owner", "allowedSkills": None,
+                "allowedMcpServers": None, "createdAtMs": 1, "updatedAtMs": 1,
+            },
+        },
+        "memberships": {
+            "default\x00owner": {
+                "projectId": "default", "userId": "owner", "role": "owner", "createdAtMs": 1,
+            },
+        },
+        "channelProvisions": {},
+        "channelAssignments": {},
+        "pairingChallenges": {},
+        "conversationBindings": {},
+    }), encoding="utf-8")
+
+    store = CollaborationStore(root)
+    project = store.get_project("owner", "default")
+
+    assert project is not None
+    assert (project.name, project.is_builtin) == (BUILTIN_PROJECT_NAME, True)
+    assert (root / "collaboration.v9.bak.json").exists()
+    with pytest.raises(CollaborationBuiltinProjectError):
+        store.delete_project("default", "owner")
+
+
+def test_owner_default_project_is_not_converted_into_the_builtin(tmp_path: Path) -> None:
+    """A default the owner points at their own project is never made the instance's home."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, builtin = store.ensure_local_owner(tmp_path / "workspace")
+    created = store.create_project(owner.id, "Release train", tmp_path / "release")
+    store.update_user_default_project(owner.id, created.id)
+
+    again_owner, again_builtin = store.ensure_local_owner(tmp_path / "workspace")
+
+    assert again_builtin.id == builtin.id
+    assert again_owner.default_project_id == created.id
+    kept = store.get_project(owner.id, created.id)
+    assert (kept.is_builtin, kept.workspace_path) == (False, created.workspace_path)
+    home = store.get_project(owner.id, builtin.id)
+    assert (home.is_builtin, home.workspace_path) == (True, builtin.workspace_path)
+
+
+def test_builtin_workspace_follows_the_agent_workspace(tmp_path: Path) -> None:
+    """The instance's home tracks the agent workspace, whatever the owner's default is."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, builtin = store.ensure_local_owner(tmp_path / "first")
+    assert builtin.workspace_path == str((tmp_path / "first").resolve())
+
+    moved = store.ensure_local_owner(tmp_path / "second")[1]
+    assert (moved.id, moved.workspace_path) == (
+        builtin.id, str((tmp_path / "second").resolve()))
+
+    created = store.create_project(owner.id, "Release train", tmp_path / "release")
+    store.update_user_default_project(owner.id, created.id)
+    elsewhere = store.ensure_local_owner(tmp_path / "third")[1]
+
+    assert (elsewhere.id, elsewhere.workspace_path) == (
+        builtin.id, str((tmp_path / "third").resolve()))
+    assert store.get_project(owner.id, created.id).workspace_path == created.workspace_path
+
+
+def test_two_flagged_projects_collapse_to_the_oldest_one(tmp_path: Path) -> None:
+    """A store left with two homes is repaired: the oldest stays, the other keeps its own."""
+    root = tmp_path / "collaboration"
+    root.mkdir()
+    (root / "collaboration.json").write_text(json.dumps({
+        "schemaVersion": 12,
+        "localOwnerId": "owner",
+        "users": {
+            "owner": {
+                "id": "owner", "displayName": "Local owner", "defaultProjectId": "converted",
+                "isAdmin": False, "createdAtMs": 1, "updatedAtMs": 1,
+            },
+        },
+        "identities": {},
+        "projects": {
+            "home": {
+                "id": "home", "name": BUILTIN_PROJECT_NAME,
+                "workspacePath": str(tmp_path / "old-workspace"),
+                "createdByUserId": "owner", "allowedSkills": None, "allowedMcpServers": None,
+                "createdAtMs": 1, "updatedAtMs": 1, "isBuiltin": True, "appGrants": {},
+            },
+            "converted": {
+                "id": "converted", "name": "Release train",
+                "workspacePath": str(tmp_path / "release"),
+                "createdByUserId": "owner", "allowedSkills": None, "allowedMcpServers": None,
+                "createdAtMs": 2, "updatedAtMs": 2, "isBuiltin": True, "appGrants": {},
+            },
+        },
+        "memberships": {
+            "home\x00owner": {
+                "projectId": "home", "userId": "owner", "role": "owner", "createdAtMs": 1,
+            },
+            "converted\x00owner": {
+                "projectId": "converted", "userId": "owner", "role": "owner", "createdAtMs": 2,
+            },
+        },
+        "channelProvisions": {},
+        "channelAssignments": {},
+        "pairingChallenges": {},
+        "conversationBindings": {},
+        "tasks": {},
+    }), encoding="utf-8")
+
+    store = CollaborationStore(root)
+    owner, builtin = store.ensure_local_owner(tmp_path / "agent")
+
+    assert builtin.id == "home"
+    assert builtin.workspace_path == str((tmp_path / "agent").resolve())
+    projects = {project.id: project for project in store.list_all_projects(owner.id)}
+    assert [project.id for project in projects.values() if project.is_builtin] == ["home"]
+    demoted = projects["converted"]
+    assert (demoted.name, demoted.workspace_path) == (
+        "Release train", str((tmp_path / "release").resolve()))
+    assert store.get_user(owner.id).default_project_id == "converted"
+
+
+def test_approved_app_grants_survive_ensure_local_owner(tmp_path: Path) -> None:
+    """An approved app keeps its pinned revision and capabilities when the home moves."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, builtin = store.ensure_local_owner(tmp_path / "first")
+    store.update_project(builtin.id, owner.id, app_grants=[
+        ProjectAppGrant("notes", "rev-1", skills=("write_file",), mcp_servers=("files",)),
+    ])
+
+    store.ensure_local_owner(tmp_path / "second")
+
+    grant = store.get_project(owner.id, builtin.id).app_grant("notes")
+    assert grant is not None
+    assert (grant.revision, grant.skills, grant.mcp_servers) == (
+        "rev-1", ("write_file",), ("files",))
 
 
 def test_pairing_assigns_an_instance_to_a_project_and_binds_the_sender(
@@ -909,7 +1174,12 @@ def test_system_administrator_manages_every_project(tmp_path: Path) -> None:
     bob = store.create_user("bob")
 
     assert store.get_project(local_owner.id, alice_project.id) is not None
-    assert [project.id for project in store.list_all_projects(local_owner.id)] == [alice_project.id, store.get_user(local_owner.id).default_project_id]
+    # Every project, in no guaranteed order: projects created in the same
+    # millisecond only differ by id.
+    assert {project.id for project in store.list_all_projects(local_owner.id)} == {
+        alice_project.id,
+        store.get_user(local_owner.id).default_project_id,
+    }
     assert store.add_member(alice_project.id, local_owner.id, bob.id).role is MembershipRole.MEMBER
     with pytest.raises(CollaborationPermissionError, match="administrator"):
         store.list_all_projects(bob.id)
@@ -976,6 +1246,152 @@ def test_pairing_challenge_limit_is_per_user_not_global(tmp_path: Path) -> None:
         second.id, project_id=second_project.id, channel_type="weixin", instance_id="second-first"
     )
     assert challenge.requested_by_user_id == second.id
+
+
+def test_project_tasks_belong_to_the_project_not_their_author(tmp_path: Path) -> None:
+    """Every member shares one board, and a task outlives the member who wrote it."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    member = store.create_user("member")
+    store.add_member(project.id, owner.id, member.id)
+    outsider, _ = _user_and_project(store, tmp_path, "outsider")
+
+    first = store.create_task(project.id, member.id, "Draft the launch note")
+    second = store.create_task(
+        project.id, member.id, "Wire the banner",
+        detail="line one\nline two", status=TaskStatus.DOING,
+    )
+    assert [task.id for task in store.list_tasks(project.id, owner.id)] == [first.id, second.id]
+    assert store.list_tasks(project.id, member.id)[1].detail == "line one\nline two"
+
+    moved = store.update_task(second.id, owner.id, status=TaskStatus.DONE)
+    assert (moved.status, moved.created_by_user_id) == (TaskStatus.DONE, member.id)
+    assert store.list_tasks(project.id, member.id)[1].status is TaskStatus.DONE
+
+    store.remove_member(project.id, owner.id, member.id)
+    assert [task.title for task in store.list_tasks(project.id, owner.id)] == [
+        "Draft the launch note", "Wire the banner",
+    ]
+    with pytest.raises(CollaborationPermissionError, match="membership is required"):
+        store.list_tasks(project.id, outsider.id)
+    with pytest.raises(CollaborationPermissionError, match="membership is required"):
+        store.create_task(project.id, outsider.id, "Not mine")
+
+
+def test_only_a_task_author_or_manager_may_discard_it(tmp_path: Path) -> None:
+    """Editing the shared board is open to members; discarding a card is not."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    author = store.create_user("author")
+    peer = store.create_user("peer")
+    store.add_member(project.id, owner.id, author.id)
+    store.add_member(project.id, owner.id, peer.id)
+
+    mine = store.create_task(project.id, author.id, "Author's card")
+    theirs = store.create_task(project.id, peer.id, "Peer's card")
+    store.update_task(mine.id, peer.id, title="Peer edited the author's card")
+
+    with pytest.raises(CollaborationPermissionError, match="author or a project manager"):
+        store.delete_task(mine.id, peer.id)
+    assert store.delete_task(mine.id, author.id) is True
+    assert store.delete_task(theirs.id, owner.id) is True
+    assert store.list_tasks(project.id, owner.id) == []
+
+    with pytest.raises(CollaborationNotFoundError, match="task not found"):
+        store.update_task(mine.id, owner.id, status=TaskStatus.DONE)
+    with pytest.raises(ValueError, match="at least one task field"):
+        store.update_task(theirs.id, owner.id)
+    with pytest.raises(CollaborationStoreFormatError):
+        store.create_task(project.id, author.id, "bad\ntitle")
+
+
+def test_project_deletion_removes_its_tasks(tmp_path: Path) -> None:
+    """A board never outlives the project that owns it."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    task = store.create_task(project.id, owner.id, "Ship the release")
+    other, other_project = _user_and_project(store, tmp_path, "other")
+    kept = store.create_task(other_project.id, other.id, "Unrelated card")
+
+    assert store.delete_project(project.id, owner.id) is True
+
+    reloaded = CollaborationStore(store_path=store.path)
+    with pytest.raises(CollaborationPermissionError, match="membership is required"):
+        reloaded.list_tasks(project.id, owner.id)
+    assert [item.id for item in reloaded.list_tasks(other_project.id, other.id)] == [kept.id]
+    assert task.id not in json.loads(store.path.read_text(encoding="utf-8"))["tasks"]
+
+
+def test_task_board_migrates_from_the_previous_store_schema(tmp_path: Path) -> None:
+    """A store written before tasks existed gains an empty board instead of failing."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    store.create_task(project.id, owner.id, "Keep me")
+    document = json.loads(store.path.read_text(encoding="utf-8"))
+    document["schemaVersion"] = 10
+    document.pop("tasks")
+    for record in document["projects"].values():
+        record.pop("appGrants")
+    store.path.write_text(json.dumps(document), encoding="utf-8")
+
+    migrated = CollaborationStore(store_path=store.path)
+    assert migrated.list_tasks(project.id, owner.id) == []
+    assert migrated.get_project(owner.id, project.id).app_grants == ()
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schemaVersion"] == 13
+
+
+def test_project_description_migrates_empty_and_round_trips(tmp_path: Path) -> None:
+    """A v12 store gains an empty description, and a saved introduction survives later updates."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    store.update_project(project.id, owner.id, description="Ship the release train on Friday.")
+    document = json.loads(store.path.read_text(encoding="utf-8"))
+    document["schemaVersion"] = 12
+    for record in document["projects"].values():
+        record.pop("description")
+    store.path.write_text(json.dumps(document), encoding="utf-8")
+
+    migrated = CollaborationStore(store_path=store.path)
+
+    assert migrated.get_project(owner.id, project.id).description == ""
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schemaVersion"] == 13
+
+    migrated.update_project(project.id, owner.id, description="Shared roadmap context.")
+    renamed = migrated.update_project(project.id, owner.id, name="Renamed train")
+
+    assert renamed.description == "Shared roadmap context."
+    reloaded = CollaborationStore(store_path=store.path)
+    assert reloaded.get_project(owner.id, project.id).description == "Shared roadmap context."
+
+
+def test_project_description_must_stay_bounded(tmp_path: Path) -> None:
+    """An oversized introduction is refused instead of being persisted into every prompt."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+
+    with pytest.raises(CollaborationStoreFormatError):
+        store.update_project(project.id, owner.id, description="x" * 20_000)
+
+    assert store.get_project(owner.id, project.id).description == ""
+
+
+def test_store_rejects_a_task_without_a_live_project_or_author(tmp_path: Path) -> None:
+    """A hand-written card cannot reference a project or author that does not exist."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    store.create_task(project.id, owner.id, "Real card")
+    document = json.loads(store.path.read_text(encoding="utf-8"))
+    task_id = next(iter(document["tasks"]))
+    document["tasks"][task_id]["projectId"] = "col_missing"
+    store.path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(CollaborationStoreFormatError, match="invalid task references"):
+        CollaborationStore(store_path=store.path).list_users()
+
+    document["tasks"][task_id]["projectId"] = project.id
+    document["tasks"][task_id]["createdByUserId"] = "usr_missing"
+    store.path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(CollaborationStoreFormatError, match="invalid task references"):
+        CollaborationStore(store_path=store.path).list_users()
 
 
 def test_store_rejects_tampered_assignment_without_membership(tmp_path: Path) -> None:
@@ -1565,3 +1981,344 @@ async def test_member_revocation_before_tool_execution_prevents_side_effect(
 
     assert mutations == []
     assert calls >= 1
+
+
+# ---------------------------------------------------------------------------
+# Private memory boundary for project-scoped turns
+#
+# The read path must resolve the same private per-user root the consolidation
+# path does, for every conversation carrying project provenance.  The pre-fix
+# read path inlined the rule and exempted the host owner, so an owner's channel
+# turn inside a project read the host's own profile and long-term memory.  The
+# rule now lives in one shared ``private_memory_root_for_scope`` that the turn
+# path and the subagent path both call, so the two cannot drift apart again; it
+# keeps the host store for a turn with no collaboration scope and for the
+# instance's built-in home project, whose workspace *is* the host's workspace.
+# ---------------------------------------------------------------------------
+
+
+def _unit_loop(workspace: Path) -> AgentLoop:
+    """Build a loop without collaboration wiring, for the consolidation-store comparison."""
+    return AgentLoop(bus=MessageBus(), provider=_provider(), workspace=workspace)
+
+
+def _scope_project(
+    *, project_id: str, project_path: Path, is_builtin: bool = False
+) -> Project:
+    """Build the project entity a resolved scope carries, as the store builds it."""
+    return Project(
+        id=project_id,
+        name="shared project",
+        workspace_path=str(project_path),
+        created_by_user_id="member-user",
+        created_at_ms=0,
+        updated_at_ms=0,
+        is_builtin=is_builtin,
+    )
+
+
+def _scoped_scope(
+    *,
+    user_id: str | None,
+    project_id: str | None,
+    project_path: Path,
+    is_local_owner: bool,
+    project: Project | None,
+) -> ConversationScope:
+    return ConversationScope(
+        ConversationScopeKind.ISOLATED if project_id is None else ConversationScopeKind.DIRECT,
+        user_id,
+        project_id,
+        None,
+        project,
+        None,
+        None,
+        str(project_path),
+        "-private",
+        is_local_owner=is_local_owner,
+    )
+
+
+@pytest.mark.parametrize("is_local_owner", [False, True])
+def test_project_scope_reads_the_private_member_root_not_the_shared_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    is_local_owner: bool,
+) -> None:
+    """A project-scoped turn reads its private per-user root, for members and the host owner alike.
+
+    The scope carries the non-built-in project entity the store resolved, which is exactly what
+    moves even the host owner out of the host store.  Fails when the pre-fix ``is_local_owner``
+    exemption is reintroduced: it returned ``None`` (the host's own store) for the owner, so the
+    equality below compares a private root against ``None``.  It also fails if the read path starts
+    pointing at the shared project directory.
+    """
+    monkeypatch.setattr(
+        "nanobot.security.private_media.get_runtime_subdir",
+        lambda name: tmp_path / "runtime" / name,
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    scope = _scoped_scope(
+        user_id="member-user",
+        project_id="member-project",
+        project_path=project_path,
+        is_local_owner=is_local_owner,
+        project=_scope_project(project_id="member-project", project_path=project_path),
+    )
+
+    root = private_memory_root_for_scope(scope, project_path=project_path)
+
+    assert root is not None
+    assert root == user_private_memory_root("member-user", project_id="member-project")
+
+
+@pytest.mark.parametrize(
+    ("is_local_owner", "expects_private_root"),
+    [
+        pytest.param(True, False, id="owner-keeps-the-host-store"),
+        pytest.param(False, True, id="member-reads-the-private-root"),
+    ],
+)
+def test_builtin_project_keeps_the_host_store_for_its_owner_and_still_isolates_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    is_local_owner: bool,
+    expects_private_root: bool,
+) -> None:
+    """The instance's home project leaves its owner on the host store and still isolates members.
+
+    The built-in project's workspace *is* the host's own workspace, so the owner's turn there keeps
+    the host's SOUL.md, USER.md, MEMORY.md, and history (``None``) instead of being moved into an
+    empty per-user root.  A member classified into that same project is not the host and must never
+    read those files, so they still get their own private root.
+
+    Fails when the built-in exemption is widened to every scope in that project
+    (``if scope.is_local_owner or scope.project.is_builtin``): the member row would return ``None``
+    and read the host owner's profile and long-term memory.  Fails when the ``is_builtin`` operand
+    is dropped (``if scope.is_local_owner and scope.project is None``): the owner row would return a
+    private root and take their own memory away.
+    """
+    monkeypatch.setattr(
+        "nanobot.security.private_media.get_runtime_subdir",
+        lambda name: tmp_path / "runtime" / name,
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    scope = _scoped_scope(
+        user_id="member-user",
+        project_id="member-project",
+        project_path=project_path,
+        is_local_owner=is_local_owner,
+        project=_scope_project(
+            project_id="member-project", project_path=project_path, is_builtin=True
+        ),
+    )
+
+    root = private_memory_root_for_scope(scope, project_path=project_path)
+
+    expected = (
+        user_private_memory_root("member-user", project_id="member-project")
+        if expects_private_root
+        else None
+    )
+    assert root == expected
+
+
+def test_member_scope_with_provenance_but_no_project_entity_reads_its_private_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provenance alone moves a member out of the shared project directory.
+
+    A member scope that carries both ids is a project turn even when it carries no project entity,
+    so it reads its own private root rather than ``project_path``.  Fails if the project-directory
+    fallback is taken before the ids branch: the member's profile and memory would then sit in the
+    shared project directory every member of that project can read.
+    """
+    monkeypatch.setattr(
+        "nanobot.security.private_media.get_runtime_subdir",
+        lambda name: tmp_path / "runtime" / name,
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    scope = _scoped_scope(
+        user_id="member-user",
+        project_id="member-project",
+        project_path=project_path,
+        is_local_owner=False,
+        project=None,
+    )
+
+    assert private_memory_root_for_scope(scope, project_path=project_path) == (
+        user_private_memory_root("member-user", project_id="member-project")
+    )
+
+
+def test_owner_scope_without_a_resolved_project_keeps_the_host_store(tmp_path: Path) -> None:
+    """An owner scope carrying ids but no project entity stays conservatively on the host store.
+
+    Only a *known* non-built-in project entity moves an owner into a private root, so an owner
+    scope whose project did not resolve keeps their own profile and memory instead of silently
+    becoming an empty per-user root.  Fails if the ``scope.project is None`` operand is dropped or
+    the ids branch is evaluated before it, both of which redirect the owner.
+    """
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    scope = _scoped_scope(
+        user_id="member-user",
+        project_id="member-project",
+        project_path=project_path,
+        is_local_owner=True,
+        project=None,
+    )
+
+    assert private_memory_root_for_scope(scope, project_path=project_path) is None
+
+
+def test_turn_without_collaboration_provenance_keeps_the_host_store(tmp_path: Path) -> None:
+    """A turn with no collaboration scope keeps the host's own store.
+
+    Fails if ``scope=None`` starts returning a path: host turns (CLI, SDK, and plain WebUI) would
+    read an empty per-user root instead of the host's own profile and long-term memory.
+    """
+    assert private_memory_root_for_scope(None, project_path=tmp_path / "project") is None
+
+
+@pytest.mark.parametrize(
+    ("user_id", "project_id", "is_local_owner"),
+    [
+        ("member-user", None, False),
+        ("member-user", None, True),
+        (None, "member-project", False),
+        (None, None, False),
+        (None, None, True),
+    ],
+)
+def test_partially_resolved_scope_falls_back_to_the_authorized_project_directory(
+    tmp_path: Path,
+    user_id: str | None,
+    project_id: str | None,
+    is_local_owner: bool,
+) -> None:
+    """A scope missing either id reads the authorized project directory, never the host store.
+
+    Every row carries a non-built-in project entity, so the owner's home-project exemption cannot
+    apply.  Fails if that fallback returns ``None`` (the host store): an isolated or
+    partially-resolved member would then read the host's profile — the exact leak this boundary
+    exists to prevent.
+    """
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    scope = _scoped_scope(
+        user_id=user_id,
+        project_id=project_id,
+        project_path=project_path,
+        is_local_owner=is_local_owner,
+        project=_scope_project(project_id="member-project", project_path=project_path),
+    )
+
+    assert private_memory_root_for_scope(scope, project_path=project_path) == project_path
+
+
+@pytest.mark.parametrize("is_local_owner", [False, True])
+def test_read_root_and_consolidation_store_resolve_to_the_same_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    is_local_owner: bool,
+) -> None:
+    """Reads and consolidation share one root for the same persisted provenance.
+
+    ``_memory_store_for_session`` has always consolidated every project session into
+    ``user_private_memory_root(user_id, project_id)``; the pre-fix read path derived its root with
+    an inline rule that exempted the host owner.  Comparing the two derivations for the same
+    provenance fails whenever they drift apart again — for the owner it fails against ``None``.
+
+    Limit: this pins the invariant *given* provenance persisted for the scope's ids.  A host
+    owner's channel session does not persist provenance today (``_persist_conversation_scope``
+    returns early for ``is_local_owner``), so its consolidation store remains the host store; that
+    asymmetry is outside this helper's contract and is deliberately not asserted here.
+    """
+    monkeypatch.setattr(
+        "nanobot.security.private_media.get_runtime_subdir",
+        lambda name: tmp_path / "runtime" / name,
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    loop = _unit_loop(tmp_path / "agent")
+    scope = _scoped_scope(
+        user_id="member-user",
+        project_id="member-project",
+        project_path=project_path,
+        is_local_owner=is_local_owner,
+        project=_scope_project(project_id="member-project", project_path=project_path),
+    )
+    session = loop.sessions.get_or_create("weixin:member-chat")
+    session.metadata[COLLABORATION_USER_METADATA_KEY] = scope.user_id
+    session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = scope.project_id
+
+    store = loop._memory_store_for_session(session)
+
+    assert store is not None
+    assert store.workspace == private_memory_root_for_scope(scope, project_path=project_path)
+
+
+@pytest.mark.asyncio
+async def test_host_owner_channel_turn_reads_its_private_project_root_not_the_host_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
+) -> None:
+    """The host owner's own channel turn inside a project reads that project's private root.
+
+    The pre-fix read path exempted ``is_local_owner``, so a channel instance handed to a project
+    still built this owner's turn from the host workspace: the host's SOUL.md, USER.md, MEMORY.md,
+    and history all reached the model.  Distinct sentinels in the host and private roots make the
+    leak unambiguous — with that exemption restored this test fails on the ``HOST_*`` assertions
+    and on the missing private memory marker.
+    """
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setattr(
+        "nanobot.security.private_media.get_runtime_subdir",
+        lambda name: runtime_root / name,
+    )
+    workspace = tmp_path / "host-workspace"
+    project_workspace = tmp_path / "project-workspace"
+    workspace.mkdir()
+    project_workspace.mkdir()
+    (workspace / "SOUL.md").write_text("HOST_SOUL_SECRET", encoding="utf-8")
+    (workspace / "USER.md").write_text("HOST_USER_SECRET", encoding="utf-8")
+    (project_workspace / "AGENTS.md").write_text("PROJECT_INSTRUCTIONS_MARKER", encoding="utf-8")
+    host_memory = MemoryStore(workspace)
+    host_memory.write_memory("HOST_MEMORY_SECRET")
+
+    store, repository = local_collaboration_repository
+    owner, _builtin = store.ensure_local_owner(workspace)
+    project = store.create_project(owner.id, "shared project", project_workspace)
+    store.update_user_default_project(owner.id, project.id)
+    store.bind_identity("weixin", "owner-wechat-id", owner.id)
+    private_memory = MemoryStore(user_private_memory_root(owner.id, project_id=project.id))
+    private_memory.write_memory("OWNER_PRIVATE_MEMORY_MARKER")
+
+    provider = _turn_provider()
+    loop = _scope_loop(workspace, repository, provider)
+    message = InboundMessage(
+        "weixin",
+        "owner-wechat-id",
+        "owner-wechat-id",
+        "OWNER_REQUEST_MARKER",
+        metadata={"direct": True},
+    )
+    owner_key = await loop._effective_session_key(message)
+    host_memory.append_history("HOST_HISTORY_SECRET", session_key=owner_key)
+    private_memory.append_history("OWNER_PRIVATE_HISTORY_MARKER", session_key=owner_key)
+
+    await loop._process_message(message)
+
+    prompt = str(provider.chat_with_retry.await_args.kwargs["messages"][0]["content"])
+    assert "PROJECT_INSTRUCTIONS_MARKER" in prompt
+    assert "OWNER_PRIVATE_MEMORY_MARKER" in prompt
+    assert "OWNER_PRIVATE_HISTORY_MARKER" in prompt
+    assert "HOST_SOUL_SECRET" not in prompt
+    assert "HOST_USER_SECRET" not in prompt
+    assert "HOST_MEMORY_SECRET" not in prompt
+    assert "HOST_HISTORY_SECRET" not in prompt

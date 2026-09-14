@@ -415,7 +415,7 @@ def _print_foreground_port_conflict(
         )
     else:
         console.print(
-            "[red]Error: nanobot cannot start because one of its local ports "
+            "[red]Error: Mikobot cannot start because one of its local ports "
             "is already in use.[/red]"
         )
     console.print(f"  WebUI: [cyan]{_webui_display_url(webui_url)}[/cyan]")
@@ -427,7 +427,7 @@ def _print_foreground_port_conflict(
     if gateway_running:
         console.print("Use the existing instance, or stop it first:")
     else:
-        console.print("If this is an existing nanobot instance, use it or stop it first:")
+        console.print("If this is an existing Mikobot instance, use it or stop it first:")
     console.print("  [cyan]nanobot gateway status[/cyan]")
     console.print("  [cyan]nanobot gateway stop[/cyan]")
     console.print(

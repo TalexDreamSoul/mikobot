@@ -15,7 +15,10 @@ from .models import (
     MembershipRole,
     PairingChallenge,
     Project,
+    ProjectAppGrant,
     ProjectMembership,
+    ProjectTask,
+    TaskStatus,
     User,
     UserIdentity,
 )
@@ -82,6 +85,8 @@ class CollaborationRepository(Protocol):
         workspace_path: str | Path | None = None,
         allowed_skills: Sequence[str] | None | object = ...,
         allowed_mcp_servers: Sequence[str] | None | object = ...,
+        app_grants: Sequence[ProjectAppGrant] | object = ...,
+        description: str | object = ...,
     ) -> Project: ...
 
     async def delete_project(self, project_id: str, actor_user_id: str) -> bool: ...
@@ -97,6 +102,30 @@ class CollaborationRepository(Protocol):
     async def remove_member(self, project_id: str, actor_user_id: str, user_id: str) -> bool: ...
 
     async def list_members(self, project_id: str, user_id: str) -> list[ProjectMembership]: ...
+
+    async def create_task(
+        self,
+        project_id: str,
+        actor_user_id: str,
+        title: str,
+        *,
+        detail: str = "",
+        status: TaskStatus = TaskStatus.TODO,
+    ) -> ProjectTask: ...
+
+    async def update_task(
+        self,
+        task_id: str,
+        actor_user_id: str,
+        *,
+        title: str | None = None,
+        detail: str | None = None,
+        status: TaskStatus | None = None,
+    ) -> ProjectTask: ...
+
+    async def delete_task(self, task_id: str, actor_user_id: str) -> bool: ...
+
+    async def list_tasks(self, project_id: str, user_id: str) -> list[ProjectTask]: ...
 
     async def record_channel_provision(
         self, actor_user_id: str, *, channel_type: str, instance_id: str

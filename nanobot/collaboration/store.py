@@ -25,7 +25,10 @@ from nanobot.collaboration.models import (
     MembershipRole,
     PairingChallenge,
     Project,
+    ProjectAppGrant,
     ProjectMembership,
+    ProjectTask,
+    TaskStatus,
     User,
     UserIdentity,
 )
@@ -38,11 +41,21 @@ from nanobot.collaboration.pairing import (
 )
 from nanobot.config.paths import get_runtime_subdir
 
-_SCHEMA = 9
+_SCHEMA = 13
+# Documents at this version already use the single-admin shape. Older ones also
+# carry the dropped multi-tenant collections and migrate through _migrate_legacy.
+_MULTI_TENANT_SCHEMA = 9
+
+# The instance's default project. Work that belongs to nobody else is classified
+# into it, so it is created once and never deleted.
+BUILTIN_PROJECT_NAME = "MikoAssistant"
+_BUILTIN_PROJECT_LEGACY_NAMES = ("Local project", "Personal project")
+
 _MAX_FILE_BYTES = 2 * 1024 * 1024
 _MAX_ITEMS = 10_000
 _MAX_STRING = 512
 _MAX_TEXT = 16_000
+_MAX_DESCRIPTION = 8_000
 _MAX_ALLOWLIST = 256
 _MAX_CHALLENGES_PER_USER = 32
 _MAX_CHALLENGES = 4096
@@ -50,6 +63,7 @@ _MAX_CHALLENGES = 4096
 _Record: TypeAlias = dict[str, object]
 _Entity = TypeVar("_Entity")
 _Allowlist: TypeAlias = "Sequence[str] | None"
+_AppGrants: TypeAlias = "Sequence[ProjectAppGrant]"
 
 
 class _StoreState(TypedDict):
@@ -63,6 +77,7 @@ class _StoreState(TypedDict):
     channelAssignments: dict[str, _Record]
     pairingChallenges: dict[str, _Record]
     conversationBindings: dict[str, _Record]
+    tasks: dict[str, _Record]
 
 
 class CollaborationStoreError(RuntimeError):
@@ -83,6 +98,10 @@ class CollaborationPermissionError(CollaborationStoreError):
 
 class CollaborationConflictError(CollaborationStoreError):
     """A unique identity or binding is already owned by another object."""
+
+
+class CollaborationBuiltinProjectError(CollaborationStoreError):
+    """The instance's built-in project cannot be deleted."""
 
 
 class CollaborationStore:
@@ -110,7 +129,7 @@ class CollaborationStore:
     # -- bootstrap, users, and identities ------------------------------------
 
     def ensure_local_owner(self, default_workspace: str | Path) -> tuple[User, Project]:
-        """Lazily initialize the local owner and its default project."""
+        """Lazily initialize the local owner and the instance's built-in project."""
         workspace = _workspace(default_workspace)
         with self._state() as state:
             now = _now()
@@ -121,25 +140,38 @@ class CollaborationStore:
                 owner = User(_new_id(), "Local owner", None, now, now)
                 state["users"][owner.id] = _encode_user(owner)
                 state["localOwnerId"] = owner.id
-            project_value = (
-                state["projects"].get(owner.default_project_id)
-                if owner.default_project_id is not None
-                else None
-            )
-            project = _project(project_value) if project_value is not None else None
-            if project is None:
-                project = Project(_new_id(), "Local project", workspace, owner.id, now, now)
-                state["projects"][project.id] = _encode_project(project)
-                owner = _replace_user(owner, default_project_id=project.id, updated_at_ms=now)
+            existing = [_project(value) for value in state["projects"].values()]
+            builtin = _canonical_builtin(existing)
+            if builtin is None:
+                builtin = Project(
+                    _new_id(), BUILTIN_PROJECT_NAME, workspace, owner.id, now, now,
+                    is_builtin=True,
+                )
+                state["projects"][builtin.id] = _encode_project(builtin)
+            elif builtin.workspace_path != workspace:
+                # The instance's home follows the agent workspace it runs with.
+                builtin = _replace_project(
+                    builtin, workspace_path=workspace, updated_at_ms=now,
+                )
+                state["projects"][builtin.id] = _encode_project(builtin)
+            # Exactly one project is the instance's home. A release that treated the
+            # owner's default project as that home left a second one behind; demote it
+            # so a project the owner created stays theirs to rename and delete.
+            for project in existing:
+                if project.is_builtin and project.id != builtin.id:
+                    demoted = _replace_project(project, is_builtin=False, updated_at_ms=now)
+                    state["projects"][demoted.id] = _encode_project(demoted)
+            default_project_id = owner.default_project_id
+            if default_project_id is None or default_project_id not in state["projects"]:
+                owner = _replace_user(
+                    owner, default_project_id=builtin.id, updated_at_ms=now,
+                )
                 state["users"][owner.id] = _encode_user(owner)
-            elif project.workspace_path != workspace:
-                project = _replace_project(project, workspace_path=workspace, updated_at_ms=now)
-                state["projects"][project.id] = _encode_project(project)
-            if _member_key(project.id, owner.id) not in state["memberships"]:
-                state["memberships"][_member_key(project.id, owner.id)] = _encode_membership(
-                    ProjectMembership(project.id, owner.id, MembershipRole.OWNER, now))
+            if _member_key(builtin.id, owner.id) not in state["memberships"]:
+                state["memberships"][_member_key(builtin.id, owner.id)] = _encode_membership(
+                    ProjectMembership(builtin.id, owner.id, MembershipRole.OWNER, now))
             self._save(state)
-            return owner, project
+            return owner, builtin
 
     def create_user(self, display_name: str) -> User:
         with self._state() as state:
@@ -367,10 +399,13 @@ class CollaborationStore:
         workspace_path: str | Path | None = None,
         allowed_skills: _Allowlist | object = ...,
         allowed_mcp_servers: _Allowlist | object = ...,
+        app_grants: _AppGrants | object = ...,
+        description: str | object = ...,
     ) -> Project:
         if (
             name is None and workspace_path is None
             and allowed_skills is ... and allowed_mcp_servers is ...
+            and app_grants is ... and description is ...
         ):
             raise ValueError("provide at least one project field")
         project_id = _id(project_id, "project_id")
@@ -393,6 +428,15 @@ class CollaborationStore:
                     _allowlist(allowed_mcp_servers, "allowed_mcp_servers")
                     if allowed_mcp_servers is not ... else project.allowed_mcp_servers
                 ),
+                project.is_builtin,
+                (
+                    _app_grant_sequence(app_grants)
+                    if app_grants is not ... else project.app_grants
+                ),
+                (
+                    _long_text(description, "description", limit=_MAX_DESCRIPTION)
+                    if description is not ... else project.description
+                ),
             )
             state["projects"][project_id] = _encode_project(updated)
             self._save(state)
@@ -403,10 +447,15 @@ class CollaborationStore:
         actor_user_id = _id(actor_user_id, "actor_user_id")
         with self._state() as state:
             self._require_manager(state, project_id, actor_user_id)
-            self._require_project(state, project_id)
+            project = self._require_project(state, project_id)
+            if project.is_builtin:
+                raise CollaborationBuiltinProjectError(
+                    "the built-in project cannot be deleted"
+                )
             del state["projects"][project_id]
             for collection in (
                 "memberships", "conversationBindings", "channelAssignments", "pairingChallenges",
+                "tasks",
             ):
                 for key, value in tuple(state[collection].items()):
                     if value["projectId"] == project_id:
@@ -824,6 +873,91 @@ class CollaborationStore:
             self._save(state)
             return consumed
 
+    # -- project tasks -------------------------------------------------------
+
+    def create_task(
+        self,
+        project_id: str,
+        actor_user_id: str,
+        title: str,
+        *,
+        detail: str = "",
+        status: TaskStatus = TaskStatus.TODO,
+    ) -> ProjectTask:
+        """Add one card to a project's board. Any member may write to it."""
+        project_id, actor_user_id = _id(project_id, "project_id"), _id(
+            actor_user_id, "actor_user_id")
+        title, detail = _string(title, "title"), _long_text(detail, "detail")
+        with self._state() as state:
+            self._require_member_or_admin(state, project_id, actor_user_id)
+            now = _now()
+            task = ProjectTask(
+                _new_id(), project_id, title, actor_user_id, now, now, status, detail,
+            )
+            state["tasks"][task.id] = _encode_task(task)
+            self._save(state)
+            return task
+
+    def update_task(
+        self,
+        task_id: str,
+        actor_user_id: str,
+        *,
+        title: str | None = None,
+        detail: str | None = None,
+        status: TaskStatus | None = None,
+    ) -> ProjectTask:
+        """Edit a card or move it between columns."""
+        if title is None and detail is None and status is None:
+            raise ValueError("provide at least one task field")
+        task_id, actor_user_id = _id(task_id, "task_id"), _id(actor_user_id, "actor_user_id")
+        with self._state() as state:
+            task = self._require_task(state, task_id)
+            self._require_member_or_admin(state, task.project_id, actor_user_id)
+            updated = ProjectTask(
+                task.id,
+                task.project_id,
+                _string(title, "title") if title is not None else task.title,
+                task.created_by_user_id,
+                task.created_at_ms,
+                _now(),
+                status if status is not None else task.status,
+                _long_text(detail, "detail") if detail is not None else task.detail,
+            )
+            state["tasks"][task_id] = _encode_task(updated)
+            self._save(state)
+            return updated
+
+    def delete_task(self, task_id: str, actor_user_id: str) -> bool:
+        """Remove a card. Only its author or a project manager may discard it."""
+        task_id, actor_user_id = _id(task_id, "task_id"), _id(actor_user_id, "actor_user_id")
+        with self._state() as state:
+            task = self._require_task(state, task_id)
+            if (
+                task.created_by_user_id != actor_user_id
+                and not self._can_manage(state, task.project_id, actor_user_id)
+            ):
+                raise CollaborationPermissionError("only the author or a project manager may delete")
+            del state["tasks"][task_id]
+            self._save(state)
+            return True
+
+    def list_tasks(self, project_id: str, user_id: str) -> list[ProjectTask]:
+        """Return a project's board in creation order."""
+        project_id, user_id = _id(project_id, "project_id"), _id(user_id, "user_id")
+        with self._state() as state:
+            self._require_member_or_admin(state, project_id, user_id)
+            # Records are stored in creation order and the sort is stable, so two
+            # cards written in the same millisecond keep that order instead of
+            # falling back to their random ids.
+            return sorted(
+                (
+                    task for value in state["tasks"].values()
+                    if (task := _task(value)).project_id == project_id
+                ),
+                key=lambda item: item.created_at_ms,
+            )
+
     # -- conversation bindings and scope -------------------------------------
 
     def bind_conversation(self, channel: str, conversation_id: str, project_id: str,
@@ -1148,6 +1282,13 @@ class CollaborationStore:
             raise CollaborationNotFoundError("project not found")
         return _project(value)
 
+    @staticmethod
+    def _require_task(state: _StoreState, task_id: str) -> ProjectTask:
+        value = state["tasks"].get(task_id)
+        if value is None:
+            raise CollaborationNotFoundError("task not found")
+        return _task(value)
+
     class _State:
         def __init__(self, store: "CollaborationStore") -> None:
             self.store = store
@@ -1230,6 +1371,7 @@ def _empty() -> _StoreState:
         "channelAssignments": {},
         "pairingChallenges": {},
         "conversationBindings": {},
+        "tasks": {},
     }
 
 
@@ -1280,6 +1422,7 @@ def _migrate_legacy(root: Mapping[str, object], version: int) -> dict[str, objec
             "allowedMcpServers": None,
             "createdAtMs": project.get("createdAtMs"),
             "updatedAtMs": project.get("updatedAtMs"),
+            "description": project.get("description", ""),
         }
     provisions: dict[str, _Record] = {}
     for key, raw_provision in collection("channelProvisions").items():
@@ -1386,14 +1529,65 @@ def _migrate_legacy(root: Mapping[str, object], version: int) -> dict[str, objec
         "channelAssignments": assignments,
         "pairingChallenges": {},
         "conversationBindings": collection("conversationBindings"),
+        "tasks": {},
     }
+
+
+def _migrate_to_current_shape(root: Mapping[str, object]) -> dict[str, object]:
+    """Bring a document from the previous releases to the current shape.
+
+    v9 → v10 marks the local owner's default project as the instance's built-in
+    project; v10 → v11 adds the (empty) project task board; v11 → v12 gives every
+    project an (empty) set of approved apps; v12 → v13 adds the project description.
+    A document written before the built-in project existed names it after the
+    release that generated it, and only such a generated name is replaced, so a
+    project someone renamed keeps their choice.
+    """
+    migrated = {**root, "schemaVersion": _SCHEMA}
+    migrated.setdefault("tasks", {})
+    owner_id = migrated.get("localOwnerId")
+    projects = _record_index(migrated.get("projects"))
+    users = _record_index(migrated.get("users"))
+    if projects is not None:
+        # A project that joined no app pins no app revision and a project from v12
+        # has no description yet.
+        migrated["projects"] = {
+            project_id: {
+                **record,
+                "appGrants": record.get("appGrants", {}),
+                "description": record.get("description", ""),
+            }
+            for project_id, record in projects.items()
+        }
+        projects = _record_index(migrated["projects"])
+    if not isinstance(owner_id, str) or projects is None or users is None:
+        return migrated
+    owner = users.get(owner_id)
+    if owner is None:
+        return migrated
+    default_project_id = owner.get("defaultProjectId")
+    record = projects.get(default_project_id) if isinstance(default_project_id, str) else None
+    if record is None or record.get("isBuiltin") is True:
+        return migrated
+    builtin = dict(record)
+    if builtin.get("name") in _BUILTIN_PROJECT_LEGACY_NAMES:
+        builtin["name"] = BUILTIN_PROJECT_NAME
+    builtin["isBuiltin"] = True
+    migrated["projects"] = {**projects, cast(str, default_project_id): builtin}
+    logger.info(
+        "collaboration store marked built-in project {} as {}",
+        default_project_id, builtin.get("name"),
+    )
+    return migrated
 
 
 def _normalize(data: object) -> _StoreState:
     root = _mapping(data, "unsupported collaboration store schema")
     version = root.get("schemaVersion")
     if isinstance(version, int) and not isinstance(version, bool) and 1 <= version < _SCHEMA:
-        root = _migrate_legacy(root, version)
+        if version < _MULTI_TENANT_SCHEMA:
+            root = _migrate_legacy(root, version)
+        root = _migrate_to_current_shape(root)
     if set(root) != set(_empty()) or root.get("schemaVersion") != _SCHEMA:
         raise CollaborationStoreFormatError("unsupported collaboration store schema")
     result = _empty()
@@ -1424,6 +1618,8 @@ def _normalize(data: object) -> _StoreState:
         root["conversationBindings"], "conversationBindings", _binding, _encode_binding,
         lambda binding: _conversation_key(
             binding.channel, binding.conversation_id, binding.thread_id))
+    result["tasks"] = _normalize_collection(
+        root["tasks"], "tasks", _task, _encode_task, lambda task: task.id)
     _references(result)
     return result
 
@@ -1492,6 +1688,26 @@ def _references(state: _StoreState) -> None:
         binding = _binding(value)
         if _member_key(binding.project_id, binding.created_by_user_id) not in memberships:
             raise CollaborationStoreFormatError("invalid conversation binding")
+    for value in state["tasks"].values():
+        task = _task(value)
+        if task.project_id not in projects or task.created_by_user_id not in users:
+            raise CollaborationStoreFormatError("invalid task references")
+
+
+def _record_index(value: object) -> dict[str, Mapping[str, object]] | None:
+    """Return a string-keyed index of mapping values, or ``None`` if it is malformed.
+
+    Migration steps read documents written by earlier releases, so every level has
+    to be checked before it is trusted.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    records: dict[str, Mapping[str, object]] = {}
+    for key, item in cast(Mapping[object, object], value).items():
+        if not isinstance(key, str) or not isinstance(item, Mapping):
+            return None
+        records[key] = cast(Mapping[str, object], item)
+    return records
 
 
 def _mapping(value: object, error: str) -> _Record:
@@ -1561,14 +1777,21 @@ def _encode_identity(x: UserIdentity) -> _Record:
 def _project(data: Mapping[str, object]) -> Project:
     _shape(data, {
         "id", "name", "workspacePath", "createdByUserId", "allowedSkills",
-        "allowedMcpServers", "createdAtMs", "updatedAtMs",
+        "allowedMcpServers", "createdAtMs", "updatedAtMs", "isBuiltin", "appGrants",
+        "description",
     })
+    builtin = data.get("isBuiltin", False)
+    if not isinstance(builtin, bool):
+        raise CollaborationStoreFormatError("invalid project isBuiltin")
     return Project(
         _id(data["id"], "id"), _string(data["name"], "name"),
         _workspace(data["workspacePath"]), _id(data["createdByUserId"], "createdByUserId"),
         _time(data["createdAtMs"]), _time(data["updatedAtMs"]),
         _allowlist(data["allowedSkills"], "allowedSkills"),
         _allowlist(data["allowedMcpServers"], "allowedMcpServers"),
+        builtin,
+        _app_grants(data["appGrants"]),
+        _long_text(data["description"], "description", limit=_MAX_DESCRIPTION),
     )
 
 
@@ -1581,11 +1804,22 @@ def _encode_project(x: Project) -> _Record:
             list(x.allowed_mcp_servers) if x.allowed_mcp_servers is not None else None
         ),
         "createdAtMs": x.created_at_ms, "updatedAtMs": x.updated_at_ms,
+        "isBuiltin": x.is_builtin,
+        "appGrants": {
+            grant.name: {
+                "revision": grant.revision,
+                "skills": list(grant.skills),
+                "mcpServers": list(grant.mcp_servers),
+            }
+            for grant in x.app_grants
+        },
+        "description": x.description,
     }
 
 
 def _replace_project(
     project: Project, *, workspace_path: str | None = None, updated_at_ms: int | None = None,
+    is_builtin: bool | None = None,
 ) -> Project:
     return Project(
         project.id, project.name,
@@ -1593,6 +1827,31 @@ def _replace_project(
         project.created_by_user_id, project.created_at_ms,
         updated_at_ms if updated_at_ms is not None else project.updated_at_ms,
         project.allowed_skills, project.allowed_mcp_servers,
+        is_builtin if is_builtin is not None else project.is_builtin,
+        project.app_grants,
+        project.description,
+    )
+
+
+def _canonical_builtin(projects: Sequence[Project]) -> Project | None:
+    """Return the one project that is the instance's home for unclassified work.
+
+    Identified by the flag, never by the owner's default project: a default that
+    points at a project the owner created must keep pointing there. When an older
+    release left more than one flagged project, the oldest record wins — the
+    instance's own project is created before any project it later converted — with
+    the name the instance gives it breaking a tie.
+    """
+    flagged = [project for project in projects if project.is_builtin]
+    if not flagged:
+        return None
+    return min(
+        flagged,
+        key=lambda project: (
+            project.created_at_ms,
+            0 if project.name == BUILTIN_PROJECT_NAME else 1,
+            project.id,
+        ),
     )
 
 
@@ -1605,6 +1864,27 @@ def _membership(data: Mapping[str, object]) -> ProjectMembership:
 def _encode_membership(x: ProjectMembership) -> _Record:
     return {"projectId": x.project_id, "userId": x.user_id, "role": x.role.value,
             "createdAtMs": x.created_at_ms}
+
+
+def _task(data: Mapping[str, object]) -> ProjectTask:
+    _shape(data, {
+        "id", "projectId", "title", "status", "detail",
+        "createdByUserId", "createdAtMs", "updatedAtMs",
+    })
+    return ProjectTask(
+        _id(data["id"], "id"), _id(data["projectId"], "projectId"),
+        _string(data["title"], "title"), _id(data["createdByUserId"], "createdByUserId"),
+        _time(data["createdAtMs"]), _time(data["updatedAtMs"]),
+        _task_status(data["status"]), _long_text(data["detail"], "detail"),
+    )
+
+
+def _encode_task(x: ProjectTask) -> _Record:
+    return {
+        "id": x.id, "projectId": x.project_id, "title": x.title, "status": x.status.value,
+        "detail": x.detail, "createdByUserId": x.created_by_user_id,
+        "createdAtMs": x.created_at_ms, "updatedAtMs": x.updated_at_ms,
+    }
 
 
 def _channel_provision(data: Mapping[str, object]) -> ChannelProvision:
@@ -1776,6 +2056,66 @@ def _time(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise CollaborationStoreFormatError("invalid timestamp")
     return value
+
+
+def _app_grant_sequence(value: object) -> tuple[ProjectAppGrant, ...]:
+    """Validate the apps a project approved, as the API hands them over."""
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise CollaborationStoreFormatError("app_grants must be a sequence")
+    grants: list[ProjectAppGrant] = []
+    for item in cast(Sequence[object], value):
+        if not isinstance(item, ProjectAppGrant):
+            raise CollaborationStoreFormatError("invalid app grant")
+        grants.append(item)
+    if len(grants) > _MAX_ALLOWLIST:
+        raise CollaborationStoreFormatError("app_grants has too many entries")
+    if len({grant.name for grant in grants}) != len(grants):
+        raise CollaborationStoreFormatError("duplicate app grant")
+    return tuple(sorted(grants, key=lambda grant: grant.name))
+
+
+def _app_grants(value: object) -> tuple[ProjectAppGrant, ...]:
+    """Decode the apps a project approved, with what each one granted it."""
+    if value is None:
+        return ()
+    if not isinstance(value, Mapping):
+        raise CollaborationStoreFormatError("appGrants must be an object")
+    entries = cast(Mapping[object, object], value)
+    if len(entries) > _MAX_ALLOWLIST:
+        raise CollaborationStoreFormatError("appGrants has too many entries")
+    grants: list[ProjectAppGrant] = []
+    for key, item in entries.items():
+        name = _string(key, "app name", limit=160)
+        record = _mapping(item, "invalid app grant")
+        _shape(record, {"revision", "skills", "mcpServers"})
+        grants.append(
+            ProjectAppGrant(
+                name,
+                _long_text(record["revision"], "app revision", limit=160),
+                _allowlist(record["skills"], "app skills") or (),
+                _allowlist(record["mcpServers"], "app mcp servers") or (),
+            )
+        )
+    return tuple(sorted(grants, key=lambda grant: grant.name))
+
+
+def _task_status(value: object) -> TaskStatus:
+    if not isinstance(value, str):
+        raise CollaborationStoreFormatError("invalid task status")
+    try:
+        return TaskStatus(value)
+    except ValueError as exc:
+        raise CollaborationStoreFormatError("invalid task status") from exc
+
+
+def _long_text(value: object, field: str, *, limit: int = _MAX_TEXT) -> str:
+    """Validate free text that may contain line breaks, unlike ``_string``."""
+    if not isinstance(value, str):
+        raise CollaborationStoreFormatError(f"{field} must be a string")
+    text = value.strip()
+    if len(text) > limit or any(ord(char) < 32 and char not in "\n\t" for char in text):
+        raise CollaborationStoreFormatError(f"invalid {field}")
+    return text
 
 
 def _role(value: object) -> MembershipRole:

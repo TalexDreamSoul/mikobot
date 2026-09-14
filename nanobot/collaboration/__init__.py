@@ -14,15 +14,21 @@ from nanobot.collaboration.models import (
     MembershipRole,
     PairingChallenge,
     Project,
+    ProjectAppGrant,
     ProjectMembership,
+    ProjectTask,
+    TaskStatus,
     User,
     UserIdentity,
+    private_memory_root_for_scope,
 )
 from nanobot.collaboration.repository import (
     CollaborationRepository,
     build_collaboration_repository,
 )
 from nanobot.collaboration.store import (
+    BUILTIN_PROJECT_NAME,
+    CollaborationBuiltinProjectError,
     CollaborationConflictError,
     CollaborationNotFoundError,
     CollaborationPermissionError,
@@ -32,6 +38,8 @@ from nanobot.collaboration.store import (
 )
 
 __all__ = [
+    "BUILTIN_PROJECT_NAME",
+    "CollaborationBuiltinProjectError",
     "CollaborationConflictError",
     "CollaborationNotFoundError",
     "CollaborationPermissionError",
@@ -53,7 +61,11 @@ __all__ = [
     "MembershipRole",
     "PairingChallenge",
     "Project",
+    "ProjectAppGrant",
     "ProjectMembership",
+    "ProjectTask",
+    "TaskStatus",
     "User",
     "UserIdentity",
+    "private_memory_root_for_scope",
 ]

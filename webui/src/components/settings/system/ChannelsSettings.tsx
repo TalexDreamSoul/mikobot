@@ -192,7 +192,7 @@ export function ChannelsSettings({
       {requiresRestartPending ? (
         <div className="mt-3 shrink-0">
           <RestartRequiredNotice
-            message={tx("settings.channels.restartRequired", "Restart nanobot to apply updated channel support.")}
+            message={tx("settings.channels.restartRequired", "Restart Mikobot to apply updated channel support.")}
             onRestart={onRestart}
             isRestarting={isRestarting}
           />

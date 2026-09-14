@@ -204,7 +204,7 @@ def workspace_sandbox_status(
         enforced=False,
         provider="none",
         provider_label=_provider_label("none"),
-        summary="Workspace restriction uses nanobot application-level guards.",
+        summary="Workspace restriction uses Mikobot application-level guards.",
     )
 
 

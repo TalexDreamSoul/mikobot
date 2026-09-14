@@ -383,6 +383,12 @@ export interface ChatSummary {
   /** Durable recovery state that needs attention after an interrupted turn. */
   recoveryState?: RecoveryState | null;
   workspaceScope?: WorkspaceScopePayload | null;
+  /**
+   * Collaboration project this conversation runs in. The server attributes
+   * conversations without one of their own to the caller's default project,
+   * so this is absent only when the caller has no default project at all.
+   */
+  collaborationProjectId?: string | null;
   /** Stable, server-owned @handle for this session. */
   handle?: SessionHandle | null;
 }
@@ -468,6 +474,10 @@ export interface CollaborationProject {
   allowed_mcp_servers: string[] | null;
   created_at_ms: number;
   updated_at_ms: number;
+  /** The instance's default project. It cannot be deleted. */
+  is_builtin: boolean;
+  /** Optional for compatibility with pre-description gateways. */
+  description?: string;
 }
 
 export type CollaborationProjectRole = "owner" | "member";
@@ -505,15 +515,66 @@ export interface CollaborationPayload {
   manageable_project_ids: string[];
 }
 
+export interface CollaborationProjectApp {
+  name: string;
+  display_name: string;
+  description: string;
+  /** The revision the host runs now; null when the app is gone. */
+  revision: string | null;
+  enabled: boolean;
+  skills: string[];
+  mcp_servers: string[];
+  /** The revision this project approved, if it approved the app at all. */
+  approved_revision: string | null;
+  approved: boolean;
+  /** The host no longer runs the approved revision, so the app is revoked. */
+  drifted: boolean;
+}
+
+export type CollaborationTaskStatus = "todo" | "doing" | "done";
+
+export interface CollaborationProjectTask {
+  id: string;
+  project_id: string;
+  title: string;
+  detail: string;
+  status: CollaborationTaskStatus;
+  created_by_user_id: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
 export interface CollaborationProjectPayload {
   project: CollaborationProject;
   members: CollaborationProjectMember[];
   assignments: CollaborationChannelAssignment[];
+  /** The project's built-in automations: Heartbeat and Dream. */
+  automations: SessionAutomationJob[];
+  /** The project's shared board, in creation order. */
+  tasks: CollaborationProjectTask[];
+  /** The host's apps, with this project's approval state for each. */
+  apps: CollaborationProjectApp[];
   available: {
     skills: CollaborationAvailableSkill[];
     mcp_servers: CollaborationAvailableMcpServer[];
   };
   can_manage: boolean;
+}
+
+export interface CollaborationProjectMaterial {
+  path: string;
+  size: number;
+  modified_at_ms?: number;
+  previewable: boolean;
+}
+
+export interface CollaborationProjectMaterialsPayload {
+  files?: CollaborationProjectMaterial[];
+  path?: string;
+  size?: number;
+  previewable?: boolean;
+  truncated?: boolean;
+  content?: string;
 }
 
 export interface CollaborationPairingPayload {

@@ -183,7 +183,7 @@ const LIGHT: Palette = {
   cool: "#0F766E",
 }
 
-const COMPOSER_PLACEHOLDER = "Ask nanobot anything"
+const COMPOSER_PLACEHOLDER = "Ask Mikobot anything"
 const ACTIVE_COMPOSER_PLACEHOLDER = "Enter send now · Tab send next"
 const COMPACT_ACTIVE_COMPOSER_PLACEHOLDER = "Enter now · Tab next"
 const IMAGE_PLACEHOLDER_STYLE = "image.placeholder"
@@ -398,7 +398,7 @@ function connectionStatusText(
       ? "Still getting ready…"
       : "Nanobot is taking longer to respond…"
   }
-  if (status === "error") return "Nanobot unavailable · restart nanobot"
+  if (status === "error") return "Mikobot unavailable · restart nanobot"
   return "Session ended"
 }
 
@@ -651,7 +651,7 @@ export class NanobotTui {
     })
     this.titleText = new TextRenderable(renderer, {
       id: "nanobot-tui-title-text",
-      content: "nanobot",
+      content: "Mikobot",
       height: 1,
       flexShrink: 0,
       truncate: true,
@@ -1957,7 +1957,7 @@ export class NanobotTui {
   }
 
   private updateTitle(): void {
-    const identity = this.sessionTitle.trim() || "nanobot"
+    const identity = this.sessionTitle.trim() || "Mikobot"
     this.titleText.maxWidth = Math.max(8, Math.floor(this.renderer.width * 0.38))
     this.titleText.content = identity
     const context = this.contextTokens === null

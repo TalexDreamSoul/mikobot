@@ -17,11 +17,14 @@ workspace, and reply target.
 |---|---|---|---|
 | Scheduled automation | Time, interval, or cron expression | Recurring reminders, scheduled summaries, one-time future tasks | Ask nanobot in the target topic to schedule it with the `cron` tool |
 | Local trigger | A local `nanobot trigger ...` command | CI jobs, webhooks, shell scripts, generated reports | `/trigger <name>` in the target topic |
-| Heartbeat | Protected system schedule | Quiet recurring checks that should only report useful results | Edit `<workspace>/HEARTBEAT.md` |
+| Heartbeat | Protected project schedule | Quiet recurring checks that should only report useful results | Edit the project's `HEARTBEAT.md` |
 
 The two user-created automation types are scheduled automations and local
-triggers. Heartbeat uses the same background service but is system-managed and
-protected from normal automation edits.
+triggers. Heartbeat and Dream belong to each project instead: the gateway creates
+one of each per project, they run on the schedule configured for the instance,
+and they are protected from normal automation edits — the instance-wide
+Automations view lists only instance-wide automation. **Projects → Automations**
+shows a project's built-in pair with their schedule and last run.
 
 ## Before You Create One
 
@@ -103,9 +106,11 @@ final message.
 
 ## Heartbeat
 
-Heartbeat is for recurring workspace checks that should usually stay quiet. It
-reads `<workspace>/HEARTBEAT.md`, executes active tasks, and sends only useful or
-actionable results to the most recently active chat target.
+Heartbeat is for recurring project checks that should usually stay quiet. Each
+project owns one: it reads that project's `HEARTBEAT.md` (created from the bundled
+default when the project is created), executes active tasks, and reports only
+useful or actionable results to a conversation of the same project. A project
+with no eligible conversation is skipped instead of reporting elsewhere.
 
 Use heartbeat for checks such as "watch this repo for important failures" or
 "periodically inspect this workspace and only tell me when action is needed." Use

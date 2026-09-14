@@ -3833,6 +3833,9 @@ async def test_settings_api_returns_safe_subset_and_updates_whitelist(
     )
     config.tools.web.search.provider = "brave"
     config.tools.web.search.api_key = "brave-secret"
+    # Agent branding is operator configuration the settings API does not expose.
+    config.agents.defaults.bot_name = "Studio Bot"
+    config.agents.defaults.bot_icon = "🦉"
     expected_timezone = config.agents.defaults.timezone
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
@@ -4203,8 +4206,10 @@ async def test_settings_api_returns_safe_subset_and_updates_whitelist(
         assert saved.model_presets["Codex"].model == "openai/gpt-5.5"
         assert saved.model_presets["Codex"].provider == "openai"
         assert saved.agents.defaults.timezone == "Asia/Shanghai"
-        assert saved.agents.defaults.bot_name == "nanobot"
-        assert saved.agents.defaults.bot_icon == "🐈"
+        # Settings mutations re-save the whole config, but branding is outside
+        # the settings whitelist: the operator's values must survive verbatim.
+        assert saved.agents.defaults.bot_name == "Studio Bot"
+        assert saved.agents.defaults.bot_icon == "🦉"
         assert saved.agents.defaults.tool_hint_max_length == 120
         assert saved.providers.openrouter.api_key == "sk-or-next"
         assert saved.providers.openrouter.api_base == "https://openrouter.ai/api/v1"
@@ -5283,6 +5288,15 @@ def test_sessions_list_includes_active_run_started_at(monkeypatch) -> None:
     workspace_scope = body["sessions"][0].pop("workspace_scope")
     assert workspace_scope["project_path"] == str(channel.gateway.media.workspace_path)
     assert workspace_scope["access_mode"] in {"restricted", "full"}
+    # This conversation carries no collaboration metadata, so it must be
+    # attributed to the WebUI caller's own default project rather than left
+    # unattributed. The id is generated per run, so derive it from the
+    # collaboration store instead of hard-coding one.
+    _owner, default_project = asyncio.run(
+        channel.gateway.collaboration.ensure_local_owner(
+            channel.gateway.http.skills_workspace_path
+        )
+    )
     assert body["sessions"] == [
         {
             "key": "websocket:chat-1",
@@ -5291,6 +5305,7 @@ def test_sessions_list_includes_active_run_started_at(monkeypatch) -> None:
             "title": "Running",
             "preview": "work",
             "model_preset": "fast",
+            "collaboration_project_id": default_project.id,
             "run_started_at": 1_700_000_000.0,
             "handle": handle.public_payload(),
         }

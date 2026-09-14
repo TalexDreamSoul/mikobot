@@ -134,7 +134,7 @@ def _render_server(
         return _render_stdio_server(name, server, project_cwd)
     if server_type == "streamableHttp":
         return _render_http_server(name, server)
-    raise ValueError(f"Codex does not support nanobot MCP transport {server_type!r}")
+    raise ValueError(f"Codex does not support Mikobot MCP transport {server_type!r}")
 
 
 def _render_stdio_server(

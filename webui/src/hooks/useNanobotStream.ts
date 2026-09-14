@@ -304,7 +304,7 @@ export function useNanobotStream(
       || document.visibilityState === "visible"
       || !readLocalPreferences().browserNotifications
     ) return;
-    new Notification("nanobot", { body });
+    new Notification("Mikobot", { body });
   }, []);
 
   const clearPendingStreamWork = useCallback(() => {

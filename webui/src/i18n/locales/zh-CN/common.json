@@ -1,12 +1,12 @@
 {
   "app": {
-    "brand": "nanobot",
+    "brand": "Mikobot",
     "loading": {
-      "connecting": "正在连接 nanobot…",
-      "boot": "正在加载 nanobot…"
+      "connecting": "正在连接 Mikobot…",
+      "boot": "正在加载 Mikobot…"
     },
     "error": {
-      "title": "无法连接到 nanobot",
+      "title": "无法连接到 Mikobot",
       "gatewayHint": "请确认网关已启动（`nanobot gateway`），并且当前页面与网关运行在同一台机器上。"
     },
     "auth": {
@@ -14,7 +14,7 @@
       "showPassword": "显示密码",
       "hidePassword": "隐藏密码",
       "submit": "连接",
-      "signIn": "登录 nanobot",
+      "signIn": "登录 Mikobot",
       "continueWithSso": "使用 SSO 继续",
       "orPassword": "或使用密码",
       "invalidLoginUrl": "服务器返回了无效的登录地址，无法使用单点登录。",
@@ -30,8 +30,8 @@
     },
     "system": {
       "section": "系统",
-      "restartHint": "重启 nanobot 以应用运行时更改。",
-      "restart": "重启 nanobot",
+      "restartHint": "重启 Mikobot 以应用运行时更改。",
+      "restart": "重启 Mikobot",
       "restarting": "正在重启...",
       "restartEngine": "重启引擎",
       "restartingEngine": "正在重启引擎..."
@@ -40,11 +40,11 @@
       "completed": "重启已完成，用时 {{seconds}} 秒。"
     },
     "documentTitle": {
-      "base": "nanobot",
-      "chat": "{{title}} · nanobot"
+      "base": "Mikobot",
+      "chat": "{{title}} · Mikobot"
     },
     "meta": {
-      "description": "nanobot Web UI —— 与你的 nanobot 工作区对话。"
+      "description": "Mikobot Web UI —— 与你的 Mikobot 工作区对话。"
     },
     "pairing": {
       "title": "配对聊天用户",
@@ -63,8 +63,6 @@
     "assignedDescription": "关闭实例可以暂停它而不解除分配。用项目选择器可以把它移到别的项目。",
     "assignee": "分配给 {{user}}",
     "project": "项目",
-    "targetProject": "分配到项目",
-    "noProjects": "没有你可管理的项目",
     "enabled": "开启",
     "disabled": "关闭",
     "enableAria": "启用 {{instance}}",
@@ -75,8 +73,8 @@
     "removeConfirmDescription": "{{instance}} 将不再服务 {{project}}。在重新分配之前，来自它的消息都会被拒绝。",
     "empty": "还没有分配任何渠道实例。",
     "assign": "分配实例",
-    "assignDescription": "选择你在设置中连接的实例，选好项目，然后在该渠道里发送配对码，把它绑定到你自己。",
-    "assignDescriptionAdmin": "选择任意已连接的实例和项目，可选填写要分配给的成员 ID。由对方在该渠道里发送配对码完成分配。",
+    "assignDescription": "选择你在设置中连接的实例，然后在该渠道里发送配对码，把它绑定到此项目。",
+    "assignDescriptionAdmin": "选择任意已连接的实例，可选填写要分配给的成员。由对方在该渠道里发送配对码完成分配。",
     "channelInstance": "渠道实例",
     "chooseChannel": "请选择渠道实例",
     "assigneeUserId": "分配给项目成员",
@@ -163,11 +161,69 @@
     "detailsUnavailable": "无法获取项目详情",
     "detailsUnavailableDescription": "请检查连接或项目权限后重试。",
     "deleteProject": "删除项目",
+    "activeProject": "当前项目",
+    "makeActive": "设为当前项目",
+    "activeProjectHint": "你未指定项目时发起的新会话都会归到这里。",
+    "renameProject": "重命名项目",
+    "renameTitle": "重命名项目",
+    "renameDescription": "为所有成员更改此项目名称。它不会改变项目工作区。",
+    "renamePlaceholder": "项目名称",
+    "builtinHint": "这是实例的默认项目。不属于其他项目的内容都归到这里，因此它不能被删除。",
+    "overview": {
+      "title": "项目概览",
+      "description": "让项目目标对成员和项目内的 Mikobot 对话都清晰可见。",
+      "introductionTitle": "项目介绍与上下文",
+      "introductionDescription": "这段内容会注入运行在本项目中的对话。它是共享项目上下文，不是私人画像或记忆文件。",
+      "introductionLabel": "项目介绍与上下文",
+      "placeholder": "这个项目是做什么的？可以写目标、术语和协作约定。",
+      "save": "保存介绍",
+      "readOnly": "只有项目所有者可以编辑介绍。",
+      "runtimeTitle": "项目边界",
+      "runtimeDescription": "项目对话使用本项目的共享文件和已批准能力。成员私人画像、记忆和原始历史不会出现在这里。"
+    },
+    "automations": {
+      "title": "自动化",
+      "description": "每个项目默认拥有心跳巡检和记忆整理。它们按实例配置的时间表运行，不能在单个项目里删除或修改。",
+      "heartbeat": "心跳巡检",
+      "heartbeatDescription": "读取本项目的 HEARTBEAT.md 并执行其中的当前任务。",
+      "dream": "记忆整理",
+      "dreamDescription": "整理本项目的记忆与画像。",
+      "nextRun": "下次 {{time}}",
+      "lastRun": "上次运行 {{time}}",
+      "never": "从未",
+      "empty": "本项目的内置自动化仍在创建中。"
+    },
     "deleteConfirmTitle": "删除 {{name}}？",
     "deleteConfirmDescription": "此操作会移除项目的成员、渠道分配和会话绑定。工作区中的文件会保留。",
     "panels": {
+      "overview": "概览",
+      "tasks": "任务",
+      "sessions": "会话",
+      "materials": "资料",
+      "memory": "项目沉淀",
+      "apps": "应用",
       "members": "成员",
-      "capabilities": "能力"
+      "capabilities": "能力",
+      "channels": "渠道",
+      "automations": "自动化"
+    },
+    "materials": {
+      "title": "项目资料",
+      "description": "浏览共享项目文件，不暴露工作区路径或成员私人状态。",
+      "refresh": "刷新项目资料",
+      "loading": "正在加载项目资料…",
+      "previewLoading": "正在加载文件预览…",
+      "selectFile": "选择一个文本文件查看预览。",
+      "empty": "本项目还没有共享文件。",
+      "truncated": "预览已截断"
+    },
+    "memory": {
+      "title": "项目沉淀",
+      "description": "这里是项目 Dream 自动整理的共享 MEMORY.md。成员私人记忆不会显示在这里。",
+      "refresh": "刷新项目沉淀",
+      "loading": "正在加载项目沉淀…",
+      "empty": "项目还没有记录共享知识。",
+      "truncated": "预览已截断"
     },
     "members": {
       "title": "成员",
@@ -213,6 +269,56 @@
       "mcpServers": "MCP 服务器",
       "mcpDescription": "此项目中只能使用选中的 MCP 服务器提供的工具。",
       "noMcp": "当前没有可用的 MCP 服务器。"
+    },
+    "tasks": {
+      "title": "任务看板",
+      "description": "任务属于项目，因此所有成员共用同一块看板。删除卡片需要由作者本人或项目所有者操作。",
+      "add": "新建任务",
+      "edit": "编辑任务",
+      "delete": "删除任务",
+      "save": "保存任务",
+      "formDescription": "标题显示在卡片上，备注用于补充细节。",
+      "titleLabel": "标题",
+      "titlePlaceholder": "需要完成什么",
+      "detailLabel": "备注",
+      "detailPlaceholder": "背景、链接或验收标准",
+      "columns": {
+        "todo": "待办",
+        "doing": "进行中",
+        "done": "已完成"
+      },
+      "author": "由 {{name}} 添加",
+      "you": "你",
+      "unknownAuthor": "其他成员",
+      "emptyColumn": "这里还没有卡片。",
+      "deleteConfirmTitle": "删除「{{title}}」？",
+      "deleteConfirmDescription": "这会从所有成员的项目看板中移除该卡片。",
+      "editAria": "编辑「{{title}}」",
+      "deleteAria": "删除「{{title}}」",
+      "moveBack": "将「{{title}}」移向待办",
+      "moveForward": "将「{{title}}」移向已完成"
+    },
+    "apps": {
+      "title": "应用",
+      "description": "应用会把自身的技能和 MCP 服务器授予本项目。批准时会记录宿主当前运行的确切版本;一旦该版本发生变化,这些能力会被收回,直到你重新批准该应用。",
+      "add": "加入项目",
+      "reapprove": "批准新版本",
+      "remove": "移除",
+      "empty": "此主机上还没有应用能向项目授予能力。",
+      "readOnly": "只有项目所有者或管理员可以增删应用。",
+      "grants": "授予 {{count}} 项能力",
+      "approvedRevision": "已批准版本 {{revision}}",
+      "installedRevision": "当前安装版本 {{revision}}",
+      "stateAvailable": "可加入",
+      "stateApproved": "已批准",
+      "stateDrifted": "版本已变化",
+      "stateUnavailable": "已不再安装"
+    },
+    "sessions": {
+      "description": "属于该项目的会话。在项目里发起的会话留在该项目；没有自己项目的会话归属默认项目。",
+      "empty": "该项目还没有会话。",
+      "untitled": "未命名会话",
+      "builtinNote": "宿主机自己的会话就在这里：它们在默认项目中运行，因此这个项目是它们的归属。"
     }
   },
   "settings": {
@@ -227,7 +333,7 @@
     },
     "extensions": {
       "title": "扩展",
-      "description": "此网关已加载的主机运行时包清单。启用仅表示期望状态，并不代表运行健康；当前故障与重启要求会继续显示。Apps 用于管理对话能力。nanobot 不会沙箱化或验证第三方扩展。",
+      "description": "此网关已加载的主机运行时包清单。启用仅表示期望状态，并不代表运行健康；当前故障与重启要求会继续显示。Apps 用于管理对话能力。Mikobot 不会沙箱化或验证第三方扩展。",
       "refresh": "刷新",
       "loading": "正在加载扩展…",
       "registryUnavailable": "此网关未组装扩展注册表，因此无法给出清单。这不代表主机上没有扩展。",
@@ -269,8 +375,8 @@
         "noRevision": "未报告",
         "permissions": "声明的权限",
         "permissionsNone": "此扩展包未声明任何权限。",
-        "permissionsUnenforced": "由扩展包自行声明，nanobot 并不强制执行。nanobot 不会限制此扩展可以访问的范围。",
-        "permissionsEnforced": "这些权限由 nanobot 强制执行。",
+        "permissionsUnenforced": "由扩展包自行声明，Mikobot 并不强制执行。Mikobot 不会限制此扩展可以访问的范围。",
+        "permissionsEnforced": "这些权限由 Mikobot 强制执行。",
         "supportedActions": "支持的操作",
         "noActions": "该扩展包的归属方在此未声明任何生命周期操作。",
         "components_other": "组件（{{count}}）",
@@ -287,9 +393,9 @@
       "risk": {
         "badge": "未隔离的第三方代码",
         "title": "未隔离的第三方代码",
-        "body": "{{trust}} · {{isolation}} · {{execution}}。此代码可以读取 nanobot 进程可见的文件、凭据、网络及其他资源。nanobot 不会验证它，也不会使它变得安全。",
+        "body": "{{trust}} · {{isolation}} · {{execution}}。此代码可以读取 Mikobot 进程可见的文件、凭据、网络及其他资源。Mikobot 不会验证它，也不会使它变得安全。",
         "dialogTitle": "确认{{action}} {{name}}？",
-        "dialogBody": "{{trust}} · {{isolation}} · {{execution}}。此代码可以读取 nanobot 进程可见的文件、凭据、网络及其他资源。其声明的权限由它自行声明，并未被强制执行。nanobot 不会验证此扩展包，也不会使它变得安全。",
+        "dialogBody": "{{trust}} · {{isolation}} · {{execution}}。此代码可以读取 Mikobot 进程可见的文件、凭据、网络及其他资源。其声明的权限由它自行声明，并未被强制执行。Mikobot 不会验证此扩展包，也不会使它变得安全。",
         "revisionLabel": "修订版本",
         "confirm": "仍然{{action}}"
       },
@@ -316,7 +422,7 @@
       },
       "execution": {
         "data": "仅数据",
-        "in_process": "在 nanobot 进程内运行",
+        "in_process": "在 Mikobot 进程内运行",
         "child_process": "在子进程中运行",
         "remote": "在远程服务上运行"
       },
@@ -456,7 +562,7 @@
       "language": "语言",
       "provider": "提供商",
       "model": "模型",
-      "restart": "重启 nanobot",
+      "restart": "重启 Mikobot",
       "configPath": "配置路径",
       "activePreset": "当前预设",
       "gateway": "网关",
@@ -528,7 +634,7 @@
       "defaultImageSize": "发送给支持此选项的提供商的尺寸提示。",
       "maxImagesPerTurn": "单次 generate_image 请求可生成的图片上限。",
       "timezone": "用于日程和需要时间感知的回复。",
-      "cliAppsCatalog": "只安装 nanobot 可本地运行的应用 CLI 适配器；不会改动原生应用。",
+      "cliAppsCatalog": "只安装 Mikobot 可本地运行的应用 CLI 适配器；不会改动原生应用。",
       "cliAppsFilter": "按应用、类别或能力搜索。",
       "localServiceAccess": "允许完全访问权限下的 shell 命令访问 localhost 服务。",
       "webuiDefaultAccess": "用于没有单独项目权限的 Web 聊天。",
@@ -574,7 +680,7 @@
       "readyStatus": "就绪",
       "readyTry": "试试 @{{name}}",
       "readyCopied": "已复制",
-      "readyPrompt": "让 nanobot 在这个任务中使用 @{{name}}。",
+      "readyPrompt": "让 Mikobot 在这个任务中使用 @{{name}}。",
       "openChat": "回到对话",
       "unsupported": "暂不支持",
       "unavailable": "不可用",
@@ -618,7 +724,7 @@
       "saveCustom": "保存 MCP",
       "configImport": "导入 mcp.json",
       "importConfig": "导入",
-      "restartRequired": "重启 nanobot 以连接更新后的 MCP 工具。",
+      "restartRequired": "重启 Mikobot 以连接更新后的 MCP 工具。",
       "toolsFound": "{{count}} 个工具",
       "loading": "正在加载 MCP 预设...",
       "empty": "没有匹配的 MCP 预设。",
@@ -646,14 +752,14 @@
       "preparingSignIn": "正在准备安全登录…",
       "openSignInToContinue": "打开登录页面以继续。",
       "finishSignInInBrowser": "请在浏览器窗口中完成登录。",
-      "manualCallbackRequired": "完成登录后，将回调 URL 粘贴到 nanobot。",
+      "manualCallbackRequired": "完成登录后，将回调 URL 粘贴到 Mikobot。",
       "manualCallbackHelp": "授权后，localhost 页面将无法打开。请复制地址栏中的完整 URL 并粘贴到这里。",
       "finishingConnection": "正在完成连接…",
       "activatingTools": "正在启用工具…",
       "connected": "已连接。",
       "connectionFailed": "连接失败。",
       "connectionCancelled": "已取消连接。",
-      "reloadFailed": "已登录，但 nanobot 无法连接这些工具。请尝试重启 nanobot。",
+      "reloadFailed": "已登录，但 Mikobot 无法连接这些工具。请尝试重启 Mikobot。",
       "oauthFailed": "无法连接，请重新登录。",
       "statusMissingDependency": "缺少依赖",
       "statusComingSoon": "暂不支持",
@@ -739,11 +845,11 @@
       "loadError": "无法加载设置",
       "unsaved": "有未保存的更改。",
       "upToDate": "已是最新。",
-      "savedRestart": "已保存。重启 nanobot 后生效。",
+      "savedRestart": "已保存。重启 Mikobot 后生效。",
       "restartAfterSaving": "保存更改后，在合适时重启。",
       "savedRestartApply": "已保存。准备好后重启。",
       "imageProviderRestart": "图片提供商更改已保存。准备好后重启。",
-      "hostRestartAfterSaving": "保存后 nanobot 会重启引擎。",
+      "hostRestartAfterSaving": "保存后 Mikobot 会重启引擎。",
       "hostRestartPending": "已保存。准备好后会重启引擎。",
       "hostApiUnavailable": "宿主操作仅在原生应用中可用。",
       "logsOpened": "已打开日志文件夹。",
@@ -767,7 +873,7 @@
       "exporting": "正在导出..."
     },
     "byok": {
-      "description": "使用自己的提供商密钥。nanobot 会从当前配置读取这些值，只有已配置的提供商才能用于模型预设。",
+      "description": "使用自己的提供商密钥。Mikobot 会从当前配置读取这些值，只有已配置的提供商才能用于模型预设。",
       "configured": "已配置",
       "notConfigured": "未配置",
       "configuredSection": "已配置",
@@ -894,7 +1000,7 @@
     "api": {
       "title": "API 服务",
       "openaiCompatible": "OpenAI 兼容 API",
-      "description": "让 SDK 和其他智能体通过本地 /v1 接口连接 nanobot。",
+      "description": "让 SDK 和其他智能体通过本地 /v1 接口连接 Mikobot。",
       "start": "启动 API 服务",
       "starting": "正在启动...",
       "stop": "停止",
@@ -914,8 +1020,8 @@
     },
     "observability": {
       "title": "可观测性",
-      "configured": "nanobot 已检测到追踪凭证。",
-      "environment": "设置 LANGFUSE_SECRET_KEY 和 LANGFUSE_PUBLIC_KEY 后重启 nanobot。",
+      "configured": "Mikobot 已检测到追踪凭证。",
+      "environment": "设置 LANGFUSE_SECRET_KEY 和 LANGFUSE_PUBLIC_KEY 后重启 Mikobot。",
       "enable": "启用追踪支持"
     },
     "apps": {
@@ -941,7 +1047,7 @@
       "browseApps": "浏览应用",
       "browseIntegrations": "浏览 MCP 工具",
       "emptyIntegrationsHint": "可在下方添加自定义 MCP 服务器。",
-      "restartRequired": "重启 nanobot 以应用更新后的应用和 MCP 工具。"
+      "restartRequired": "重启 Mikobot 以应用更新后的应用和 MCP 工具。"
     },
     "loginSecurity": {
       "title": "登录与安全",
@@ -971,7 +1077,7 @@
       "save": "验证并保存"
     },
     "channels": {
-      "description": "把聊天应用、邮箱和 WebUI 连接到 nanobot。",
+      "description": "把聊天应用、邮箱和 WebUI 连接到 Mikobot。",
       "pairingOnly": "等待配对码",
       "caption": "{{enabled}} 个运行中 · 共 {{total}} 个渠道",
       "searchPlaceholder": "搜索渠道",
@@ -981,11 +1087,11 @@
       "empty": "没有匹配的渠道。",
       "restrictedTitle": "需要管理员权限",
       "restrictedDescription": "只有系统管理员可以查看和配置此主机上安装的渠道。",
-      "restartRequired": "重启 nanobot 以应用更新后的渠道支持。",
+      "restartRequired": "重启 Mikobot 以应用更新后的渠道支持。",
       "requires": "需要：{{requirements}}",
       "setUp": "设置",
       "setupGuide": "配置指南",
-      "setupSummary": "启用只会开启 nanobot 对该渠道的支持。请补充平台凭据，然后重启 nanobot。",
+      "setupSummary": "启用只会开启 Mikobot 对该渠道的支持。请补充平台凭据，然后重启 Mikobot。",
       "configKeys": "配置字段",
       "enable": "启用渠道",
       "disable": "禁用渠道",
@@ -994,7 +1100,7 @@
       "reconnect": "重新连接",
       "pairingRequiredTitle": "已连接，等待分配项目",
       "pairingRequiredDescription": "先用一次性配对码把实例 {{instance}} 分配给项目，之后它才能接收消息。",
-      "manageBots": "打开渠道",
+      "manageBots": "到项目中分配",
       "advanced": "高级",
       "checkAndEnable": "检查并启用",
       "checkConnection": "检查连接",
@@ -1195,7 +1301,7 @@
       "signedInAs": "已登录为 {{account}}",
       "signInHelp": "从这台设备登录；不会在配置中保存 API 密钥。",
       "remoteSignInHelp": "点击“登录”在你的电脑上打开 xAI，完成登录后粘贴页面显示的授权码。",
-      "codexRemoteSignInHelp": "在此浏览器中登录，然后将完整的 localhost 回调 URL 粘贴回 nanobot。",
+      "codexRemoteSignInHelp": "在此浏览器中登录，然后将完整的 localhost 回调 URL 粘贴回 Mikobot。",
       "signInRequired": "需要登录",
       "signInBeforeSaving": "请先登录此提供商，再保存模型预设。",
       "signedIn": "已登录",
@@ -1203,9 +1309,9 @@
       "proxyLabel": "网络代理",
       "proxySaveBeforeSignIn": "请先保存代理更改再登录。",
       "saveProxy": "保存代理",
-      "localCodeHelp": "请在浏览器中完成登录。nanobot 通常会自动完成；若未自动完成，请将授权码粘贴到下方。",
+      "localCodeHelp": "请在浏览器中完成登录。Mikobot 通常会自动完成；若未自动完成，请将授权码粘贴到下方。",
       "remoteCodeHelp": "点击“登录”在你的电脑上打开 xAI。完成登录后，请将 xAI 显示的授权码粘贴到下方。",
-      "localCallbackHelp": "请在浏览器中完成登录。nanobot 通常会自动完成；若未自动完成，请复制地址栏中的完整 localhost 回调 URL 并粘贴到下方。",
+      "localCallbackHelp": "请在浏览器中完成登录。Mikobot 通常会自动完成；若未自动完成，请复制地址栏中的完整 localhost 回调 URL 并粘贴到下方。",
       "remoteCallbackHelp": "在此浏览器中打开 ChatGPT 并完成登录。当 localhost 页面无法打开时，请复制地址栏中的完整 URL 并粘贴到下方。",
       "authorizationCode": "授权码",
       "callbackUrl": "完整回调 URL",
@@ -1248,7 +1354,7 @@
       "deleteConfirmAction": "删除技能",
       "instructionsTitle": "技能说明",
       "setupRequired": "需要设置",
-      "setupDescription": "请在运行 nanobot 的设备上安装缺少的依赖，然后重新检查。",
+      "setupDescription": "请在运行 Mikobot 的设备上安装缺少的依赖，然后重新检查。",
       "copySetupCommand": "复制设置命令",
       "checkAgain": "重新检查",
       "marketplaceSearchFailed": "暂时无法搜索技能市场。",
@@ -1424,7 +1530,7 @@
       "imageQuickActions": {
         "icon": {
           "title": "设计应用图标",
-          "prompt": "生成一个干净的 1:1 nanobot 应用图标：友好的机器人，简洁矢量风格，蓝白柔和配色，不要文字。"
+          "prompt": "生成一个干净的 1:1 Mikobot 应用图标：友好的机器人，简洁矢量风格，蓝白柔和配色，不要文字。"
         },
         "sticker": {
           "title": "制作贴纸",
@@ -1576,7 +1682,7 @@
             "description": "取消这个对话中正在运行的智能体回合。"
           },
           "restart": {
-            "title": "重启 nanobot",
+            "title": "重启 Mikobot",
             "description": "原地重启 bot 进程。"
           },
           "status": {
@@ -1630,14 +1736,14 @@
         "label": "应用",
         "cliGroup": "CLI 应用",
         "mcpGroup": "MCP 服务",
-        "sessionGroup": "Nanobot 对话",
+        "sessionGroup": "Mikobot 对话",
         "cliBadge": "CLI",
         "mcpBadge": "MCP",
         "cliDescription": "使用 @{{name}} 调用本地 CLI",
         "mcpDescription": "使用 @{{name}} 调用 MCP 服务",
         "cliTitle": "CLI 应用：{{name}}",
         "mcpTitle": "MCP 服务：{{name}}",
-        "sessionBadge": "Nanobot 对话",
+        "sessionBadge": "Mikobot 对话",
         "sessionDescription": "引用历史会话 @{{name}}"
       },
       "encoding": "处理中…",
@@ -1769,7 +1875,7 @@
     "close": "关闭文件预览",
     "loading": "正在加载预览...",
     "failed": "无法预览这个文件。",
-    "routeMissing": "文件预览需要最新的网关。请重启 nanobot gateway 后再试。",
+    "routeMissing": "文件预览需要最新的网关。请重启 Mikobot gateway 后再试。",
     "resize": "调整文件预览宽度",
     "truncated": "文件较大，当前只显示前半部分预览。"
   },

@@ -70,9 +70,14 @@ bindings in one JSON document under the runtime `collaboration/` directory.
 | Concept | Meaning |
 |---|---|
 | Administrator | The local owner, or an OIDC subject listed in `admin_subjects`. Manages every project and may hand any channel instance to any member. |
-| Project | A workspace plus members and optional Skill / MCP allowlists. |
+| Project | A workspace plus a description, members, a task board, its conversations, shared materials, project knowledge, optional Skill / MCP allowlists, and approved apps. |
+| Conversation attribution | Every conversation belongs to a project: one carrying collaboration metadata keeps that project, and one without it resolves to the caller's default project — the built-in project for the host. The WebUI lists that attribution so an unattributed host chat appears as its default project's conversation. |
+| App grant | One Agent Plugin a project approved, with the package revision and the skills and MCP servers it granted. |
 | Channel assignment | One connected channel instance routed to one project on behalf of one member. Created by a one-time Pair Code sent from that channel. |
 | Conversation binding | An explicit group or thread bound to a project. |
+| Project description | Shared introduction and context stored with the project and injected into scoped prompts as reference text, never as a replacement for system or security instructions. |
+| Project materials | Read-only relative files from the shared project workspace. Dotfiles, profile files, raw history, symlinks, and absolute paths are excluded. |
+| Project knowledge | The shared project's `memory/MEMORY.md`, maintained by project Dream. Member-private profile, memory, and raw history are never part of this projection. |
 
 Only the gateway composition root (`nanobot/cli/gateway_runtime.py`) wires a
 `CollaborationRepository` into `AgentLoop` and `ChannelManager`. The CLI, the
@@ -95,9 +100,19 @@ Reads, attachment, recovery, streaming, and context references recheck ownership
 cross-session references additionally require the same user and project. Historical
 files are retained rather than guessed into a new namespace.
 
+An app is an installed Agent Plugin whose revision is a content fingerprint. A
+project approves one revision per app; the granted capabilities are recorded with
+the approval, so the host can take them back even after the app is gone. When the
+installed revision changes, the host revokes the grant (`nanobot/webui/project_apps.py`)
+and the project's allowlist narrows, which invalidates the capability a running
+session was admitted with. Approving the app again pins the revision and restores
+its current capabilities.
+
 Two WebUI surfaces manage this. **Channels** lists every assigned instance with
-its project, its runtime status, and its Pair Code flow; **Projects** covers
-members and capability allowlists.
+its project, its runtime status, and its Pair Code flow; **Projects** covers the
+overview and description, task board, conversations, shared materials, project
+knowledge, apps, members, channel assignments, built-in automations, and
+Skill/MCP allowlists.
 
 ## Providers
 
@@ -205,10 +220,19 @@ while private profile and memory live outside that shared directory.
 | Concern | Host owner | Project member |
 |---|---|---|
 | Project instructions and ordinary file/tool root | Selected working directory | Authorized project workspace |
-| Profile and automatic memory/archive/Dream | Configured agent workspace | `<config-dir>/users/<user-id>/projects/<project-id>/` |
+| Profile and automatic memory/archive/Dream | Configured agent workspace, unless the turn is project-scoped | `<config-dir>/users/<user-id>/projects/<project-id>/` |
 | Conversation sharing | Legacy single-user rules | Same user and project only |
 | Inbound attachments | Host media store | `<config-dir>/users/<user-id>/media/<project-id>/`, exact authorized files |
 | Executable tools | Owner's configured policy | Linux Bubblewrap required for shell; host-managed CLI Apps unavailable |
+
+A project-scoped conversation reads the private store for its project whoever is
+taking part, the host owner included, so assigning a channel instance to a project
+never exposes the host's private profile or memory. The host's own unscoped turns,
+and every turn in the built-in home project, keep the configured agent workspace.
+This rule lives in one place — `private_memory_root_for_scope` in
+`nanobot/collaboration/models.py`, called by both the turn path
+(`nanobot/agent/loop.py`) and the subagent path (`nanobot/agent/subagent.py`) — so
+the two cannot drift apart.
 
 Filesystem capabilities grant only the member's exact profile/memory files,
 authorized attachments, and allowed built-in Skills in addition to shared project
@@ -230,8 +254,9 @@ Session history is the near-term conversation replay. Memory is the longer-term 
 
 Dream is implemented in `nanobot/agent/memory.py` and scheduled by the runtime when enabled.
 
-The paths above describe the host store. Member stores use the private user/project
-root described above. Existing mixed historical memory is not automatically erased
+The paths above describe the host store: what an unscoped turn reads, and what the
+built-in home project reads. Project-scoped stores use the private user/project root
+described above. Existing mixed historical memory is not automatically erased
 or declassified; operators should review legacy profile/memory files before sharing
 an upgraded deployment with unrelated people.
 

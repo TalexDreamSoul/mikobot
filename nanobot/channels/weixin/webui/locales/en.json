@@ -1,5 +1,5 @@
 {
-  "description": "Use nanobot from WeChat conversations.",
+  "description": "Use Mikobot from WeChat conversations.",
   "requirements": "WeChat channel setup and gateway",
   "setup": {
     "primaryAction": "Connect WeChat",
@@ -21,26 +21,54 @@
         "label": "Token",
         "placeholder": "Saved by QR login"
       },
-      "sendProgress": { "label": "Send progress" },
-      "sendToolHints": { "label": "Send tool hints" },
-      "streaming": { "label": "Use streaming API" },
-      "replyProgressMessages": { "label": "Send structured progress" },
-      "replyProgressMaxMessages": { "label": "Structured progress limit" },
-      "contextMessageBudget": { "label": "Context message budget" },
-      "blockStreaming": { "label": "Send response blocks" },
-      "blockStreamingMinChars": { "label": "Minimum block size" },
-      "blockStreamingMaxMessages": { "label": "Block message limit" },
-      "baseUrl": { "label": "API URL" },
-      "cdnBaseUrl": { "label": "CDN URL" },
-      "routeTag": { "label": "Route tag" },
-      "stateDir": { "label": "State directory" },
-      "pollTimeout": { "label": "Poll timeout" }
+      "sendProgress": {
+        "label": "Send progress"
+      },
+      "sendToolHints": {
+        "label": "Send tool hints"
+      },
+      "streaming": {
+        "label": "Use streaming API"
+      },
+      "replyProgressMessages": {
+        "label": "Send structured progress"
+      },
+      "replyProgressMaxMessages": {
+        "label": "Structured progress limit"
+      },
+      "contextMessageBudget": {
+        "label": "Context message budget"
+      },
+      "blockStreaming": {
+        "label": "Send response blocks"
+      },
+      "blockStreamingMinChars": {
+        "label": "Minimum block size"
+      },
+      "blockStreamingMaxMessages": {
+        "label": "Block message limit"
+      },
+      "baseUrl": {
+        "label": "API URL"
+      },
+      "cdnBaseUrl": {
+        "label": "CDN URL"
+      },
+      "routeTag": {
+        "label": "Route tag"
+      },
+      "stateDir": {
+        "label": "State directory"
+      },
+      "pollTimeout": {
+        "label": "Poll timeout"
+      }
     }
   },
   "custom": {
     "qrAlt": "WeChat login QR code",
     "scanTitle": "Scan with WeChat",
-    "scanDescription": "Use WeChat on your phone to scan this code. nanobot saves the account state locally after login.",
+    "scanDescription": "Use WeChat on your phone to scan this code. Mikobot saves the account state locally after login.",
     "waiting": "Waiting for WeChat scan...",
     "connected": "WeChat is connected.",
     "stopped": "WeChat login stopped.",

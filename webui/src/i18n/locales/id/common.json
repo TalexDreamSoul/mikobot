@@ -1,12 +1,12 @@
 {
   "app": {
-    "brand": "nanobot",
+    "brand": "Mikobot",
     "loading": {
-      "connecting": "Menghubungkan ke nanobot…",
-      "boot": "Memuat nanobot…"
+      "connecting": "Menghubungkan ke Mikobot…",
+      "boot": "Memuat Mikobot…"
     },
     "error": {
-      "title": "Tidak dapat menjangkau nanobot",
+      "title": "Tidak dapat menjangkau Mikobot",
       "gatewayHint": "Pastikan gateway sedang berjalan (`nanobot gateway`) dan halaman ini dibuka pada mesin yang sama."
     },
     "auth": {
@@ -14,7 +14,7 @@
       "showPassword": "Tampilkan kata sandi",
       "hidePassword": "Sembunyikan kata sandi",
       "submit": "Hubungkan",
-      "signIn": "Masuk ke nanobot",
+      "signIn": "Masuk ke Mikobot",
       "continueWithSso": "Lanjutkan dengan SSO",
       "orPassword": "atau gunakan kata sandi",
       "invalidLoginUrl": "Akses menyeluruh tidak tersedia karena server mengembalikan alamat masuk yang tidak valid.",
@@ -30,8 +30,8 @@
     },
     "system": {
       "section": "Sistem",
-      "restartHint": "Mulai ulang nanobot untuk menerapkan perubahan runtime.",
-      "restart": "Mulai ulang nanobot",
+      "restartHint": "Mulai ulang Mikobot untuk menerapkan perubahan runtime.",
+      "restart": "Mulai ulang Mikobot",
       "restarting": "Memulai ulang...",
       "restartEngine": "Mulai ulang mesin",
       "restartingEngine": "Memulai ulang mesin..."
@@ -40,11 +40,11 @@
       "completed": "Mulai ulang selesai dalam {{seconds}} dtk."
     },
     "documentTitle": {
-      "base": "nanobot",
-      "chat": "{{title}} · nanobot"
+      "base": "Mikobot",
+      "chat": "{{title}} · Mikobot"
     },
     "meta": {
-      "description": "UI web nanobot — ngobrol dengan ruang kerja nanobot Anda."
+      "description": "UI web Mikobot — ngobrol dengan ruang kerja Mikobot Anda."
     },
     "pairing": {
       "title": "Hubungkan pengguna chat",
@@ -137,7 +137,7 @@
       "language": "Bahasa",
       "provider": "Penyedia",
       "model": "Model",
-      "restart": "Mulai ulang nanobot",
+      "restart": "Mulai ulang Mikobot",
       "configPath": "Path konfigurasi",
       "activePreset": "Prasetel aktif",
       "gateway": "Gerbang",
@@ -212,7 +212,7 @@
       "selectedModelValue": "Ditentukan oleh model yang dipilih.",
       "brandLogos": "Tampilkan logo penyedia pihak ketiga dan CLI di Pengaturan.",
       "browserNotifications": "Beri tahu hanya saat halaman ini di latar belakang. Nonaktif secara bawaan.",
-      "cliAppsCatalog": "Instal hanya adaptor CLI aplikasi yang dapat dijalankan nanobot secara lokal; aplikasi asli tidak diubah.",
+      "cliAppsCatalog": "Instal hanya adaptor CLI aplikasi yang dapat dijalankan Mikobot secara lokal; aplikasi asli tidak diubah.",
       "cliAppsFilter": "Cari berdasarkan aplikasi, kategori, atau kemampuan.",
       "logs": "Buka folder log mesin asli.",
       "diagnostics": "Ekspor laporan waktu proses singkat untuk dukungan.",
@@ -261,11 +261,11 @@
       "loadError": "Tidak dapat memuat pengaturan",
       "unsaved": "Perubahan belum disimpan.",
       "upToDate": "Sudah terbaru.",
-      "savedRestart": "Tersimpan. Mulai ulang nanobot untuk menerapkan.",
+      "savedRestart": "Tersimpan. Mulai ulang Mikobot untuk menerapkan.",
       "restartAfterSaving": "Simpan perubahan, lalu mulai ulang saat siap.",
       "savedRestartApply": "Tersimpan. Mulai ulang saat siap.",
       "imageProviderRestart": "Perubahan penyedia gambar tersimpan. Mulai ulang saat siap.",
-      "hostRestartAfterSaving": "Saat disimpan, nanobot akan memulai ulang mesinnya.",
+      "hostRestartAfterSaving": "Saat disimpan, Mikobot akan memulai ulang mesinnya.",
       "hostRestartPending": "Tersimpan. Mesin akan dimulai ulang saat siap.",
       "hostApiUnavailable": "Tindakan host hanya tersedia di aplikasi asli.",
       "logsOpened": "Folder log dibuka.",
@@ -289,7 +289,7 @@
       "exporting": "Mengekspor..."
     },
     "byok": {
-      "description": "Gunakan kunci penyedia Anda sendiri. Nanobot membaca nilai ini dari konfigurasi saat ini dan hanya penyedia yang sudah dikonfigurasi yang dapat digunakan dalam prasetel model.",
+      "description": "Gunakan kunci penyedia Anda sendiri. Mikobot membaca nilai ini dari konfigurasi saat ini dan hanya penyedia yang sudah dikonfigurasi yang dapat digunakan dalam prasetel model.",
       "configured": "Terkonfigurasi",
       "notConfigured": "Belum dikonfigurasi",
       "configuredSection": "Terkonfigurasi",
@@ -537,7 +537,7 @@
       "saveCustom": "Simpan MCP",
       "configImport": "Impor mcp.json",
       "importConfig": "Impor",
-      "restartRequired": "Mulai ulang nanobot untuk menyambungkan alat MCP yang diperbarui.",
+      "restartRequired": "Mulai ulang Mikobot untuk menyambungkan alat MCP yang diperbarui.",
       "toolsFound": "{{count}} alat",
       "loading": "Memuat prasetel MCP...",
       "empty": "Tidak ada prasetel MCP yang cocok dengan filter ini.",
@@ -565,14 +565,14 @@
       "preparingSignIn": "Menyiapkan proses masuk yang aman…",
       "openSignInToContinue": "Buka halaman masuk untuk melanjutkan.",
       "finishSignInInBrowser": "Selesaikan proses masuk di jendela browser.",
-      "manualCallbackRequired": "Selesaikan proses masuk, lalu tempel URL callback ke nanobot.",
+      "manualCallbackRequired": "Selesaikan proses masuk, lalu tempel URL callback ke Mikobot.",
       "manualCallbackHelp": "Setelah menyetujui akses, halaman localhost tidak akan terbuka. Salin URL lengkap dari bilah alamat lalu tempel di sini.",
       "finishingConnection": "Menyelesaikan koneksi…",
       "activatingTools": "Mengaktifkan alat…",
       "connected": "Terhubung.",
       "connectionFailed": "Koneksi gagal.",
       "connectionCancelled": "Koneksi dibatalkan.",
-      "reloadFailed": "Anda sudah masuk, tetapi nanobot tidak dapat menghubungkan alat. Coba mulai ulang nanobot.",
+      "reloadFailed": "Anda sudah masuk, tetapi Mikobot tidak dapat menghubungkan alat. Coba mulai ulang Mikobot.",
       "oauthFailed": "Tidak dapat terhubung. Coba masuk lagi.",
       "statusMissingDependency": "Butuh dependensi",
       "statusComingSoon": "Segera hadir",
@@ -632,8 +632,8 @@
       "autoInstall": "Dukungan API akan dipasang otomatis saat dimulai."
     },
     "observability": {
-      "title": "Observabilitas", "configured": "Kredensial tracing tersedia untuk nanobot.",
-      "environment": "Atur LANGFUSE_SECRET_KEY dan LANGFUSE_PUBLIC_KEY, lalu mulai ulang nanobot.", "enable": "Aktifkan dukungan tracing"
+      "title": "Observabilitas", "configured": "Kredensial tracing tersedia untuk Mikobot.",
+      "environment": "Atur LANGFUSE_SECRET_KEY dan LANGFUSE_PUBLIC_KEY, lalu mulai ulang Mikobot.", "enable": "Aktifkan dukungan tracing"
     },
     "legal": {
       "thirdPartyBrands": "Nama produk, logo, dan merek adalah milik pemiliknya masing-masing. Penggunaan hanya untuk identifikasi dan tidak menyiratkan dukungan."
@@ -661,21 +661,21 @@
       "browseApps": "Jelajahi aplikasi",
       "browseIntegrations": "Jelajahi alat MCP",
       "emptyIntegrationsHint": "Tambahkan server MCP khusus di bawah.",
-      "restartRequired": "Mulai ulang nanobot untuk menerapkan aplikasi dan alat MCP yang diperbarui."
+      "restartRequired": "Mulai ulang Mikobot untuk menerapkan aplikasi dan alat MCP yang diperbarui."
     },
     "channels": {
-      "description": "Hubungkan nanobot ke aplikasi chat. Memasang dukungan hanya menambahkan paket integrasi; sebagian besar kanal tetap memerlukan token atau pengaturan ruang kerja.",
+      "description": "Hubungkan Mikobot ke aplikasi chat. Memasang dukungan hanya menambahkan paket integrasi; sebagian besar kanal tetap memerlukan token atau pengaturan ruang kerja.",
       "caption": "{{enabled}} aktif · {{total}} kanal",
       "searchPlaceholder": "Cari kanal",
       "backToChannels": "Semua kanal",
       "catalog": "Kanal",
       "loading": "Memuat kanal...",
       "empty": "Tidak ada kanal yang cocok dengan filter ini.",
-      "restartRequired": "Mulai ulang nanobot untuk menerapkan dukungan kanal yang diperbarui.",
+      "restartRequired": "Mulai ulang Mikobot untuk menerapkan dukungan kanal yang diperbarui.",
       "requires": "Memerlukan: {{requirements}}",
       "setUp": "Siapkan",
       "setupGuide": "Panduan penyiapan",
-      "setupSummary": "Mengaktifkan hanya menyalakan dukungan nanobot. Tambahkan kredensial platform, lalu mulai ulang nanobot.",
+      "setupSummary": "Mengaktifkan hanya menyalakan dukungan Mikobot. Tambahkan kredensial platform, lalu mulai ulang Mikobot.",
       "configKeys": "Kunci konfigurasi",
       "enable": "Aktifkan kanal",
       "disable": "Nonaktifkan kanal",
@@ -738,7 +738,7 @@
       "missingDependency": "Dukungan belum terpasang",
       "installSupport": "Instal dukungan",
       "installConfirmTitle": "Instal dukungan untuk {{name}}?",
-      "installConfirmDescription": "nanobot akan menambahkan yang dibutuhkan {{name}}, lalu mengaktifkannya. Lanjutkan?",
+      "installConfirmDescription": "Mikobot akan menambahkan yang dibutuhkan {{name}}, lalu mengaktifkannya. Lanjutkan?",
       "installConfirmAction": "Instal dan aktifkan",
       "websocketRequired": "Wajib untuk WebUI",
       "channelDisabled": "Kanal dinonaktifkan",
@@ -882,7 +882,7 @@
       "signedInAs": "Masuk sebagai {{account}}",
       "signInHelp": "Masuk dari perangkat ini; kunci API tidak disimpan di config.",
       "remoteSignInHelp": "Pilih Masuk untuk membuka xAI di komputer Anda, lalu tempel kode otorisasi yang ditampilkan setelah masuk.",
-      "codexRemoteSignInHelp": "Masuk melalui browser ini, lalu tempel URL callback localhost lengkap kembali ke nanobot.",
+      "codexRemoteSignInHelp": "Masuk melalui browser ini, lalu tempel URL callback localhost lengkap kembali ke Mikobot.",
       "signInRequired": "Perlu masuk",
       "signInBeforeSaving": "Masuk ke penyedia ini sebelum menyimpan prasetel.",
       "signedIn": "Sudah masuk",
@@ -890,9 +890,9 @@
       "proxyLabel": "Proksi jaringan",
       "proxySaveBeforeSignIn": "Simpan perubahan proksi sebelum login.",
       "saveProxy": "Simpan proksi",
-      "localCodeHelp": "Selesaikan proses masuk di browser. nanobot biasanya menyelesaikannya secara otomatis; jika tidak, tempel kode otorisasi di bawah.",
+      "localCodeHelp": "Selesaikan proses masuk di browser. Mikobot biasanya menyelesaikannya secara otomatis; jika tidak, tempel kode otorisasi di bawah.",
       "remoteCodeHelp": "Pilih Masuk untuk membuka xAI di komputer Anda. Setelah masuk, tempel kode otorisasi yang ditampilkan xAI di bawah.",
-      "localCallbackHelp": "Selesaikan proses masuk di browser. nanobot biasanya menyelesaikannya secara otomatis; jika tidak, salin URL callback localhost lengkap dari bilah alamat dan tempel di bawah.",
+      "localCallbackHelp": "Selesaikan proses masuk di browser. Mikobot biasanya menyelesaikannya secara otomatis; jika tidak, salin URL callback localhost lengkap dari bilah alamat dan tempel di bawah.",
       "remoteCallbackHelp": "Buka ChatGPT di browser ini dan selesaikan proses masuk. Saat halaman localhost gagal dimuat, salin URL lengkap dari bilah alamat dan tempel di bawah.",
       "authorizationCode": "Kode otorisasi",
       "callbackUrl": "URL callback lengkap",
@@ -935,7 +935,7 @@
       "deleteConfirmAction": "Hapus keterampilan",
       "instructionsTitle": "Petunjuk keterampilan",
       "setupRequired": "Perlu penyiapan",
-      "setupDescription": "Instal dependensi yang belum tersedia di mesin yang menjalankan nanobot, lalu periksa lagi.",
+      "setupDescription": "Instal dependensi yang belum tersedia di mesin yang menjalankan Mikobot, lalu periksa lagi.",
       "copySetupCommand": "Salin perintah penyiapan",
       "checkAgain": "Periksa lagi",
       "marketplaceSearchFailed": "Tidak dapat mencari marketplace keterampilan.",
@@ -1111,7 +1111,7 @@
       "imageQuickActions": {
         "icon": {
           "title": "Desain ikon aplikasi",
-          "prompt": "Buat ikon aplikasi 1:1 yang bersih untuk nanobot: robot ramah, gaya vektor sederhana, palet biru dan putih lembut, tanpa teks."
+          "prompt": "Buat ikon aplikasi 1:1 yang bersih untuk Mikobot: robot ramah, gaya vektor sederhana, palet biru dan putih lembut, tanpa teks."
         },
         "sticker": {
           "title": "Buat stiker",
@@ -1254,7 +1254,7 @@
             "description": "Batalkan giliran agen yang sedang aktif di chat ini."
           },
           "restart": {
-            "title": "Mulai ulang nanobot",
+            "title": "Mulai ulang Mikobot",
             "description": "Mulai ulang proses bot di tempat."
           },
           "status": {
@@ -1334,14 +1334,14 @@
         "label": "Aplikasi",
         "cliGroup": "Aplikasi CLI",
         "mcpGroup": "Layanan MCP",
-        "sessionGroup": "Percakapan Nanobot",
+        "sessionGroup": "Percakapan Mikobot",
         "cliBadge": "CLI",
         "mcpBadge": "MCP",
         "cliDescription": "Gunakan @{{name}} sebagai aplikasi CLI lokal",
         "mcpDescription": "Gunakan @{{name}} sebagai server MCP",
         "cliTitle": "Aplikasi CLI: {{name}}",
         "mcpTitle": "Server MCP: {{name}}",
-        "sessionBadge": "Percakapan Nanobot",
+        "sessionBadge": "Percakapan Mikobot",
         "sessionDescription": "Referensikan @{{name}} sebagai chat sebelumnya"
       },
       "workspace": {
@@ -1456,7 +1456,7 @@
     "close": "Tutup pratinjau file",
     "loading": "Memuat pratinjau...",
     "failed": "Tidak dapat mempratinjau file ini.",
-    "routeMissing": "Pratinjau file memerlukan gateway terbaru. Mulai ulang nanobot gateway lalu coba lagi.",
+    "routeMissing": "Pratinjau file memerlukan gateway terbaru. Mulai ulang Mikobot gateway lalu coba lagi.",
     "resize": "Ubah ukuran pratinjau file",
     "truncated": "Pratinjau dipotong karena file ini besar."
   },

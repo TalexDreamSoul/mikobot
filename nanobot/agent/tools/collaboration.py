@@ -17,6 +17,8 @@ from nanobot.collaboration import (
     CollaborationStoreError,
     ConversationScope,
     Project,
+    ProjectTask,
+    TaskStatus,
 )
 from nanobot.collaboration.conversation import canonical_conversation_id
 from nanobot.collaboration.links import IdentityLinkError, IdentityLinkStore
@@ -46,16 +48,41 @@ def _project_payload(project: Project) -> dict[str, object]:
     }
 
 
+def _task_payload(task: ProjectTask) -> dict[str, object]:
+    return {
+        "id": task.id,
+        "project_id": task.project_id,
+        "title": task.title,
+        "detail": task.detail,
+        "status": task.status.value,
+        "created_by_user_id": task.created_by_user_id,
+    }
+
+
 @tool_parameters(
     tool_parameters_schema(
         required=["action"],
         action=StringSchema(
-            "Action: list, create, bind_current, set_default, create_link, or consume_link.",
-            enum=("list", "create", "bind_current", "set_default", "create_link", "consume_link"),
+            "Action: list, create, bind_current, set_default, create_link, consume_link, tasks, "
+            "create_task, update_task, or delete_task.",
+            enum=(
+                "list", "create", "bind_current", "set_default", "create_link", "consume_link",
+                "tasks", "create_task", "update_task", "delete_task",
+            ),
         ),
-        project_id=StringSchema("Project id for bind_current or set_default.", nullable=True),
+        project_id=StringSchema(
+            "Project id for bind_current, set_default, tasks, or create_task. Defaults to the "
+            "conversation's project for the task actions.",
+            nullable=True,
+        ),
         name=StringSchema("Project name for create.", nullable=True),
         link_code=StringSchema("Eight-character identity link code for consume_link.", nullable=True),
+        task_id=StringSchema("Task id for update_task or delete_task.", nullable=True),
+        title=StringSchema("Task title for create_task or update_task.", nullable=True),
+        detail=StringSchema("Task note for create_task or update_task.", nullable=True),
+        status=StringSchema(
+            "Task column for create_task or update_task: todo, doing, or done.", nullable=True
+        ),
     )
 )
 class ProjectsTool(Tool):
@@ -82,17 +109,24 @@ class ProjectsTool(Tool):
     def description(self) -> str:
         return (
             "List or create the current user's projects, bind the current channel conversation "
-            "to one project, or select a default project. Bind only when the user explicitly asks."
+            "to one project, or select a default project. Also read and maintain a project's task "
+            "board: tasks, create_task, update_task, and delete_task operate on the conversation's "
+            "project by default. Bind only when the user explicitly asks."
         )
 
     async def execute(
         self,
         action: Literal[
-            "list", "create", "bind_current", "set_default", "create_link", "consume_link"
+            "list", "create", "bind_current", "set_default", "create_link", "consume_link",
+            "tasks", "create_task", "update_task", "delete_task",
         ],
         project_id: str | None = None,
         name: str | None = None,
         link_code: str | None = None,
+        task_id: str | None = None,
+        title: str | None = None,
+        detail: str | None = None,
+        status: str | None = None,
     ) -> str | ToolResult:
         request = current_request_context()
         scope = _scope(request)
@@ -113,6 +147,12 @@ class ProjectsTool(Tool):
                     link_code, channel=request.channel, sender_id=request.sender_id
                 )
                 return json.dumps({"linked_user_id": linked_user_id, "applies_from": "next_message"})
+            if action in ("tasks", "create_task", "update_task", "delete_task"):
+                return await self._task_action(
+                    action, scope, user_id,
+                    project_id=project_id, task_id=task_id, title=title, detail=detail,
+                    status=status,
+                )
             if action == "list":
                 projects = await self._repository.list_projects(user_id)
                 return json.dumps({"projects": [_project_payload(project) for project in projects]}, ensure_ascii=False)
@@ -140,6 +180,64 @@ class ProjectsTool(Tool):
             return json.dumps({"binding_id": binding.id, "project_id": binding.project_id, "applies_from": "next_message"})
         except (CollaborationStoreError, IdentityLinkError, OSError, ValueError) as exc:
             return ToolResult.error(f"Error managing projects: {exc}")
+
+    async def _task_action(
+        self,
+        action: str,
+        scope: ConversationScope,
+        user_id: str,
+        *,
+        project_id: str | None,
+        task_id: str | None,
+        title: str | None,
+        detail: str | None,
+        status: str | None,
+    ) -> str | ToolResult:
+        """Read or maintain the task board of the conversation's project.
+
+        The board belongs to the project, so the conversation's own project is the
+        default target and a member turn can never reach another project's board.
+        """
+        column: TaskStatus | None = None
+        if status is not None:
+            try:
+                column = TaskStatus(status.strip())
+            except ValueError:
+                return ToolResult.error("Error: status must be one of: todo, doing, done.")
+        target = project_id
+        if target is None and scope.project is not None:
+            target = scope.project.id
+        if action == "update_task" or action == "delete_task":
+            if not task_id:
+                return ToolResult.error(f"Error: {action} requires task_id.")
+            task = None
+            if action == "update_task":
+                task = await self._repository.update_task(
+                    task_id, user_id, title=title, detail=detail, status=column
+                )
+            else:
+                await self._repository.delete_task(task_id, user_id)
+            return json.dumps(
+                {"task": _task_payload(task)} if task is not None else {"deleted": True},
+                ensure_ascii=False,
+            )
+        if not target:
+            return ToolResult.error(
+                "Error: this conversation is not in a project; pass project_id to use its board."
+            )
+        if action == "create_task":
+            if not title or not title.strip():
+                return ToolResult.error("Error: create_task requires a title.")
+            task = await self._repository.create_task(
+                target, user_id, title.strip(), detail=detail or "",
+                status=column if column is not None else TaskStatus.TODO,
+            )
+            return json.dumps({"task": _task_payload(task)}, ensure_ascii=False)
+        tasks = await self._repository.list_tasks(target, user_id)
+        return json.dumps(
+            {"project_id": target, "tasks": [_task_payload(task) for task in tasks[:512]]},
+            ensure_ascii=False,
+        )
 
 
 __all__ = ["ProjectsTool"]

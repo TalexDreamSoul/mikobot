@@ -11,6 +11,13 @@ export interface SessionGroup {
   kind?: "project";
   projectPath?: string;
   projectKey?: string;
+  /**
+   * Collaboration project the group's conversations run in. Set for directory
+   * groups whose sessions carry one, and for the fallback group, which is the
+   * viewer's own default project. Its name is owned by that project, so the
+   * sidebar renames the directory instead of the label.
+   */
+  collaborationProjectId?: string;
   updatedAt?: string | null;
 }
 
@@ -30,6 +37,8 @@ export interface ChatGroupingOptions {
   archivedKeys: string[];
   titleOverrides: Record<string, string>;
   projectNameOverrides: Record<string, string>;
+  /** Collaboration project names by id, so groups show the project's own name. */
+  projectNames?: Record<string, string>;
   sessionOrder: string[];
   showArchived: boolean;
   sort: SidebarSortMode;
@@ -227,6 +236,18 @@ export function displayTitle(
   );
 }
 
+function projectNameFor(
+  projectId: string | undefined,
+  projectNames: Record<string, string> | undefined,
+): string | null {
+  return (projectId && projectNames?.[projectId]?.trim()) || null;
+}
+
+function projectIdForSessions(sessions: ChatSummary[]): string | undefined {
+  return sessions.find((session) => session.collaborationProjectId)?.collaborationProjectId
+    ?? undefined;
+}
+
 function groupSessionsByProject(
   sessions: ChatSummary[],
   labels: Pick<ChatGroupLabels, "all">,
@@ -270,22 +291,28 @@ function groupSessionsByProject(
   }
 
   const pinned = new Set(options.pinnedKeys);
-  const groups: SessionGroup[] = Array.from(buckets.entries()).map(([key, bucket]) => ({
-    id: `project:${key}`,
-    label: bucket.label,
-    kind: "project" as const,
-    projectPath: bucket.path,
-    projectKey: key,
-    updatedAt: bucket.updatedAt,
-    sessions: sortProjectSessions(
-      bucket.sessions,
-      options.sort,
-      options.titleOverrides,
-      options.sessionOrder,
-      pinned,
-      archived,
-    ),
-  }));
+  const groups: SessionGroup[] = Array.from(buckets.entries()).map(([key, bucket]) => {
+    const collaborationProjectId = projectIdForSessions(bucket.sessions);
+    return {
+      id: `project:${key}`,
+      // A collaboration project owns its name; a plain directory keeps the
+      // folder-derived label and its sidebar-side rename.
+      label: projectNameFor(collaborationProjectId, options.projectNames) || bucket.label,
+      kind: "project" as const,
+      projectPath: bucket.path,
+      projectKey: key,
+      collaborationProjectId,
+      updatedAt: bucket.updatedAt,
+      sessions: sortProjectSessions(
+        bucket.sessions,
+        options.sort,
+        options.titleOverrides,
+        options.sessionOrder,
+        pinned,
+        archived,
+      ),
+    };
+  });
 
   if (conversations.length) {
     const chatsUpdatedAt = conversations.reduce<string | null>(
@@ -297,7 +324,11 @@ function groupSessionsByProject(
     );
     groups.push({
       id: "workspace:chats",
-      label: labels.all,
+      // Conversations with no project directory of their own run in the
+      // viewer's default project, so the group carries its name.
+      label: projectNameFor(projectIdForSessions(conversations), options.projectNames)
+        || labels.all,
+      collaborationProjectId: projectIdForSessions(conversations),
       updatedAt: chatsUpdatedAt,
       sessions: sortProjectSessions(
         conversations,

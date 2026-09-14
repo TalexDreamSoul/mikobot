@@ -47,10 +47,13 @@ export function FeishuAssistantsPanel({
         }),
         configuredLabel: tx("custom.configured", "Connected"),
         needsSetupLabel: tx("custom.needsSetup", "Needs authorization"),
-        renderInstanceSummary: (instance) => (
-          maskFeishuAppId(instance.config_values?.["channels.feishu.appId"])
-          || tx("custom.noAppId", "No App ID")
-        ),
+        renderInstanceSummary: (instance) => {
+          // The project surfaces identify this instance by its id, so show it
+          // beside the App ID instead of leaving the two views unmatched.
+          const appId = maskFeishuAppId(instance.config_values?.["channels.feishu.appId"])
+            || tx("custom.noAppId", "No App ID");
+          return `${appId} · ${instance.id}`;
+        },
         renderInstanceAction: (instance) => (
           <FeishuInstanceAction
             key={instance.id}

@@ -772,7 +772,7 @@ async def test_mcp_reload_callback_is_bounded(
     assert started.is_set()
     assert result == {
         "ok": False,
-        "message": "MCP hot reload timed out. Restart nanobot to pick up changes.",
+        "message": "MCP hot reload timed out. Restart Mikobot to pick up changes.",
         "requires_restart": True,
     }
 

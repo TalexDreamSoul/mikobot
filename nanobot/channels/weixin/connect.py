@@ -322,7 +322,7 @@ class WeixinConnectStore:
                 "instance_id": session.instance_id,
                 "status": "succeeded",
                 "pairing_required": True,
-                "message": "WeChat is already connected to this nanobot instance.",
+                "message": "WeChat is already connected to this Mikobot instance.",
             }
 
         if status == "expired":

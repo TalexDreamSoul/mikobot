@@ -425,7 +425,7 @@ class ExtensionSettingsHandler:
             self.logger.exception("failed to reconcile MCP after an extension action")
             reload_result = {
                 "ok": False,
-                "message": "MCP hot reload failed. Restart nanobot to pick up changes.",
+                "message": "MCP hot reload failed. Restart Mikobot to pick up changes.",
                 "requires_restart": True,
             }
         return _with_mcp_reload_result(payload, reload_result), True

@@ -346,7 +346,7 @@ class McpOAuthManager:
         except Exception:
             flow.reload_result = {
                 "ok": False,
-                "message": "Signed in, but nanobot could not activate the MCP tools.",
+                "message": "Signed in, but Mikobot could not activate the MCP tools.",
                 "requires_restart": True,
             }
         return True

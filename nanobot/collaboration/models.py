@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
 COLLABORATION_USER_METADATA_KEY = "collaboration_user_id"
 COLLABORATION_PROJECT_METADATA_KEY = "collaboration_project_id"
@@ -21,6 +22,14 @@ class MembershipRole(StrEnum):
 
     OWNER = "owner"
     MEMBER = "member"
+
+
+class TaskStatus(StrEnum):
+    """The board columns of a project's tasks."""
+
+    TODO = "todo"
+    DOING = "doing"
+    DONE = "done"
 
 
 class ConversationScopeKind(StrEnum):
@@ -60,6 +69,17 @@ class Project:
 
     ``allowed_skills`` and ``allowed_mcp_servers`` restrict what conversations
     scoped to the project may use; ``None`` leaves the capability unrestricted.
+
+    ``is_builtin`` marks the instance's default project. Classified work that
+    belongs to nobody else — the host's own conversations, their tasks, and their
+    heartbeat and Dream resources — lives there, so it cannot be deleted.
+
+    ``app_grants`` records the apps the project approved: for each one, the exact
+    package revision at approval time and the capabilities it granted. The host
+    revokes those capabilities when the installed revision differs from the
+    approved one, so an app update can never silently change what a project runs —
+    and because the granted capabilities are recorded, the revocation still works
+    after the app itself is removed.
     """
 
     id: str
@@ -70,6 +90,35 @@ class Project:
     updated_at_ms: int
     allowed_skills: tuple[str, ...] | None = None
     allowed_mcp_servers: tuple[str, ...] | None = None
+    is_builtin: bool = False
+    app_grants: tuple[ProjectAppGrant, ...] = ()
+    description: str = ""
+
+    def app_grant(self, name: str) -> ProjectAppGrant | None:
+        """Return the project's approval of one app, if it has one."""
+        for grant in self.app_grants:
+            if grant.name == name:
+                return grant
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectAppGrant:
+    """One app a project approved, and the capabilities it granted.
+
+    ``revision`` is the app package's immutable content fingerprint at approval
+    time. The capability names are what the project was given, so the host can
+    always take them back, even after the app is uninstalled or disabled.
+    """
+
+    name: str
+    revision: str
+    skills: tuple[str, ...] = ()
+    mcp_servers: tuple[str, ...] = ()
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.skills and not self.mcp_servers
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +127,24 @@ class ProjectMembership:
     user_id: str
     role: MembershipRole
     created_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectTask:
+    """One card on a project's board.
+
+    Tasks belong to the project rather than to the person who wrote them: every
+    member sees the same board, and the task disappears with its project.
+    """
+
+    id: str
+    project_id: str
+    title: str
+    created_by_user_id: str
+    created_at_ms: int
+    updated_at_ms: int
+    status: TaskStatus = TaskStatus.TODO
+    detail: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,3 +241,29 @@ class ConversationScope:
     @property
     def allowed_mcp_servers(self) -> tuple[str, ...] | None:
         return self.project.allowed_mcp_servers if self.project is not None else None
+
+
+def private_memory_root_for_scope(
+    scope: ConversationScope | None,
+    *,
+    project_path: Path,
+) -> Path | None:
+    """Return the profile and memory root a turn on this scope may read.
+
+    ``None`` keeps the host's own store, which belongs to the instance's home: a
+    turn with no collaboration scope, and the built-in project — whose workspace
+    *is* the host's own workspace. Every other project keeps each user's profile,
+    memory, and journal inside that project, for its owner as much as for its
+    members, so a channel instance assigned to a project never exposes the host's
+    private data. A scope that resolved without both ids falls back to the
+    authorized project directory rather than the host store.
+    """
+    if scope is None:
+        return None
+    if scope.is_local_owner and (scope.project is None or scope.project.is_builtin):
+        return None
+    if scope.user_id is not None and scope.project_id is not None:
+        from nanobot.security.private_media import user_private_memory_root
+
+        return user_private_memory_root(scope.user_id, project_id=scope.project_id)
+    return project_path

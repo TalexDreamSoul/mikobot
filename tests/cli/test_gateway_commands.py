@@ -95,7 +95,7 @@ class FakeServiceInstaller:
             "systemd",
             self.tmp_path / "nanobot-gateway.service",
             (("systemctl", "--user", "daemon-reload"),),
-            "[Unit]\nDescription=Nanobot Gateway\n",
+            "[Unit]\nDescription=Mikobot Gateway\n",
         )
 
     def uninstall(self, *, name: str, manager: str, dry_run: bool) -> GatewayServiceResult:

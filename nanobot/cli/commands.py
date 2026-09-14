@@ -94,7 +94,7 @@ SafeFileHistory = cli_terminal.SafeFileHistory
 app = typer.Typer(
     name="nanobot",
     context_settings={"help_option_names": ["-h", "--help"]},
-    help=f"{__logo__} nanobot - Personal AI Assistant",
+    help=f"{__logo__} Mikobot - Personal AI Assistant",
     epilog=(
         "Run `nanobot` without a subcommand to start the terminal agent. "
         "Use `nanobot agent --help` for agent options."
@@ -107,7 +107,7 @@ console = Console()
 
 def version_callback(value: bool):
     if value:
-        console.print(f"{__logo__} nanobot v{__version__}")
+        console.print(f"{__logo__} Mikobot v{__version__}")
         raise typer.Exit()
 
 
@@ -118,7 +118,7 @@ def main(
         None, "--version", "-v", callback=version_callback, is_eager=True
     ),
 ):
-    """nanobot - Personal AI Assistant."""
+    """Mikobot - Personal AI Assistant."""
     # Editable/source installs can retain an older generated console script that
     # imports this Typer app directly instead of ``nanobot.cli.entry``. Keep the
     # role identity correct until that launcher is regenerated.
@@ -227,7 +227,7 @@ def onboard(
     if explicit_config:
         webui_cmd += f' -c "{config_path}"'
 
-    typer.echo(f"\n✓ nanobot is ready. Run: {webui_cmd}")
+    typer.echo(f"\n✓ Mikobot is ready. Run: {webui_cmd}")
 
 
 def _onboard_plugins(config_path: Path) -> None:
@@ -313,7 +313,7 @@ def serve(
     port: int | None = typer.Option(None, "--port", "-p", help="API server port"),
     host: str | None = typer.Option(None, "--host", "-H", help="Bind address"),
     timeout: float | None = typer.Option(None, "--timeout", "-t", help="Per-request timeout (seconds)"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show nanobot runtime logs"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show Mikobot runtime logs"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
@@ -569,7 +569,7 @@ def channels_login(
 # Plugin Commands
 # ============================================================================
 
-plugins_app = typer.Typer(help="Manage optional nanobot features")
+plugins_app = typer.Typer(help="Manage optional Mikobot features")
 app.add_typer(plugins_app, name="plugins")
 
 
@@ -793,7 +793,7 @@ def status(
     config_path, loaded = _load_inspection_config(config=config, workspace=workspace)
     workspace_path = loaded.workspace_path
 
-    console.print(f"{__logo__} nanobot Status\n")
+    console.print(f"{__logo__} Mikobot Status\n")
 
     console.print(f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}")
     console.print(

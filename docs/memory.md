@@ -47,7 +47,7 @@ It is not the final memory. It is the material from which final memory is shaped
 
 ### Stage 2: Dream
 
-`Dream` is the slower, more thoughtful layer. It runs on a cron schedule by default and can also be triggered manually.
+`Dream` is the slower, more thoughtful layer. It runs on a cron schedule by default and can also be triggered manually. Every project owns its own Dream: one protected automation consolidates that project's own memory — its workspace store plus the private stores of the members whose conversations belong to it.
 
 Dream reads:
 
@@ -57,6 +57,8 @@ Dream reads:
 - the current `memory/MEMORY.md`
 
 Then it edits the long-term files surgically in a single pass — not by rewriting everything, but by making the smallest honest change that keeps memory coherent.
+
+The WebUI exposes the shared project's `memory/MEMORY.md` under **Projects → Knowledge**. This is project knowledge, not a member directory: private member profiles, private memory, and raw conversation history remain outside the project projection. The project introduction under **Projects → Overview** is separate authored context and is injected into scoped prompts as reference text.
 
 This is why nanobot's memory is not just archival. It is interpretive.
 

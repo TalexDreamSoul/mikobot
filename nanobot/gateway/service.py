@@ -87,7 +87,7 @@ class GatewayServiceInstaller:
         path = self.home / ".config" / "systemd" / "user" / unit_name
         command = build_gateway_command(options.python_executable, options.start)
         content = _systemd_unit_content(
-            description=f"Nanobot Gateway ({options.name})",
+            description=f"Mikobot Gateway ({options.name})",
             command=command,
             working_directory=_working_directory_text(options.start),
         )

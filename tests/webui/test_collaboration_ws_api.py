@@ -4,10 +4,10 @@ import asyncio
 import json
 import re
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import pytest
 from websockets.datastructures import Headers
@@ -338,6 +338,220 @@ async def test_proxy_user_cannot_read_or_mutate_foreign_collaboration_resources(
     assert (await handler.collaboration.get_project(alice_id, project_id)).name == "Alice private"
 
 
+def _materials_request(project_id: str, headers: dict[str, str], *, path: str | None = None):
+    query = "" if path is None else f"?path={quote(path, safe='')}"
+    return _request(f"/api/collaboration/projects/{project_id}/materials{query}", headers)
+
+
+async def _materials_project(
+    handler: GatewayHTTPHandler, owner_id: str, root: Path, name: str = "Materials"
+):
+    """Create a project whose workspace this test owns, so no runtime directory is touched."""
+    workspace = root / "workspace"
+    workspace.mkdir(exist_ok=True)
+    return workspace, await handler.collaboration.create_project(owner_id, name, workspace)
+
+
+@pytest.mark.asyncio
+async def test_project_materials_are_relative_and_readable_by_a_member(tmp_path) -> None:
+    """A member reads relative material paths and a preview; the workspace location stays hidden."""
+    handler = await _handler(tmp_path)
+    alice = _proxy_connection("materials-owner")
+    bob = _proxy_connection("materials-member")
+    alice_id = (await _identity(handler, alice))["user"]["id"]
+    bob_id = (await _identity(handler, bob))["user"]["id"]
+
+    workspace, project = await _materials_project(handler, alice_id, tmp_path)
+    (workspace / "brief.md").write_text("# Brief\nShip it.", encoding="utf-8")
+    (workspace / "notes").mkdir()
+    (workspace / "notes" / "plan.txt").write_text("Step one", encoding="utf-8")
+    (workspace / "memory").mkdir()
+    (workspace / "memory" / "MEMORY.md").write_text("PRIVATE_MEMORY", encoding="utf-8")
+    (workspace / "memory" / "history.jsonl").write_text("PRIVATE_HISTORY", encoding="utf-8")
+    (workspace / "SOUL.md").write_text("PRIVATE_SOUL", encoding="utf-8")
+    (workspace / "USER.md").write_text("PRIVATE_USER", encoding="utf-8")
+    (workspace / ".env").write_text("SECRET_ENV=1", encoding="utf-8")
+    (workspace / "logo.bin").write_bytes(b"\x00\x01\x02")
+    (workspace / "escape.md").symlink_to(tmp_path / "outside-secret.txt")
+    await handler.collaboration.add_member(
+        project.id, alice_id, bob_id, MembershipRole.MEMBER
+    )
+
+    request = _materials_request(project.id, bob.request.headers)
+    response = await handler.dispatch(_connection(request), request)
+
+    assert response is not None and response.status_code == 200
+    listing = _json(response)
+    # Member profiles, the shared MEMORY.md, raw history, and hidden control files
+    # are not "materials": only genuinely shared project files are listed.
+    assert {file["path"] for file in listing["files"]} == {
+        "brief.md", "logo.bin", "notes/plan.txt",
+    }
+    assert str(workspace) not in response.body.decode("utf-8")
+    assert next(
+        file for file in listing["files"] if file["path"] == "logo.bin"
+    )["previewable"] is False
+
+    preview_request = _materials_request(
+        project.id, bob.request.headers, path="notes/plan.txt"
+    )
+    preview = await handler.dispatch(_connection(preview_request), preview_request)
+
+    assert preview is not None and preview.status_code == 200
+    payload = _json(preview)
+    assert payload["path"] == "notes/plan.txt"
+    assert payload["content"] == "Step one"
+    assert str(workspace) not in preview.body.decode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_project_materials_refuse_traversal_symlinks_and_private_files(tmp_path) -> None:
+    """Foreign bytes, symlinks, hidden control files, and raw history never reach the caller."""
+    handler = await _handler(tmp_path)
+    alice = _proxy_connection("materials-boundary")
+    alice_id = (await _identity(handler, alice))["user"]["id"]
+
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("OUTSIDE_SECRET", encoding="utf-8")
+    workspace, project = await _materials_project(handler, alice_id, tmp_path)
+    (workspace / "memory").mkdir()
+    (workspace / "memory" / "MEMORY.md").write_text("PRIVATE_MEMORY", encoding="utf-8")
+    (workspace / "memory" / "history.jsonl").write_text("PRIVATE_HISTORY", encoding="utf-8")
+    (workspace / "SOUL.md").write_text("PRIVATE_SOUL", encoding="utf-8")
+    (workspace / "USER.md").write_text("PRIVATE_USER", encoding="utf-8")
+    (workspace / ".env").write_text("SECRET_ENV", encoding="utf-8")
+    (workspace / "escape.md").symlink_to(outside)
+
+    for raw_path, expected_status in (
+        ("../outside-secret.txt", 400),
+        (str(outside), 400),
+        ("escape.md", 403),
+        ("memory/history.jsonl", 404),
+        ("memory/MEMORY.md", 404),
+        ("SOUL.md", 404),
+        ("USER.md", 404),
+        (".env", 404),
+    ):
+        request = _materials_request(project.id, alice.request.headers, path=raw_path)
+        response = await handler.dispatch(_connection(request), request)
+
+        assert response is not None, raw_path
+        assert response.status_code == expected_status, raw_path
+        body = response.body.decode("utf-8")
+        assert "OUTSIDE_SECRET" not in body, raw_path
+        assert "PRIVATE_HISTORY" not in body, raw_path
+        assert "PRIVATE_MEMORY" not in body, raw_path
+        assert "PRIVATE_SOUL" not in body, raw_path
+        assert "PRIVATE_USER" not in body, raw_path
+        assert "SECRET_ENV" not in body, raw_path
+
+
+@pytest.mark.asyncio
+async def test_project_materials_deny_foreign_and_unauthenticated_callers(tmp_path) -> None:
+    """Only the project's own members read its materials; everyone else gets nothing."""
+    handler = await _handler(tmp_path)
+    alice = _proxy_connection("materials-private")
+    bob = _proxy_connection("materials-other")
+    alice_id = (await _identity(handler, alice))["user"]["id"]
+    await _identity(handler, bob)
+
+    workspace, project = await _materials_project(handler, alice_id, tmp_path)
+    (workspace / "brief.md").write_text("PRIVATE_BRIEF", encoding="utf-8")
+
+    for path in (None, "brief.md"):
+        request = _materials_request(project.id, bob.request.headers, path=path)
+        foreign = await handler.dispatch(_connection(request), request)
+
+        assert foreign is not None and foreign.status_code == 404, path
+        assert "PRIVATE_BRIEF" not in foreign.body.decode("utf-8"), path
+
+        anonymous_request = _materials_request(project.id, {}, path=path)
+        anonymous = await handler.dispatch(_connection(anonymous_request), anonymous_request)
+
+        assert anonymous is not None and anonymous.status_code == 401, path
+        assert "PRIVATE_BRIEF" not in anonymous.body.decode("utf-8"), path
+
+
+@pytest.mark.asyncio
+async def test_project_material_previews_are_bounded(tmp_path) -> None:
+    """A large material is served truncated instead of as the whole file."""
+    handler = await _handler(tmp_path)
+    alice = _proxy_connection("materials-bounded")
+    alice_id = (await _identity(handler, alice))["user"]["id"]
+
+    workspace, project = await _materials_project(handler, alice_id, tmp_path)
+    (workspace / "big.txt").write_text("a" * 400_000, encoding="utf-8")
+
+    request = _materials_request(project.id, alice.request.headers, path="big.txt")
+    response = await handler.dispatch(_connection(request), request)
+
+    assert response is not None and response.status_code == 200
+    payload = _json(response)
+    assert payload["size"] == 400_000
+    assert payload["truncated"] is True
+    assert 0 < len(payload["content"]) < payload["size"]
+
+
+@pytest.mark.asyncio
+async def test_project_knowledge_exposes_only_the_shared_memory_file(tmp_path) -> None:
+    """The shared-knowledge view returns exactly the project's MEMORY.md, nothing else."""
+    handler = await _handler(tmp_path)
+    alice = _proxy_connection("knowledge-owner")
+    bob = _proxy_connection("knowledge-other")
+    alice_id = (await _identity(handler, alice))["user"]["id"]
+    await _identity(handler, bob)
+
+    workspace, project = await _materials_project(handler, alice_id, tmp_path, "Knowledge")
+    (workspace / "memory").mkdir()
+    (workspace / "memory" / "MEMORY.md").write_text("Shared project facts.", encoding="utf-8")
+    (workspace / "memory" / "history.jsonl").write_text("PRIVATE_HISTORY", encoding="utf-8")
+    (workspace / "brief.md").write_text("UNRELATED_BRIEF", encoding="utf-8")
+
+    request = _request(
+        f"/api/collaboration/projects/{project.id}/knowledge", alice.request.headers
+    )
+    response = await handler.dispatch(_connection(request), request)
+
+    assert response is not None and response.status_code == 200
+    payload = _json(response)
+    assert payload["path"] == "memory/MEMORY.md"
+    assert payload["content"] == "Shared project facts."
+    body = response.body.decode("utf-8")
+    assert "PRIVATE_HISTORY" not in body
+    assert "UNRELATED_BRIEF" not in body
+
+    foreign_request = _request(
+        f"/api/collaboration/projects/{project.id}/knowledge", bob.request.headers
+    )
+    foreign = await handler.dispatch(_connection(foreign_request), foreign_request)
+    assert foreign is not None and foreign.status_code == 404
+    assert "Shared project facts." not in foreign.body.decode("utf-8")
+
+    anonymous_request = _request(f"/api/collaboration/projects/{project.id}/knowledge", {})
+    anonymous = await handler.dispatch(_connection(anonymous_request), anonymous_request)
+    assert anonymous is not None and anonymous.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_project_knowledge_reports_an_empty_memory_before_dream_writes_one(tmp_path) -> None:
+    """A project whose Dream run has not written MEMORY.md yet reports nothing to show."""
+    handler = await _handler(tmp_path)
+    alice = _proxy_connection("knowledge-empty")
+    alice_id = (await _identity(handler, alice))["user"]["id"]
+    _, project = await _materials_project(handler, alice_id, tmp_path, "Empty knowledge")
+
+    request = _request(
+        f"/api/collaboration/projects/{project.id}/knowledge", alice.request.headers
+    )
+    response = await handler.dispatch(_connection(request), request)
+
+    assert response is not None and response.status_code == 200
+    payload = _json(response)
+    assert payload["path"] == "memory/MEMORY.md"
+    assert payload["previewable"] is False
+    assert payload["content"] == ""
+
+
 @pytest.mark.asyncio
 async def test_proxy_session_boundary_hides_foreign_legacy_and_automation_resources(tmp_path) -> None:
     """Proxy WebUI users cannot attach, fork, mention, preview, delete, or automate another owner’s session."""
@@ -385,6 +599,13 @@ async def test_proxy_session_boundary_hides_foreign_legacy_and_automation_resour
     local_list = await handler.dispatch(_connection(local_list_request), local_list_request)
     assert local_list is not None
     assert {row["key"] for row in _json(local_list)["sessions"]} == {"websocket:legacy"}
+    assert _json(bob_list)["sessions"][0]["collaboration_project_id"] == bob_project_id
+    # The host's own conversation carries no project metadata, so the list
+    # attributes it to the default project its turns actually run in.
+    local_index = await _identity(handler, _local_connection("/api/collaboration"))
+    assert _json(local_list)["sessions"][0]["collaboration_project_id"] == (
+        local_index["user"]["default_project_id"]
+    )
     assert await handler.can_access_webui_session(bob, "websocket:alice") is False
     assert await handler.can_access_webui_session(_local_connection(), "websocket:legacy") is True
     assert await handler.can_access_webui_session(_local_connection(), "websocket:bob") is False
@@ -1247,3 +1468,215 @@ async def test_index_names_assigned_instances_and_the_projects_the_caller_manage
     assert _json(reassigned)["assignment"]["project_id"] == target_id
     assert _json(reassigned)["assignment"]["enabled"] is True
 
+
+
+@pytest.mark.asyncio
+async def test_project_task_board_is_shared_by_members_and_closed_to_outsiders(tmp_path) -> None:
+    """The board reaches every project member over HTTP and nobody else."""
+    handler = await _handler(tmp_path)
+    owner = _local_connection()
+    member = _proxy_connection("member")
+    member_id = (await _identity(handler, member))["user"]["id"]
+    created = await handler.dispatch_webui_mutation(
+        owner, "collaboration.project.create", {"name": "Release train"}
+    )
+    project_id = _json(created)["project"]["id"]
+    added = await handler.dispatch_webui_mutation(
+        owner,
+        "collaboration.project.member.add",
+        {"project_id": project_id, "member_user_id": member_id},
+    )
+    assert added.status_code == 200
+
+    mine = await handler.dispatch_webui_mutation(
+        member,
+        "collaboration.task.create",
+        {"project_id": project_id, "title": "Write the note", "detail": "line one\nline two"},
+    )
+    assert mine.status_code == 200, mine.body
+    task = _json(mine)["task"]
+    assert (task["status"], task["created_by_user_id"]) == ("todo", member_id)
+
+    moved = await handler.dispatch_webui_mutation(
+        owner, "collaboration.task.update", {"task_id": task["id"], "status": "done"}
+    )
+    assert moved.status_code == 200 and _json(moved)["task"]["status"] == "done"
+
+    detail_request = _request(f"/api/collaboration/projects/{project_id}", dict(member.request.headers))
+    detail = await handler.dispatch(_connection(detail_request), detail_request)
+    assert detail is not None and detail.status_code == 200
+    assert [item["id"] for item in _json(detail)["tasks"]] == [task["id"]]
+
+    outsider = _proxy_connection("outsider")
+    assert (await handler.dispatch_webui_mutation(
+        outsider, "collaboration.task.update", {"task_id": task["id"], "status": "todo"}
+    )).status_code == 404
+    assert (await handler.dispatch_webui_mutation(
+        outsider, "collaboration.task.create", {"project_id": project_id, "title": "Not mine"}
+    )).status_code == 404
+    assert (await handler.dispatch_webui_mutation(
+        outsider, "collaboration.task.delete", {"task_id": task["id"]}
+    )).status_code == 404
+    assert (await handler.dispatch_webui_mutation(
+        owner, "collaboration.task.create", {"project_id": project_id, "title": "Bad", "status": "archived"}
+    )).status_code == 400
+
+    discarded = await handler.dispatch_webui_mutation(
+        member, "collaboration.task.delete", {"task_id": task["id"]}
+    )
+    assert discarded.status_code == 200 and _json(discarded)["deleted"] is True
+    assert (await handler.collaboration.list_tasks(project_id, member_id)) == []
+
+
+def _use_real_inventory(handler: GatewayHTTPHandler) -> None:
+    """Replace the fixture's empty capability stub with the real inventory."""
+    handler._collaboration_available = MethodType(  # type: ignore[method-assign]
+        GatewayHTTPHandler._collaboration_available, handler
+    )
+
+
+def _install_app(workspace: Path, name: str, *skills: str) -> None:
+    """Install one Agent Plugin package that contributes the given skills."""
+    from nanobot.agent.plugins import AGENT_PLUGIN_SCHEMA
+
+    root = workspace / "plugins" / name
+    (root / "plugin.json").parent.mkdir(parents=True, exist_ok=True)
+    (root / "plugin.json").write_text(
+        json.dumps({"$schema": AGENT_PLUGIN_SCHEMA, "name": name, "description": "An app."}),
+        encoding="utf-8",
+    )
+    for skill in skills:
+        directory = root / "skills" / skill
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {skill}\ndescription: {skill} skill.\n---\n\nBody\n", encoding="utf-8"
+        )
+
+
+@pytest.mark.asyncio
+async def test_project_apps_are_approved_at_one_revision_and_revoked_when_it_changes(
+    tmp_path, monkeypatch
+) -> None:
+    """A project runs the app revision it approved, and loses it when that changes."""
+    from nanobot.agent import plugins as agent_plugins
+    from nanobot.agent.plugins import set_agent_plugin_enabled
+
+    monkeypatch.setattr(
+        agent_plugins, "get_config_path", lambda: tmp_path / "config" / "config.json"
+    )
+    handler = await _handler(tmp_path)
+    _use_real_inventory(handler)
+    workspace = handler.skills_workspace_path
+    _install_app(workspace, "studio", "poster", "banner")
+    set_agent_plugin_enabled(workspace, "studio", True)
+    owner = _local_connection()
+    created = await handler.dispatch_webui_mutation(
+        owner, "collaboration.project.create", {"name": "Release train"}
+    )
+    project_id = _json(created)["project"]["id"]
+    restricted = await handler.dispatch_webui_mutation(
+        owner,
+        "collaboration.project.update",
+        {"project_id": project_id, "capabilities": {"allowed_skills": ["poster"]}},
+    )
+    assert restricted.status_code == 200, restricted.body
+
+    joined = await handler.dispatch_webui_mutation(
+        owner, "collaboration.project.app.join", {"project_id": project_id, "name": "studio"}
+    )
+    assert joined.status_code == 200, joined.body
+    apps = {item["name"]: item for item in _json(joined)["apps"]}
+    assert apps["studio"]["approved"] is True and apps["studio"]["drifted"] is False
+    approved_revision = apps["studio"]["approved_revision"]
+    assert approved_revision and apps["studio"]["revision"] == approved_revision
+    assert _json(joined)["project"]["allowed_skills"] == ["banner", "poster"]
+
+    disabled = await handler.dispatch_webui_mutation(
+        owner,
+        "collaboration.project.update",
+        {"project_id": project_id, "capabilities": {"allowed_skills": ["poster"]}},
+    )
+    assert disabled.status_code == 200
+
+    detail_request = _request(
+        f"/api/collaboration/projects/{project_id}", {"Authorization": "Bearer local-token"}
+    )
+    detail = await handler.dispatch(_connection(detail_request), detail_request)
+    assert detail is not None and detail.status_code == 200
+    listed = {item["name"]: item for item in _json(detail)["apps"]}
+    assert listed["studio"]["approved"] is True and listed["studio"]["drifted"] is False
+
+    # Replacing the package retires the enabled revision, so the project loses it.
+    (workspace / "plugins" / "studio" / "skills" / "poster" / "SKILL.md").write_text(
+        "---\nname: poster\ndescription: Replaced skill.\n---\n\nChanged\n", encoding="utf-8"
+    )
+    await handler._reconcile_project_apps()
+
+    after = await handler.dispatch(_connection(detail_request), detail_request)
+    assert after is not None and after.status_code == 200
+    revoked = {item["name"]: item for item in _json(after)["apps"]}
+    assert revoked["studio"]["drifted"] is True
+    assert revoked["studio"]["approved_revision"] == approved_revision
+    assert _json(after)["project"]["allowed_skills"] == []
+
+    # Approving the app again pins the revision the host runs and restores it.
+    set_agent_plugin_enabled(workspace, "studio", True)
+    again = await handler.dispatch_webui_mutation(
+        owner, "collaboration.project.app.join", {"project_id": project_id, "name": "studio"}
+    )
+    assert again.status_code == 200, again.body
+    reapproved = {item["name"]: item for item in _json(again)["apps"]}["studio"]
+    assert reapproved["drifted"] is False
+    assert reapproved["approved_revision"] != approved_revision
+    assert _json(again)["project"]["allowed_skills"] == ["banner", "poster"]
+
+    left = await handler.dispatch_webui_mutation(
+        owner, "collaboration.project.app.leave", {"project_id": project_id, "name": "studio"}
+    )
+    assert left.status_code == 200
+    assert _json(left)["project"]["allowed_skills"] == []
+    assert {item["name"]: item for item in _json(left)["apps"]}["studio"]["approved"] is False
+
+
+@pytest.mark.asyncio
+async def test_project_app_approval_rejects_a_stale_revision_and_foreign_projects(
+    tmp_path, monkeypatch
+) -> None:
+    """Approving names one revision, and only a project manager may approve."""
+    from nanobot.agent import plugins as agent_plugins
+    from nanobot.agent.plugins import set_agent_plugin_enabled
+
+    monkeypatch.setattr(
+        agent_plugins, "get_config_path", lambda: tmp_path / "config" / "config.json"
+    )
+    handler = await _handler(tmp_path)
+    _use_real_inventory(handler)
+    workspace = handler.skills_workspace_path
+    _install_app(workspace, "studio", "poster")
+    set_agent_plugin_enabled(workspace, "studio", True)
+    owner = _local_connection()
+    member = _proxy_connection("member")
+    member_id = (await _identity(handler, member))["user"]["id"]
+    created = await handler.dispatch_webui_mutation(
+        owner, "collaboration.project.create", {"name": "Shared"}
+    )
+    project_id = _json(created)["project"]["id"]
+    await handler.dispatch_webui_mutation(
+        owner,
+        "collaboration.project.member.add",
+        {"project_id": project_id, "member_user_id": member_id},
+    )
+
+    stale = await handler.dispatch_webui_mutation(
+        owner,
+        "collaboration.project.app.join",
+        {"project_id": project_id, "name": "studio", "revision": "rev-gone"},
+    )
+    assert stale.status_code == 409
+    unknown = await handler.dispatch_webui_mutation(
+        owner, "collaboration.project.app.join", {"project_id": project_id, "name": "missing"}
+    )
+    assert unknown.status_code == 404
+    assert (await handler.dispatch_webui_mutation(
+        member, "collaboration.project.app.join", {"project_id": project_id, "name": "studio"}
+    )).status_code == 404

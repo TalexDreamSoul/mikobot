@@ -59,7 +59,9 @@ a second agent or relocate the configured agent workspace.
 The **Projects** page serves a different purpose: a managed Project is a shared
 workspace with members and optional Skill/MCP allowlists. Members do not choose
 arbitrary host directories or Full Access. Their profile and automatic memory are
-private to that member and project, outside the shared workspace. Only files they
+private to that member and project, outside the shared workspace — and the same
+holds for the host owner when a conversation is scoped to a managed project, such as
+a channel instance assigned to it. Only files they
 intentionally put in the project workspace are shared project material.
 
 **Channels** assigns connected chat instances to a Project; the assignee identifies
@@ -147,8 +149,10 @@ nanobot uses two related stores:
 
 Dream is a periodic consolidation job. It reads accumulated history and updates workspace memory so useful context can survive beyond short session replay.
 
-For members, the workspace in this table is the private store at
+For a project-scoped conversation, the workspace in this table is the private store at
 `<config-dir>/users/<user-id>/projects/<project-id>/`, not the shared project directory.
+This holds for every participant, the host owner included. Turns with no project scope,
+and the built-in home project, use the configured agent workspace.
 Automatic archives and Dream never publish one member's raw conversation into another
 member's memory. Shared knowledge belongs in explicitly authored project files.
 

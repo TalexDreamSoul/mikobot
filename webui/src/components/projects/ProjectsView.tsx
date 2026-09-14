@@ -1,10 +1,19 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Brain,
+  Cable,
+  Blocks,
+  Check,
+  CalendarClock,
   FolderKanban,
+  FolderOpen,
+  Info,
+  ListChecks,
   Loader2,
   Menu,
+  MessagesSquare,
+  Pencil,
   Plus,
   Trash2,
   Users,
@@ -12,7 +21,16 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { RenameChatDialog } from "@/components/RenameChatDialog";
 import { CapabilitiesPanel } from "@/components/projects/CapabilitiesPanel";
+import { ProjectAutomationsPanel } from "@/components/projects/ProjectAutomationsPanel";
+import { ProjectAppsPanel } from "@/components/projects/ProjectAppsPanel";
+import { ProjectChannelsPanel } from "@/components/projects/ProjectChannelsPanel";
+import { ProjectMemoryPanel } from "@/components/projects/ProjectMemoryPanel";
+import { ProjectMaterialsPanel } from "@/components/projects/ProjectMaterialsPanel";
+import { ProjectOverviewPanel } from "@/components/projects/ProjectOverviewPanel";
+import { ProjectSessionsPanel } from "@/components/projects/ProjectSessionsPanel";
+import { ProjectTasksPanel } from "@/components/projects/ProjectTasksPanel";
 import {
   CurrentUserIdCard,
   ProjectMembersPanel,
@@ -31,22 +49,51 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import type { CollaborationProjectsController } from "@/hooks/useCollaborationProjects";
-import type { CollaborationProject } from "@/lib/types";
+import type { ChatSummary, CollaborationProject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type ProjectPanel = "members" | "capabilities";
+type ProjectPanel =
+  | "overview"
+  | "tasks"
+  | "sessions"
+  | "materials"
+  | "memory"
+  | "apps"
+  | "members"
+  | "channels"
+  | "automations"
+  | "capabilities";
 
 const PROJECT_PANELS: Array<{
   id: ProjectPanel;
   labelKey: string;
   icon: LucideIcon;
 }> = [
+  { id: "overview", labelKey: "projects.panels.overview", icon: Info },
+  { id: "tasks", labelKey: "projects.panels.tasks", icon: ListChecks },
+  // Conversations follow the board: the board is where a project's work lives,
+  // and every conversation is still attributed to the project it runs in.
+  { id: "sessions", labelKey: "projects.panels.sessions", icon: MessagesSquare },
+  { id: "materials", labelKey: "projects.panels.materials", icon: FolderOpen },
+  { id: "memory", labelKey: "projects.panels.memory", icon: Brain },
+  { id: "apps", labelKey: "projects.panels.apps", icon: Blocks },
   { id: "members", labelKey: "projects.panels.members", icon: Users },
+  { id: "channels", labelKey: "projects.panels.channels", icon: Cable },
+  { id: "automations", labelKey: "projects.panels.automations", icon: CalendarClock },
   { id: "capabilities", labelKey: "projects.panels.capabilities", icon: Brain },
 ];
 
 function initialPanel(): ProjectPanel {
-  return window.location.hash.includes("section=capabilities") ? "capabilities" : "members";
+  if (window.location.hash.includes("section=overview")) return "overview";
+  if (window.location.hash.includes("section=capabilities")) return "capabilities";
+  if (window.location.hash.includes("section=channels")) return "channels";
+  if (window.location.hash.includes("section=automations")) return "automations";
+  if (window.location.hash.includes("section=members")) return "members";
+  if (window.location.hash.includes("section=apps")) return "apps";
+  if (window.location.hash.includes("section=memory")) return "memory";
+  if (window.location.hash.includes("section=materials")) return "materials";
+  if (window.location.hash.includes("section=sessions")) return "sessions";
+  return "tasks";
 }
 
 function ProjectList({
@@ -160,21 +207,37 @@ function LoadingSurface() {
 
 export function ProjectsView({
   projects,
+  sessions = [],
   onToggleSidebar,
+  onOpenSession,
   hostChromeInset = false,
 }: {
   projects: CollaborationProjectsController;
+  /** The caller's own conversations, attributed to the project they run in. */
+  sessions?: ChatSummary[];
   onToggleSidebar: () => void;
+  onOpenSession?: (key: string) => void;
   hostChromeInset?: boolean;
 }) {
   const { t } = useTranslation();
   const [panel, setPanel] = useState<ProjectPanel>(initialPanel);
   const [showNewProject, setShowNewProject] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const allProjects = projects.summary?.projects ?? [];
   const selectedProject = allProjects.find((project) => project.id === projects.projectId) ?? null;
   const canManage = projects.detail?.can_manage ?? false;
+  const activeProjectId = projects.summary?.user.default_project_id ?? null;
+  const isActiveProject = selectedProject !== null && activeProjectId === selectedProject.id;
   const currentUserId = projects.summary?.user.id ?? "";
+  const refreshDetail = projects.refreshDetail;
+
+  // Which apps this host offers, and at which revision, changes from Settings and
+  // from the host's own installs — outside this page. Read it again when the
+  // operator opens the apps section instead of trusting a payload from before.
+  useEffect(() => {
+    if (panel === "apps") void refreshDetail();
+  }, [panel, projects.projectId, refreshDetail]);
 
   const deleteProject = async () => {
     try {
@@ -183,6 +246,15 @@ export function ProjectsView({
       // The shared project error region reports the failure.
     } finally {
       setConfirmDelete(false);
+    }
+  };
+
+  const renameProject = async (name: string) => {
+    setRenaming(false);
+    try {
+      await projects.renameProject(name);
+    } catch {
+      // The shared project error region reports the failure.
     }
   };
 
@@ -240,18 +312,55 @@ export function ProjectsView({
                   <h2 className="truncate text-lg font-semibold tracking-tight">
                     {selectedProject?.name ?? t("projects.title")}
                   </h2>
+                  {selectedProject ? (
+                    isActiveProject ? (
+                      <span
+                        title={t("projects.activeProjectHint")}
+                        className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted/70 px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
+                      >
+                        <Check className="h-3.5 w-3.5" aria-hidden />
+                        {t("projects.activeProject")}
+                      </span>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => void projects.setActiveProject(selectedProject.id)}
+                        disabled={Boolean(projects.busyKey)}
+                        title={t("projects.activeProjectHint")}
+                        className="h-8 shrink-0 px-2.5 text-xs"
+                      >
+                        {t("projects.makeActive")}
+                      </Button>
+                    )
+                  ) : null}
                   {selectedProject && canManage ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => setConfirmDelete(true)}
-                      disabled={Boolean(projects.busyKey)}
-                      aria-label={t("projects.deleteProject")}
-                      className="h-9 w-9 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                    >
-                      <Trash2 className="h-4 w-4" aria-hidden />
-                    </Button>
+                    <>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => setRenaming(true)}
+                        disabled={Boolean(projects.busyKey)}
+                        aria-label={t("projects.renameProject")}
+                        className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
+                      >
+                        <Pencil className="h-4 w-4" aria-hidden />
+                      </Button>
+                      {selectedProject.is_builtin ? null : (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setConfirmDelete(true)}
+                          disabled={Boolean(projects.busyKey)}
+                          aria-label={t("projects.deleteProject")}
+                          className="h-9 w-9 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                        >
+                          <Trash2 className="h-4 w-4" aria-hidden />
+                        </Button>
+                      )}
+                    </>
                   ) : null}
                 </div>
               </div>
@@ -318,6 +427,11 @@ export function ProjectsView({
               </div>
 
               <CurrentUserIdCard currentUserId={currentUserId} />
+              {selectedProject?.is_builtin ? (
+                <p className="rounded-control border border-border/55 bg-settings-surface px-4 py-3 text-xs leading-5 text-muted-foreground">
+                  {t("projects.builtinHint")}
+                </p>
+              ) : null}
               {projects.error ? (
                 <div role="alert" className="flex items-start justify-between gap-3 rounded-control border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
                   <span>{projects.error}</span>
@@ -370,6 +484,41 @@ export function ProjectsView({
                     {t("common.retry")}
                   </Button>
                 </div>
+              ) : panel === "overview" ? (
+                <ProjectOverviewPanel
+                  detail={projects.detail}
+                  canManage={canManage}
+                  busyKey={projects.busyKey}
+                  onSave={projects.updateProjectDescription}
+                />
+              ) : panel === "sessions" ? (
+                <ProjectSessionsPanel
+                  projectId={projects.projectId ?? ""}
+                  sessions={sessions}
+                  builtin={selectedProject?.is_builtin === true}
+                  onOpenSession={onOpenSession}
+                />
+              ) : panel === "tasks" ? (
+                <ProjectTasksPanel
+                  detail={projects.detail}
+                  currentUserId={currentUserId}
+                  busyKey={projects.busyKey}
+                  onCreate={projects.createTask}
+                  onUpdate={projects.updateTask}
+                  onDelete={projects.deleteTask}
+                />
+              ) : panel === "materials" ? (
+                <ProjectMaterialsPanel projectId={projects.projectId ?? ""} />
+              ) : panel === "memory" ? (
+                <ProjectMemoryPanel projectId={projects.projectId ?? ""} />
+              ) : panel === "apps" ? (
+                <ProjectAppsPanel
+                  detail={projects.detail}
+                  busyKey={projects.busyKey}
+                  canManage={canManage}
+                  onJoin={projects.joinProjectApp}
+                  onLeave={projects.leaveProjectApp}
+                />
               ) : panel === "members" ? (
                 <ProjectMembersPanel
                   detail={projects.detail}
@@ -378,6 +527,10 @@ export function ProjectsView({
                   onAddMember={projects.addProjectMember}
                   onRemoveMember={projects.removeProjectMember}
                 />
+              ) : panel === "channels" ? (
+                <ProjectChannelsPanel detail={projects.detail} projects={projects} />
+              ) : panel === "automations" ? (
+                <ProjectAutomationsPanel detail={projects.detail} />
               ) : (
                 <CapabilitiesPanel
                   detail={projects.detail}
@@ -390,6 +543,16 @@ export function ProjectsView({
           </div>
         </div>
       </div>
+
+      <RenameChatDialog
+        open={renaming}
+        title={selectedProject?.name ?? ""}
+        dialogTitle={t("projects.renameTitle")}
+        description={t("projects.renameDescription")}
+        placeholder={t("projects.renamePlaceholder")}
+        onCancel={() => setRenaming(false)}
+        onConfirm={(name) => void renameProject(name)}
+      />
 
       <AlertDialog open={confirmDelete} onOpenChange={(next) => !next && setConfirmDelete(false)}>
         <AlertDialogContent className="w-[min(calc(100vw-2rem),24rem)]">

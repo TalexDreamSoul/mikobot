@@ -48,7 +48,7 @@ class TestFormatPairingReply:
     def test_points_owner_to_webui_with_command_fallback(self) -> None:
         reply = store.format_pairing_reply("ABCD-EFGH")
 
-        assert "nanobot WebUI" in reply
+        assert "Mikobot WebUI" in reply
         assert "ABCD-EFGH" in reply
         assert "/pairing approve ABCD-EFGH" in reply
 

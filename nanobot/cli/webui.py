@@ -262,7 +262,7 @@ def webui(
         )
         console.print("[dim]Closing the browser does not stop channels or automations.[/dim]")
         console.print(
-            "Stop nanobot: "
+            "Stop Mikobot: "
             f"[cyan]{_gateway_instance_command('stop', config_path=config_path, workspace=workspace)}[/cyan]"
         )
 

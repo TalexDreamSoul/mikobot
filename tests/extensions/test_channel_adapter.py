@@ -373,6 +373,122 @@ def test_snapshot_isolates_malformed_package_without_leaking_its_failure(
     assert "/private/channel-state.sqlite" not in exposed
 
 
+def test_snapshot_reports_the_instance_public_label_as_the_component_display_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A labelled instance publishes the name its own settings surface shows, not the opaque id."""
+    plugin = _plugin("Label")
+    [package] = _adapter(
+        monkeypatch,
+        {plugin.name: plugin},
+        _config(
+            Label={
+                "instances": [
+                    {"instance_id": "office", "enabled": False, "displayName": "Support Bot"}
+                ]
+            }
+        ),
+    ).snapshot().packages
+
+    assert package.components[0].display_name == "Support Bot"
+
+
+@pytest.mark.parametrize(
+    ("labels", "expected"),
+    [
+        (
+            {"displayName": "Support Bot", "display_name": "Fallback Bot", "name": "Legacy Bot"},
+            "Support Bot",
+        ),
+        ({"display_name": "Fallback Bot", "name": "Legacy Bot"}, "Fallback Bot"),
+        ({"name": "Legacy Bot"}, "Legacy Bot"),
+        ({"displayName": "   ", "display_name": "Fallback Bot"}, "Fallback Bot"),
+    ],
+)
+def test_snapshot_resolves_the_instance_public_label_by_key_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    labels: Mapping[str, object],
+    expected: str,
+) -> None:
+    """The first configured label key decides the display name, and blank text is not a label."""
+    plugin = _plugin("Label")
+    [package] = _adapter(
+        monkeypatch,
+        {plugin.name: plugin},
+        _config(Label={"instances": [{"instance_id": "office", "enabled": False, **labels}]}),
+    ).snapshot().packages
+
+    assert package.components[0].display_name == expected
+
+
+def test_snapshot_falls_back_to_the_raw_instance_id_without_a_configured_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unlabelled instance keeps its raw id rather than the canonicalised component slug."""
+    plugin = _plugin("Label")
+    [package] = _adapter(
+        monkeypatch,
+        {plugin.name: plugin},
+        _config(Label={"instances": [{"instance_id": "Office_1", "enabled": False}]}),
+    ).snapshot().packages
+    [component] = package.components
+
+    assert component.display_name == "Office_1"
+
+
+def test_snapshot_keeps_the_canonical_instance_identity_when_a_public_label_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A public label never becomes the identity the project and runtime surfaces address."""
+    plugin = _plugin("Label")
+    [package] = _adapter(
+        monkeypatch,
+        {plugin.name: plugin},
+        _config(
+            Label={
+                "instances": [
+                    {"instance_id": "office", "enabled": False, "displayName": "Support Bot"}
+                ]
+            }
+        ),
+    ).snapshot().packages
+    [component] = package.components
+
+    assert component.name == "office"
+    assert component.id == extension_component_id(
+        package.id,
+        ExtensionComponentKind.CHANNEL,
+        "office",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("/private/state/key.pem", "office"),
+        ("Support /var/lib/secret", "Support <path>"),
+    ],
+)
+def test_snapshot_redacts_filesystem_paths_inside_an_instance_public_label(
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    expected: str,
+) -> None:
+    """A path-shaped label is redacted by the existing label guard instead of reaching consumers."""
+    plugin = _plugin("Label")
+    [package] = _adapter(
+        monkeypatch,
+        {plugin.name: plugin},
+        _config(
+            Label={"instances": [{"instance_id": "office", "enabled": False, "displayName": label}]}
+        ),
+    ).snapshot().packages
+    [component] = package.components
+
+    assert component.display_name == expected
+    assert label not in repr(package)
+
+
 def test_channel_instance_specs_rejects_unbounded_management_generator_after_limit() -> None:
     """A malformed management iterator is stopped at the contract bound instead of being materialized."""
     pulls = 0

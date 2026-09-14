@@ -73,7 +73,7 @@ export function NanobotFeatureInstallDialog({
           <DialogDescription className="mt-3 max-w-[20rem] text-center text-[14px] leading-6 text-muted-foreground">
             {tx(
               "settings.nanobotFeatures.installConfirmDescription",
-              "nanobot will add what {{name}} needs, then turn it on. Continue?",
+              "Mikobot will add what {{name}} needs, then turn it on. Continue?",
               { name },
             )}
           </DialogDescription>

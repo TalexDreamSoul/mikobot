@@ -7,7 +7,7 @@ description: Generate images and iteratively edit saved image artifacts.
 
 Use the `generate_image` tool when the user asks you to create, render, draw, design, generate, or edit an image.
 
-If the `generate_image` tool is not available in the current tool list, tell the user that image generation is not enabled for this nanobot instance.
+If the `generate_image` tool is not available in the current tool list, tell the user that image generation is not enabled for this Mikobot instance.
 
 ## When To Use
 
@@ -29,7 +29,7 @@ Write prompts with enough detail for image models:
 
 ## Artifact Rules
 
-The tool stores generated images as persistent artifacts under nanobot's media directory and returns structured metadata:
+The tool stores generated images as persistent artifacts under Mikobot's media directory and returns structured metadata:
 
 - `id`: generated image id, such as `img_ab12cd34ef56`.
 - `path`: local file path for internal follow-up edits.
@@ -48,7 +48,7 @@ Generate a new image:
 
 ```text
 generate_image(
-  prompt="A minimal app icon for nanobot: friendly robot head, rounded square, soft blue and white palette, clean vector style, no text",
+  prompt="A minimal app icon for Mikobot: friendly robot head, rounded square, soft blue and white palette, clean vector style, no text",
   aspect_ratio="1:1",
   image_size="1K"
 )

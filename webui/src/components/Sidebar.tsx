@@ -13,7 +13,6 @@ import {
   Settings,
   SquarePen,
   Blocks,
-  Cable,
   FolderKanban,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -51,6 +50,7 @@ interface SidebarProps {
   onRequestRenameTab?: (key: string, label: string) => void;
   onToggleArchive: (key: string) => void;
   paneGroups?: Record<string, SidebarPaneGroup>;
+  projectNames?: Record<string, string>;
   onSelectPane?: (tabKey: string, paneKey: string) => void;
   onCreateTab?: (paneKey: string) => void;
   onDetachPane?: (tabKey: string, paneKey: string) => void;
@@ -64,16 +64,14 @@ interface SidebarProps {
   onNewChatInProject: (projectPath: string, projectName: string) => void;
   onOpenSettings: () => void;
   onOpenProjects: () => void;
-  onOpenChannels: () => void;
   onOpenApps: () => void;
   onOpenSkills: () => void;
   onOpenAutomations: () => void;
   onProjectsIntent?: () => void;
-  onChannelsIntent?: () => void;
   onSettingsIntent?: () => void;
   showAdminNavigation?: boolean;
   onOpenSearch: () => void;
-  activeUtility?: "projects" | "channels" | "apps" | "skills" | "automations" | null;
+  activeUtility?: "projects" | "apps" | "skills" | "automations" | null;
   onToggleArchived: () => void;
   onCollapse: () => void;
   onExpand?: () => void;
@@ -213,15 +211,6 @@ export function Sidebar(props: SidebarProps) {
           selectionRef={activeActionRef}
           icon={<FolderKanban className="h-4 w-4" />}
         />
-        <SidebarActionButton
-          collapsed={collapsed}
-          label={t("sidebar.channels")}
-          onClick={props.onOpenChannels}
-          onIntent={props.onChannelsIntent}
-          active={props.activeUtility === "channels"}
-          selectionRef={activeActionRef}
-          icon={<Cable className="h-4 w-4" />}
-        />
         {props.showAdminNavigation ? (
           <>
             <SidebarActionButton
@@ -299,6 +288,7 @@ export function Sidebar(props: SidebarProps) {
             sessionOrder={props.sessionOrder}
             titleOverrides={props.titleOverrides}
             projectNameOverrides={props.projectNameOverrides}
+            projectNames={props.projectNames}
             collapsedGroups={props.collapsedGroups}
             runningChatIds={props.runningChatIds}
             updatedChatIds={props.updatedChatIds}

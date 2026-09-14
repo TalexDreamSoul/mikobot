@@ -39,7 +39,7 @@ const TRUST_FALLBACKS: Record<NanobotExtensionTrust, string> = {
 
 const EXECUTION_FALLBACKS: Record<NanobotExtensionExecution, string> = {
   data: "Data only",
-  in_process: "In the nanobot process",
+  in_process: "In the Mikobot process",
   child_process: "In a child process",
   remote: "On a remote service",
 };

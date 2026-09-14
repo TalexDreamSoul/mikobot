@@ -780,9 +780,9 @@ def save_registration_result(
             previous_identity_key and previous_identity_key != next_identity_key
         )
         default_name = (
-            "nanobot"
+            "Mikobot"
             if instance_id == DEFAULT_INSTANCE_ID
-            else f"nanobot {instance_id}"
+            else f"Mikobot {instance_id}"
         )
         existing_name = existing.config.get("name") if existing is not None else None
         saved_name = name if existing is None or name else existing_name
@@ -1038,7 +1038,7 @@ class FeishuChannel(BaseChannel):
             _LOGIN_CONSOLE.print("Use --force to re-authenticate with a new bot.\n")
             return True
 
-        _LOGIN_CONSOLE.print("Authorize with the mobile app. nanobot will save the new bot credentials.\n")
+        _LOGIN_CONSOLE.print("Authorize with the mobile app. Mikobot will save the new bot credentials.\n")
 
         result = qr_register(initial_domain=self.config.domain or "feishu")
         if not result:

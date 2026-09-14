@@ -1,5 +1,5 @@
 {
-  "description": "WeChat の会話から nanobot を利用します。",
+  "description": "WeChat の会話から Mikobot を利用します。",
   "requirements": "WeChat チャンネル設定とゲートウェイ",
   "setup": {
     "primaryAction": "WeChat に接続",
@@ -21,26 +21,54 @@
         "label": "トークン",
         "placeholder": "QR ログインで保存"
       },
-      "sendProgress": { "label": "進捗を送信" },
-      "sendToolHints": { "label": "ツールのヒントを送信" },
-      "streaming": { "label": "ストリーミング API を使用" },
-      "replyProgressMessages": { "label": "構造化された進捗を送信" },
-      "replyProgressMaxMessages": { "label": "構造化進捗の上限" },
-      "contextMessageBudget": { "label": "コンテキストのメッセージ予算" },
-      "blockStreaming": { "label": "応答をブロック単位で送信" },
-      "blockStreamingMinChars": { "label": "最小ブロックサイズ" },
-      "blockStreamingMaxMessages": { "label": "ブロックメッセージの上限" },
-      "baseUrl": { "label": "API URL" },
-      "cdnBaseUrl": { "label": "CDN URL" },
-      "routeTag": { "label": "ルートタグ" },
-      "stateDir": { "label": "状態ディレクトリ" },
-      "pollTimeout": { "label": "ポーリングタイムアウト" }
+      "sendProgress": {
+        "label": "進捗を送信"
+      },
+      "sendToolHints": {
+        "label": "ツールのヒントを送信"
+      },
+      "streaming": {
+        "label": "ストリーミング API を使用"
+      },
+      "replyProgressMessages": {
+        "label": "構造化された進捗を送信"
+      },
+      "replyProgressMaxMessages": {
+        "label": "構造化進捗の上限"
+      },
+      "contextMessageBudget": {
+        "label": "コンテキストのメッセージ予算"
+      },
+      "blockStreaming": {
+        "label": "応答をブロック単位で送信"
+      },
+      "blockStreamingMinChars": {
+        "label": "最小ブロックサイズ"
+      },
+      "blockStreamingMaxMessages": {
+        "label": "ブロックメッセージの上限"
+      },
+      "baseUrl": {
+        "label": "API URL"
+      },
+      "cdnBaseUrl": {
+        "label": "CDN URL"
+      },
+      "routeTag": {
+        "label": "ルートタグ"
+      },
+      "stateDir": {
+        "label": "状態ディレクトリ"
+      },
+      "pollTimeout": {
+        "label": "ポーリングタイムアウト"
+      }
     }
   },
   "custom": {
     "qrAlt": "WeChat ログイン QR コード",
     "scanTitle": "WeChat でスキャン",
-    "scanDescription": "スマートフォンの WeChat でスキャンしてください。ログイン後、nanobot が状態をローカルに保存します。",
+    "scanDescription": "スマートフォンの WeChat でスキャンしてください。ログイン後、Mikobot が状態をローカルに保存します。",
     "waiting": "WeChat のスキャンを待っています...",
     "connected": "WeChat に接続しました。",
     "stopped": "WeChat ログインを停止しました。",

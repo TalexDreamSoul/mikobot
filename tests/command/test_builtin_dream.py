@@ -478,7 +478,7 @@ async def test_dream_log_without_saved_versions_mentions_prompt_command() -> Non
 async def test_dream_prompt_reports_default_prompt(tmp_path) -> None:
     out = await cmd_dream_prompt(_make_dream_prompt_ctx(tmp_path))
 
-    assert "Dream memory instructions: nanobot default" in out.content
+    assert "Dream memory instructions: Mikobot default" in out.content
     assert "prompts/dream.md" in out.content
     assert str(tmp_path) not in out.content
     assert "/dream-prompt init" in out.content
@@ -494,7 +494,7 @@ async def test_dream_prompt_init_copies_default_prompt(tmp_path) -> None:
     assert "Created Dream memory instructions" in out.content
     assert "prompts/dream.md" in out.content
     assert str(tmp_path) not in out.content
-    assert "fully replaces nanobot's default Dream guide" in out.content
+    assert "fully replaces Mikobot's default Dream guide" in out.content
     assert prompt_file.read_text(encoding="utf-8") == MemoryStore.default_dream_prompt() + "\n"
 
 

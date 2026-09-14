@@ -281,7 +281,7 @@ class ProviderRegistryExtensionAdapter:
             package_id=package.id,
             target_id=request.target_id,
             lifecycle=ExtensionLifecycle.ENABLED,
-            message="Image generation settings were applied without restarting nanobot.",
+            message="Image generation settings were applied without restarting Mikobot.",
         )
 
     def _package(

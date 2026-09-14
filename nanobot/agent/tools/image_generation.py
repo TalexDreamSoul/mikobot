@@ -187,7 +187,7 @@ class ImageGenerationTool(Tool):
                 )
             except WorkspaceBoundaryError as exc:
                 raise ImageGenerationError(
-                    "reference_images must be inside the workspace or nanobot media directory"
+                    "reference_images must be inside the workspace or Mikobot media directory"
                 ) from exc
             except OSError as exc:
                 raise ImageGenerationError(f"reference image not found: {value}") from exc

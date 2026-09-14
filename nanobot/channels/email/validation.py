@@ -27,7 +27,7 @@ def validate(
                 "consent",
                 "Mailbox consent",
                 "fail",
-                "Grant consent before nanobot reads this mailbox.",
+                "Grant consent before Mikobot reads this mailbox.",
             )
         )
 

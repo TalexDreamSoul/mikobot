@@ -1213,6 +1213,74 @@ describe("ChatList", () => {
     expect(onRequestRenameProject).toHaveBeenCalledWith("/Users/me/nanobot", "Photos");
   });
 
+  it("attributes conversations to their collaboration project and lets that project own its name", async () => {
+    const onRequestRenameProject = vi.fn();
+    const onNewChatInProject = vi.fn();
+    const sessions = [
+      session({
+        chatId: "home",
+        title: "Home chat",
+        updatedAt: "2026-05-21T12:00:00Z",
+        collaborationProjectId: "proj-assistant",
+        workspaceScope: {
+          project_path: "/Users/me/.nanobot/workspace",
+          project_name: "workspace",
+          access_mode: "restricted",
+        },
+      }),
+      session({
+        chatId: "studio",
+        title: "Studio chat",
+        updatedAt: "2026-05-21T11:00:00Z",
+        collaborationProjectId: "proj-studio",
+        workspaceScope: {
+          project_path: "/Users/me/nanobot",
+          project_name: "nanobot",
+          access_mode: "restricted",
+        },
+      }),
+    ];
+
+    render(
+      <ChatList
+        sessions={sessions}
+        activeKey="websocket:home"
+        onSelect={vi.fn()}
+        onRequestDelete={vi.fn()}
+        onTogglePin={vi.fn()}
+        onRequestRename={vi.fn()}
+        onToggleArchive={vi.fn()}
+        onToggleGroup={vi.fn()}
+        onRequestRenameProject={onRequestRenameProject}
+        onNewChatInProject={onNewChatInProject}
+        defaultWorkspacePath="/Users/me/.nanobot/workspace"
+        projectNames={{
+          "proj-assistant": "MikoAssistant",
+          "proj-studio": "Poster studio",
+        }}
+        projectNameOverrides={{ "/Users/me/nanobot": "Stale override" }}
+      />,
+    );
+
+    // Unbound conversations belong to the default project, not to a nameless bucket.
+    const homeSection = screen.getByRole("region", { name: "MikoAssistant" });
+    expect(within(homeSection).getByText("Home chat")).toBeInTheDocument();
+
+    // The project names the group; the folder name and a stale sidebar override lose.
+    const studioSection = screen.getByRole("region", { name: "Poster studio" });
+    expect(screen.queryByRole("region", { name: "Stale override" })).not.toBeInTheDocument();
+    expect(within(studioSection).getByText("Studio chat")).toBeInTheDocument();
+
+    // Renaming belongs to the project page, so the sidebar menu only offers a new chat.
+    const studioButton = within(studioSection).getByRole("button", { name: "Poster studio" });
+    fireEvent.contextMenu(studioButton);
+    expect(await screen.findByRole("menuitem", { name: "New topic" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Rename" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: "New topic" }));
+    expect(onNewChatInProject).toHaveBeenCalledWith("/Users/me/nanobot", "Poster studio");
+    expect(onRequestRenameProject).not.toHaveBeenCalled();
+  });
+
   it("animates project disclosure and surrounding layout like tab groups", () => {
     let collapsed = false;
     const onToggleGroup = vi.fn();

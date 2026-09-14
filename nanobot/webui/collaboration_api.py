@@ -11,6 +11,8 @@ from nanobot.collaboration.models import (
     PairingChallenge,
     Project,
     ProjectMembership,
+    ProjectTask,
+    TaskStatus,
     User,
 )
 
@@ -104,11 +106,40 @@ def project_member_payload(member: ProjectMembership) -> dict[str, object]:
     }
 
 
+def project_task_payload(task: ProjectTask) -> dict[str, object]:
+    """Serialize one board card.
+
+    A project's board is the same for every member, so nothing here is redacted:
+    the title, the note, the column, and who wrote it are what the board shows.
+    """
+    return {
+        "id": task.id,
+        "project_id": task.project_id,
+        "title": task.title,
+        "detail": task.detail,
+        "status": task.status.value,
+        "created_by_user_id": task.created_by_user_id,
+        "created_at_ms": task.created_at_ms,
+        "updated_at_ms": task.updated_at_ms,
+    }
+
+
+def project_task_status(raw: object) -> TaskStatus:
+    """Validate a board column submitted by the WebUI."""
+    if not isinstance(raw, str):
+        raise ValueError("invalid task status")
+    try:
+        return TaskStatus(raw)
+    except ValueError as exc:
+        raise ValueError("invalid task status") from exc
+
+
 def project_payload(project: Project) -> dict[str, object]:
     """Return project metadata without its private workspace location."""
     return {
         "id": project.id,
         "name": project.name,
+        "description": project.description,
         "created_by_user_id": project.created_by_user_id,
         "allowed_skills": list(project.allowed_skills) if project.allowed_skills is not None else None,
         "allowed_mcp_servers": (
@@ -116,6 +147,7 @@ def project_payload(project: Project) -> dict[str, object]:
         ),
         "created_at_ms": project.created_at_ms,
         "updated_at_ms": project.updated_at_ms,
+        "is_builtin": project.is_builtin,
     }
 
 
@@ -154,7 +186,6 @@ def capability_allowlists(
         result[key] = values
     return result
 
-
 def required_string(payload: Mapping[str, object], name: str) -> str:
     value = payload.get(name)
     if not isinstance(value, str) or not value.strip() or len(value.strip()) > 512:
@@ -170,6 +201,17 @@ def optional_string(payload: Mapping[str, object], name: str) -> str | None:
         return None
     if not isinstance(value, str) or len(value.strip()) > 16_000:
         raise ValueError(f"{name} must be a string")
+    return value.strip()
+
+
+def optional_description(payload: Mapping[str, object]) -> str | None:
+    if "description" not in payload:
+        return None
+    value = payload["description"]
+    if value is None:
+        return ""
+    if not isinstance(value, str) or len(value.strip()) > 8_000:
+        raise ValueError("description must be a string")
     return value.strip()
 
 

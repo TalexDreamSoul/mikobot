@@ -70,7 +70,7 @@ class CoreToolsExtensionAdapter:
             display_name=(
                 safe_extension_label(rows[0].metadata.owner_name, fallback=owner_name)
                 if external
-                else "Nanobot Tools"
+                else "Mikobot Tools"
             ),
             source=source,
             trust=ExtensionTrust.OPERATOR_TRUSTED if external else ExtensionTrust.FIRST_PARTY,

@@ -202,7 +202,7 @@ def _resolve_tui_command() -> list[str]:
         return [str(downloaded)]
 
     raise TuiUnavailableError(
-        f"no native TUI archive is published for nanobot {__version__} on this platform; "
+        f"no native TUI archive is published for Mikobot {__version__} on this platform; "
         "current source installs must be editable and keep their checkout and Bun available, "
         "while released packages need a matching GitHub release archive; use "
         "`nanobot agent --classic` if intentional"

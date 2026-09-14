@@ -14,9 +14,13 @@ import type {
   CollaborationPairingPayload,
   CollaborationPayload,
   CollaborationProject,
+  CollaborationProjectApp,
   CollaborationProjectMember,
   CollaborationProjectPayload,
+  CollaborationProjectMaterialsPayload,
   CollaborationProjectRole,
+  CollaborationProjectTask,
+  CollaborationTaskStatus,
   ExtensionActionResultPayload,
   ExtensionInventoryPayload,
   NanobotExtensionAction,
@@ -136,7 +140,7 @@ async function request<T>(
     throw new ApiError(
       res.status,
       isHtml
-        ? "Gateway returned WebUI HTML instead of JSON. Restart nanobot gateway and try again."
+        ? "Gateway returned WebUI HTML instead of JSON. Restart Mikobot gateway and try again."
         : "Gateway returned a non-JSON response.",
     );
   }
@@ -211,6 +215,7 @@ export async function listSessions(
     recovery_state?: RecoveryState | null;
     workspace_scope?: WorkspaceScopePayload | null;
     handle?: SessionHandle | null;
+    collaboration_project_id?: string;
   };
   const body = await request<{ sessions: Row[] }>(
     `${base}/api/sessions`,
@@ -231,6 +236,7 @@ export async function listSessions(
       runStartedAt: s.run_started_at ?? null,
       recoveryState: s.recovery_state ?? null,
       workspaceScope: s.workspace_scope ?? null,
+      collaborationProjectId: s.collaboration_project_id ?? null,
       handle,
     };
   });
@@ -562,6 +568,33 @@ export async function fetchCollaborationProject(
   );
 }
 
+export async function fetchCollaborationProjectMaterials(
+  token: string,
+  projectId: string,
+  path?: string,
+  base: string = "",
+): Promise<CollaborationProjectMaterialsPayload> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : "";
+  return request<CollaborationProjectMaterialsPayload>(
+    `${base}/api/collaboration/projects/${encodeURIComponent(projectId)}/materials${query}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchCollaborationProjectMemory(
+  token: string,
+  projectId: string,
+  base: string = "",
+): Promise<CollaborationProjectMaterialsPayload> {
+  return request<CollaborationProjectMaterialsPayload>(
+    `${base}/api/collaboration/projects/${encodeURIComponent(projectId)}/knowledge`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
 export async function fetchCollaborationPairing(
   token: string,
   challengeId: string,
@@ -636,7 +669,11 @@ export async function createCollaborationProject(
 export async function updateCollaborationProject(
   transport: WebUIMutationTransport,
   projectId: string,
-  values: { name?: string; capabilities?: CollaborationCapabilities },
+  values: {
+    name?: string;
+    description?: string;
+    capabilities?: CollaborationCapabilities;
+  },
 ): Promise<{ project: CollaborationProject }> {
   return mutation<{ project: CollaborationProject }>(
     transport,
@@ -644,8 +681,87 @@ export async function updateCollaborationProject(
     {
       project_id: projectId,
       ...(values.name !== undefined ? { name: values.name } : {}),
+      ...(values.description !== undefined ? { description: values.description } : {}),
       ...(values.capabilities !== undefined ? { capabilities: values.capabilities } : {}),
     },
+  );
+}
+
+export async function joinCollaborationProjectApp(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  name: string,
+  revision?: string | null,
+): Promise<{ project: CollaborationProject; apps: CollaborationProjectApp[] }> {
+  return mutation<{ project: CollaborationProject; apps: CollaborationProjectApp[] }>(
+    transport,
+    "collaboration.project.app.join",
+    {
+      project_id: projectId,
+      name,
+      ...(revision ? { revision } : {}),
+    },
+  );
+}
+
+export async function leaveCollaborationProjectApp(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  name: string,
+): Promise<{ project: CollaborationProject; apps: CollaborationProjectApp[] }> {
+  return mutation<{ project: CollaborationProject; apps: CollaborationProjectApp[] }>(
+    transport,
+    "collaboration.project.app.leave",
+    { project_id: projectId, name },
+  );
+}
+
+export async function createCollaborationTask(
+  transport: WebUIMutationTransport,
+  projectId: string,
+  values: { title: string; detail?: string; status?: CollaborationTaskStatus },
+): Promise<{ task: CollaborationProjectTask }> {
+  return mutation<{ task: CollaborationProjectTask }>(
+    transport,
+    "collaboration.task.create",
+    {
+      project_id: projectId,
+      title: values.title,
+      ...(values.detail !== undefined ? { detail: values.detail } : {}),
+      ...(values.status !== undefined ? { status: values.status } : {}),
+    },
+  );
+}
+
+export async function updateCollaborationTask(
+  transport: WebUIMutationTransport,
+  taskId: string,
+  values: {
+    title?: string;
+    detail?: string;
+    status?: CollaborationTaskStatus;
+  },
+): Promise<{ task: CollaborationProjectTask }> {
+  return mutation<{ task: CollaborationProjectTask }>(
+    transport,
+    "collaboration.task.update",
+    {
+      task_id: taskId,
+      ...(values.title !== undefined ? { title: values.title } : {}),
+      ...(values.detail !== undefined ? { detail: values.detail } : {}),
+      ...(values.status !== undefined ? { status: values.status } : {}),
+    },
+  );
+}
+
+export async function deleteCollaborationTask(
+  transport: WebUIMutationTransport,
+  taskId: string,
+): Promise<{ deleted: boolean }> {
+  return mutation<{ deleted: boolean }>(
+    transport,
+    "collaboration.task.delete",
+    { task_id: taskId },
   );
 }
 

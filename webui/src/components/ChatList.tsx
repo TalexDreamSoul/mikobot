@@ -258,6 +258,8 @@ interface ChatListProps {
   sessionOrder?: string[];
   titleOverrides?: Record<string, string>;
   projectNameOverrides?: Record<string, string>;
+  /** Collaboration project names by id, so groups show the project's own name. */
+  projectNames?: Record<string, string>;
   collapsedGroups?: Record<string, boolean>;
   runningChatIds?: string[];
   updatedChatIds?: string[];
@@ -301,6 +303,7 @@ export const ChatList = memo(function ChatList({
   sessionOrder = [],
   titleOverrides = {},
   projectNameOverrides = {},
+  projectNames = {},
   collapsedGroups = {},
   runningChatIds = [],
   updatedChatIds = [],
@@ -382,6 +385,7 @@ export const ChatList = memo(function ChatList({
       archivedKeys,
       titleOverrides,
       projectNameOverrides,
+      projectNames,
       sessionOrder,
       showArchived,
       sort,
@@ -396,6 +400,7 @@ export const ChatList = memo(function ChatList({
       sort,
       titleOverrides,
       projectNameOverrides,
+      projectNames,
       sessionOrder,
       defaultWorkspacePath,
     ],
@@ -736,6 +741,7 @@ export const ChatList = memo(function ChatList({
                       onToggle={() => toggleProjectGroup(group.id)}
                       onRequestRename={
                         group.projectKey && onRequestRenameProject
+                          && !group.collaborationProjectId
                           ? () => onRequestRenameProject(group.projectKey ?? "", group.label)
                           : undefined
                       }

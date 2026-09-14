@@ -1380,7 +1380,7 @@ function automationChannelDisplayName(channel: string): string | undefined {
   return channelUiPresentation(key)?.displayName ?? HOST_AUTOMATION_CHANNEL_LABELS[key];
 }
 
-function formatAutomationSchedule(
+export function formatAutomationSchedule(
   job: SessionAutomationJob,
   locale: string,
   tx: (key: string, fallback: string, values?: Record<string, unknown>) => string,

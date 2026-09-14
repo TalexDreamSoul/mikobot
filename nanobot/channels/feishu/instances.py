@@ -58,7 +58,7 @@ def update_managed_feishu_instance(
 def _base_feishu_instance_config(defaults: dict[str, Any]) -> dict[str, Any]:
     config = dict(defaults)
     config["instanceId"] = DEFAULT_INSTANCE_ID
-    config["name"] = "nanobot"
+    config["name"] = "Mikobot"
     return config
 
 
@@ -76,7 +76,7 @@ def _normalize_feishu_instance(
     instance_id = validate_instance_id(str(raw_id))
     config["id"] = instance_id
     config["instanceId"] = instance_id
-    config.setdefault("name", "nanobot" if instance_id == DEFAULT_INSTANCE_ID else f"nanobot {instance_id}")
+    config.setdefault("name", "Mikobot" if instance_id == DEFAULT_INSTANCE_ID else f"Mikobot {instance_id}")
     return config
 
 
@@ -213,7 +213,7 @@ def upsert_feishu_instance(
             instance.update(values)
             instance["id"] = instance_id
             instance["instanceId"] = instance_id
-            instance.setdefault("name", "nanobot" if instance_id == DEFAULT_INSTANCE_ID else f"nanobot {instance_id}")
+            instance.setdefault("name", "Mikobot" if instance_id == DEFAULT_INSTANCE_ID else f"Mikobot {instance_id}")
             return canonical
 
     config = _normalize_feishu_instance(

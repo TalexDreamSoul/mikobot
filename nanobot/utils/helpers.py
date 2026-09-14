@@ -836,7 +836,7 @@ def build_status_content(
     if cached and last_in:
         token_line += f" ({cached * 100 // last_in}% cached)"
     lines = [
-        f"\U0001f408 nanobot v{version}",
+        f"\U0001f408 Mikobot v{version}",
         f"\U0001f9e0 Model: {model}",
         token_line,
         f"\U0001f4da Context: {ctx_used_str}/{ctx_total_str} ({ctx_pct}% of input budget)",
@@ -912,3 +912,50 @@ def load_bundled_template(template_name: str) -> str | None:
         if tpl.is_file():
             return tpl.read_text(encoding="utf-8")
     return None
+
+
+# The product's former and current name. Folding both onto one token lets an
+# unchanged default prompt file from an earlier release still compare equal to
+# the current bundle after the rename.
+_PRODUCT_NAME_FORMS = ("Mikobot", "Nanobot", "nanobot")
+_PRODUCT_NAME_TOKEN = "mikobot"
+
+# Default prompt files whose *text* changed between releases. A workspace copy
+# equal to one of these was never edited by the user, so the current bundled
+# default replaces it.
+_LEGACY_PROMPT_DEFAULTS: dict[str, tuple[str, ...]] = {
+    "SOUL.md": ("legacy/SOUL.md",),
+}
+
+
+def _fold_product_name(text: str) -> str:
+    for form in _PRODUCT_NAME_FORMS:
+        text = text.replace(form, _PRODUCT_NAME_TOKEN)
+    return text
+
+
+def bundled_default_text(content: str, template_name: str) -> str | None:
+    """Return the current bundled default when *content* is an unchanged default prompt.
+
+    Matches the current bundled text, an explicit legacy template, or the same
+    default before the product rename. ``None`` means the user edited the file
+    and the content is theirs to keep.
+    """
+    current = load_bundled_template(template_name)
+    if current is None:
+        return None
+    stripped = content.strip()
+    if stripped == current.strip():
+        return current
+    if _fold_product_name(stripped) == _fold_product_name(current.strip()):
+        return current
+    for legacy_name in _LEGACY_PROMPT_DEFAULTS.get(template_name, ()):
+        older = load_bundled_template(legacy_name)
+        if older is not None and stripped == older.strip():
+            return current
+    return None
+
+
+def is_bundled_default(content: str, template_name: str) -> bool:
+    """True when *content* is an unmodified bundled default for *template_name*."""
+    return bundled_default_text(content, template_name) is not None

@@ -202,10 +202,10 @@ describe("NanobotTui layout", () => {
 
       expect(setup.renderer.width).toBe(width)
       expect(setup.renderer.height).toBe(height)
-      expect(occurrences(frame, "Ask nanobot anything")).toBe(1)
+      expect(occurrences(frame, "Ask Mikobot anything")).toBe(1)
       expect(occurrences(frame, "Ready")).toBe(0)
       expect(occurrences(frame, "Getting ready…")).toBe(1)
-      expect(occurrences(frame, "nanobot  ·  test/model")).toBe(1)
+      expect(occurrences(frame, "Mikobot  ·  test/model")).toBe(1)
     }
 
     app.accept({ event: "attached", chat_id: "chat" })
@@ -286,7 +286,7 @@ describe("NanobotTui layout", () => {
     const app = mount(setup)
     const composer = (app as unknown as { composer: TextareaRenderable }).composer
     await setup.renderOnce()
-    expect(setup.captureCharFrame()).toContain("Ask nanobot anything")
+    expect(setup.captureCharFrame()).toContain("Ask Mikobot anything")
 
     setup.mockInput.typeText("bu")
     await setup.flush()
@@ -295,14 +295,14 @@ describe("NanobotTui layout", () => {
     expect(composer.plainText).toBe("bu")
     expect(composer.placeholder).toBeNull()
     expect(frame).toContain("bu")
-    expect(frame).not.toContain("Ask nanobot anything")
-    expect(frame).not.toContain("buAsk nanobot anything")
+    expect(frame).not.toContain("Ask Mikobot anything")
+    expect(frame).not.toContain("buAsk Mikobot anything")
 
     setup.mockInput.pressBackspace()
     setup.mockInput.pressBackspace()
     await setup.flush()
-    expect(composer.placeholder).toBe("Ask nanobot anything")
-    expect(setup.captureCharFrame()).toContain("Ask nanobot anything")
+    expect(composer.placeholder).toBe("Ask Mikobot anything")
+    expect(setup.captureCharFrame()).toContain("Ask Mikobot anything")
   })
 
   test("compacts large pastes in the composer without changing the sent text", async () => {
@@ -1768,7 +1768,7 @@ describe("NanobotTui layout", () => {
       await setup.renderOnce()
       const compact = setup.captureCharFrame()
       expect(occurrences(compact, "Agent context")).toBe(0)
-      expect(occurrences(compact, "Ask nanobot anything")).toBe(1)
+      expect(occurrences(compact, "Ask Mikobot anything")).toBe(1)
 
       setup.mockInput.pressEscape()
       await waitUntil(() => !ui.contextPanel.visible)
@@ -1842,7 +1842,7 @@ describe("NanobotTui layout", () => {
     expect(frame).toContain("1/2 · src/first.ts · +2 -1")
     expect(frame).toContain("const newValue = 2")
     expect(frame).toContain("Diff truncated by the gateway")
-    expect(frame).not.toContain("Ask nanobot anything")
+    expect(frame).not.toContain("Ask Mikobot anything")
 
     setup.mockInput.pressArrow("right")
     await setup.flush()
@@ -1862,7 +1862,7 @@ describe("NanobotTui layout", () => {
     setup.mockInput.pressEscape()
     await waitUntil(() => !ui.diffViewer.visible)
     await setup.flush()
-    expect(setup.captureCharFrame()).toContain("Ask nanobot anything")
+    expect(setup.captureCharFrame()).toContain("Ask Mikobot anything")
   })
 
   test("loads earlier transcript pages in place when PageUp reaches the top", async () => {
@@ -1959,7 +1959,7 @@ describe("NanobotTui layout", () => {
       } else if (width >= 28 && height >= 9) {
         expect(occurrences(frame, "Enter now · Tab next")).toBe(1)
       }
-      expect(occurrences(frame, "nanobot  ·  test/model")).toBe(height >= 14 ? 1 : 0)
+      expect(occurrences(frame, "Mikobot  ·  test/model")).toBe(height >= 14 ? 1 : 0)
     }
   })
 
@@ -2169,7 +2169,7 @@ describe("NanobotTui layout", () => {
     await setup.renderOnce()
 
     const composerLine = setup.captureCharFrame().split("\n")
-      .find((line) => line.includes("Ask nanobot anything")) || ""
+      .find((line) => line.includes("Ask Mikobot anything")) || ""
     expect(composerLine).toContain("│")
     expect(composerLine).not.toContain("┌")
     expect(composerLine).not.toContain("┐")
@@ -2193,7 +2193,7 @@ describe("NanobotTui layout", () => {
     const frame = setup.captureCharFrame()
     const userLine = frame.split("\n").find((line) => line.includes("User question")) || ""
     const agentLine = frame.split("\n").find((line) => line.includes("Agent **answer**")) || ""
-    const headerLine = frame.split("\n").find((line) => line.includes(">_  nanobot")) || ""
+    const headerLine = frame.split("\n").find((line) => line.includes(">_  Mikobot")) || ""
     const headerBorder = frame.split("\n").find((line) => line.includes("╭")) || ""
 
     expect(userLine).toContain("› User question")
@@ -2529,7 +2529,7 @@ describe("NanobotTui layout", () => {
     expect(status.plainText).not.toContain("pwd")
     app.accept({ event: "turn_end", chat_id: "chat" })
     await setup.flush()
-    expect(ui.composer.placeholder).toBe("Ask nanobot anything")
+    expect(ui.composer.placeholder).toBe("Ask Mikobot anything")
   })
 
   test("folds long tool traces without discarding their details", async () => {
@@ -2686,7 +2686,7 @@ describe("NanobotTui layout", () => {
     expect(state()).toBe(false)
     const restored = setup.captureCharFrame()
     expect(restored).not.toContain("stale partial response")
-    expect(occurrences(restored, ">_  nanobot")).toBe(1)
+    expect(occurrences(restored, ">_  Mikobot")).toBe(1)
     app.accept({
       event: "goal_status",
       chat_id: "chat",
@@ -2770,7 +2770,7 @@ describe("NanobotTui layout", () => {
       attempt: 9,
       elapsedMs: 3_800,
     })
-    expect(ui.status.plainText).toBe("Nanobot unavailable · restart nanobot")
+    expect(ui.status.plainText).toBe("Mikobot unavailable · restart nanobot")
     expect(ui.status.plainText).not.toContain("gateway")
     expect(ui.status.plainText).not.toContain("127.0.0.1")
     expect(ui.status.plainText).not.toContain("HTTP")
@@ -3121,7 +3121,7 @@ describe("NanobotTui with a Herdr pane title reporter", () => {
     })
     await setup.flush()
     const activeFrame = setup.captureCharFrame()
-    expect(activeFrame).toContain(">_  nanobot")
+    expect(activeFrame).toContain(">_  Mikobot")
     expect(activeFrame).toContain("test/model")
     expect(occurrences(activeFrame, "› Ship the Herdr integration")).toBe(1)
     expect(occurrences(activeFrame, "app.ts")).toBe(1)

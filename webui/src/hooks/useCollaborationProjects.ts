@@ -5,21 +5,26 @@ import {
   consumeCollaborationPairingChallenge,
   createCollaborationPairingChallenge,
   createCollaborationProject,
+  createCollaborationTask,
+  joinCollaborationProjectApp,
+  leaveCollaborationProjectApp,
   deleteCollaborationAssignment,
   deleteCollaborationProject,
   fetchCollaboration,
   fetchCollaborationProject,
+  deleteCollaborationTask,
   removeCollaborationProjectMember,
   updateCollaborationAssignment,
+  updateCollaborationTask,
   updateCollaborationDefaults,
   updateCollaborationProject,
 } from "@/lib/api";
 import type {
   CollaborationCapabilities,
   CollaborationPayload,
-  CollaborationProjectMember,
   CollaborationProjectPayload,
   CollaborationProjectRole,
+  CollaborationTaskStatus,
 } from "@/lib/types";
 import { useClient } from "@/providers/ClientProvider";
 
@@ -65,13 +70,6 @@ export function useCollaborationProjects() {
     } finally {
       if (detailRequestRef.current === request) setDetailLoading(false);
     }
-  }, [getToken]);
-
-  const loadProjectMembers = useCallback(async (
-    nextProjectId: string,
-  ): Promise<CollaborationProjectMember[]> => {
-    const next = await fetchCollaborationProject(getToken(), nextProjectId);
-    return next.members;
   }, [getToken]);
 
   useEffect(() => {
@@ -162,6 +160,16 @@ export function useCollaborationProjects() {
     await loadSummary(id);
   }, [client, loadSummary, requireProject, run]);
 
+  const updateProjectDescription = useCallback(async (description: string) => {
+    const id = requireProject();
+    await run(
+      "project:description",
+      () => updateCollaborationProject(client, id, { description }),
+      id,
+    );
+    await loadSummary(id);
+  }, [client, loadSummary, requireProject, run]);
+
   const removeProject = useCallback(async () => {
     const id = requireProject();
     setBusyKey("project:delete");
@@ -199,6 +207,38 @@ export function useCollaborationProjects() {
       removeCollaborationProjectMember(client, id, memberUserId)
     ), id);
   }, [client, requireProject, run]);
+
+  const joinProjectApp = useCallback((name: string, revision?: string | null) => {
+    const id = requireProject();
+    return run(`project:app:join:${name}`, () => (
+      joinCollaborationProjectApp(client, id, name, revision ?? null)
+    ), id);
+  }, [client, requireProject, run]);
+
+  const leaveProjectApp = useCallback((name: string) => {
+    const id = requireProject();
+    return run(`project:app:leave:${name}`, () => (
+      leaveCollaborationProjectApp(client, id, name)
+    ), id);
+  }, [client, requireProject, run]);
+
+  const createTask = useCallback((title: string, detail = "") => {
+    const id = requireProject();
+    return run("task:create", () => (
+      createCollaborationTask(client, id, { title, detail })
+    ), id);
+  }, [client, requireProject, run]);
+
+  const updateTask = useCallback((
+    taskId: string,
+    values: { title?: string; detail?: string; status?: CollaborationTaskStatus },
+  ) => run(`task:update:${taskId}`, () => (
+    updateCollaborationTask(client, taskId, values)
+  )), [client, run]);
+
+  const deleteTask = useCallback((taskId: string) => (
+    run(`task:delete:${taskId}`, () => deleteCollaborationTask(client, taskId))
+  ), [client, run]);
 
   const beginPairing = useCallback(async (values: {
     channelType: string;
@@ -267,11 +307,25 @@ export function useCollaborationProjects() {
   }, [client, loadSummary, projectId, run]);
 
   const selectProject = useCallback((nextProjectId: string) => {
+    // Inspecting a project must not re-home the chats this user starts; only
+    // setActiveProject grants that. Browsing stays side-effect free.
     setDetail(null);
     setProjectId(nextProjectId);
-    void updateCollaborationDefaults(client, { projectId: nextProjectId })
-      .catch((reason) => setError(errorMessage(reason)));
-  }, [client]);
+  }, []);
+
+  const setActiveProject = useCallback(async (nextProjectId: string) => {
+    setBusyKey("user:defaults");
+    setError(null);
+    try {
+      await updateCollaborationDefaults(client, { projectId: nextProjectId });
+      await loadSummary(nextProjectId);
+    } catch (reason) {
+      setError(errorMessage(reason));
+      throw reason;
+    } finally {
+      setBusyKey(null);
+    }
+  }, [client, loadSummary]);
 
   return {
     summary,
@@ -285,13 +339,19 @@ export function useCollaborationProjects() {
     error,
     setError,
     selectProject,
+    setActiveProject,
     reload: loadSummary,
     refreshDetail,
-    loadProjectMembers,
     createProject,
     renameProject,
+    updateProjectDescription,
     removeProject,
     saveCapabilities,
+    joinProjectApp,
+    leaveProjectApp,
+    createTask,
+    updateTask,
+    deleteTask,
     addProjectMember,
     removeProjectMember,
     beginPairing,

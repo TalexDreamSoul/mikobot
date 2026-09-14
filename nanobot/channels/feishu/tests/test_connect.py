@@ -119,7 +119,7 @@ async def test_feishu_connect_completion_keeps_server_authorized_target_and_mode
     assert save_calls == [
         {
             "instance_id": expected_instance,
-            "name": f"nanobot {expected_instance}",
+            "name": f"Mikobot {expected_instance}",
             "mode": mode,
         }
     ]

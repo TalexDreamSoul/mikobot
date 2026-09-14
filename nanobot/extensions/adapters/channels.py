@@ -65,6 +65,26 @@ def _encode(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _instance_public_label(config: object) -> str:
+    """Return the label one instance's own configuration gives it, if any.
+
+    A channel names its instances the same way its settings surface does —
+    Feishu persists the live app name as ``displayName`` — so reading the same
+    keys keeps the project surfaces and the channel settings page showing one
+    name instead of an opaque instance id. The canonical instance slug stays in
+    the component's ``name`` field, so nothing that identifies an instance
+    depends on this label.
+    """
+    if not isinstance(config, Mapping):
+        return ""
+    values = cast(Mapping[str, object], config)
+    for key in ("displayName", "display_name", "name"):
+        value = values.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 # Keyed per process, not per adapter: every registry built in one process agrees on a
 # revision, while the key never leaves the process. An unkeyed digest would be an offline
 # oracle, because instances written outside `channel_configure_instance` carry no
@@ -637,7 +657,10 @@ class ChannelExtensionAdapter:
                     package_id=package_id,
                     kind=ExtensionComponentKind.CHANNEL,
                     name=instance_name,
-                    display_name=safe_extension_label(raw_instance_id, fallback=instance_name),
+                    display_name=safe_extension_label(
+                        _instance_public_label(instance.config) or raw_instance_id,
+                        fallback=instance_name,
+                    ),
                     capabilities=capabilities,
                     execution=ExtensionExecution.IN_PROCESS,
                     lifecycle=lifecycle,
