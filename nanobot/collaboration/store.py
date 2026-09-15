@@ -1554,6 +1554,7 @@ def _migrate_to_current_shape(root: Mapping[str, object]) -> dict[str, object]:
         migrated["projects"] = {
             project_id: {
                 **record,
+                "isBuiltin": record.get("isBuiltin", False),
                 "appGrants": record.get("appGrants", {}),
                 "description": record.get("description", ""),
             }
