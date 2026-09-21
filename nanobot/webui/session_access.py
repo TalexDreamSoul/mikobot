@@ -144,12 +144,22 @@ class WebuiSessionAccess:
         limit: int,
         *,
         exclude_session_key: str | None = None,
+        can_access: Callable[[str], bool] | None = None,
     ) -> list[SessionMatch]:
+        """Rank title and message matches.
+
+        ``can_access`` is applied to every candidate key before any per-session read,
+        so unauthorized sessions are never read or returned.
+        """
         needle = query.casefold()
         rows: list[dict[str, Any]] = []
         for row in list_webui_sessions(self._sessions):
             key = row.get("key")
-            if isinstance(key, str) and key != exclude_session_key:
+            if (
+                isinstance(key, str)
+                and key != exclude_session_key
+                and (can_access is None or can_access(key))
+            ):
                 rows.append(row)
         ranked: list[tuple[int, SessionMatch]] = []
         remaining: list[dict[str, Any]] = []

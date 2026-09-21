@@ -61,12 +61,14 @@ class _SessionTool(Tool):
         self._access = WebuiSessionAccess(sessions)
 
     def _allowed(self, source_key: str | None, target_key: str) -> bool:
-        source = self._sessions.peek(source_key) if source_key else None
-        target = self._sessions.peek(target_key)
+        # Metadata only: `peek` would parse the target's whole JSONL document,
+        # pulling a foreign transcript into memory to decide whether it may be read.
+        source_meta = self._sessions.cached_metadata(source_key) if source_key else None
+        target_meta = self._sessions.cached_metadata(target_key)
         return session_access_allowed(
-            source.metadata if source is not None else None,
+            source_meta,
             source_key,
-            target.metadata if target is not None else None,
+            target_meta,
             target_key,
         )
 
@@ -121,11 +123,16 @@ class SearchSessionsTool(_SessionTool):
         if not query:
             return ToolResult.error("Error: search query must not be empty")
         current_key = current_request_session_key()
+
+        def can_access(session_key: str) -> bool:
+            return self._allowed(current_key, session_key)
+
         matches = await asyncio.to_thread(
             self._access.search,
             query,
             _SEARCH_LIMIT,
             exclude_session_key=current_key,
+            can_access=can_access,
         )
         needle = query.casefold()
         result = {
@@ -149,7 +156,6 @@ class SearchSessionsTool(_SessionTool):
                     ],
                 }
                 for match in matches
-                if self._allowed(current_key, match["session_key"])
             ],
         }
         return json.dumps(result, ensure_ascii=False)

@@ -1829,6 +1829,26 @@ class SessionManager:
         """Return a cached session without creating or loading one from disk."""
         return self._cached(key)
 
+    def cached_metadata(self, key: str) -> dict[str, Any] | None:
+        """Return a session's metadata without ever loading its transcript.
+
+        Authorization checks need metadata only. Resolving them through ``peek``
+        parses the whole JSONL document, which pulls a foreign session's messages
+        into memory just to decide whether they may be read. This returns the
+        resident session's metadata when it is cached (so an in-flight turn's own
+        unflushed stamps still win) and otherwise the metadata-only store read.
+        """
+        session = self.get_cached(key)
+        if session is not None:
+            return dict(session.metadata)
+        payload = self.read_session_metadata(key)
+        if payload is None:
+            return None
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        return cast(dict[str, Any], metadata)
+
     def peek(self, key: str) -> Session | None:
         """Return the persisted session for *key*, without creating or caching one.
 

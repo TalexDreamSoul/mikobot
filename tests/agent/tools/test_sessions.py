@@ -14,7 +14,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.session_messages import ListSessionsTool
 from nanobot.agent.tools.sessions import ReadSessionTool, SearchSessionsTool
 from nanobot.runtime_context import RuntimeContextBlock, append_runtime_context
-from nanobot.session.manager import SessionManager
+from nanobot.session.manager import JsonlSessionStore, SessionManager
 from nanobot.session.privacy import (
     SESSION_ACCESS_KIND_METADATA_KEY,
     SESSION_ACCESS_PROJECT_METADATA_KEY,
@@ -192,6 +192,176 @@ async def test_search_sessions_ranks_titles_before_message_matches(tmp_path, mon
     assert [row["session_key"] for row in rows] == ["websocket:title", "websocket:body"]
     assert rows[0]["session_ref"] == "#session/websocket%3Atitle"
     assert rows[1]["excerpts"][0]["content"] == "The pricing model is BYOK."
+
+
+@pytest.mark.asyncio
+async def test_search_sessions_never_reads_unauthorized_matches(tmp_path, monkeypatch):
+    """Regression: the access gate runs before any message body is read.
+
+    The caller's predicate must retire a session before ``search`` ranks it or
+    reads its transcript; filtering the result afterwards still read history the
+    caller may not see.
+    """
+    webui_dir = tmp_path / "webui"
+    monkeypatch.setattr("nanobot.webui.transcript.get_webui_dir", lambda: webui_dir)
+    monkeypatch.setattr("nanobot.webui.session_list_index.get_webui_dir", lambda: webui_dir)
+    manager = SessionManager(tmp_path)
+    source = "telegram:alpha-chat"
+    allowed = "telegram:alpha-peer"
+    forbidden = "telegram:beta-peer"
+    _save_session(
+        manager,
+        source,
+        title="Alpha chat",
+        messages=[{"role": "user", "content": "unrelated"}],
+        metadata=_access_record(),
+    )
+    _save_session(
+        manager,
+        allowed,
+        title="Authorized notes",
+        messages=[{"role": "assistant", "content": "needle in the authorized session"}],
+        updated_at=datetime(2024, 1, 1),
+        metadata=_access_record(),
+    )
+    _save_session(
+        manager,
+        forbidden,
+        title="Other project notes",
+        messages=[{"role": "assistant", "content": "needle in the unauthorized session"}],
+        updated_at=datetime(2025, 1, 1),
+        metadata=_access_record(project_id="beta"),
+    )
+    read_keys: list[str] = []
+    read_session_file = SessionManager.read_session_file
+
+    def _record_read(sessions: SessionManager, key: str) -> object:
+        read_keys.append(key)
+        return read_session_file(sessions, key)
+
+    monkeypatch.setattr(SessionManager, "read_session_file", _record_read)
+
+    with request_context(RequestContext(
+        channel="telegram",
+        chat_id="alpha-chat",
+        session_key=source,
+    )):
+        result = _decode(await SearchSessionsTool(manager).execute(query="needle"))
+
+    assert [row["session_key"] for row in result["results"]] == [allowed]
+    assert read_keys == [allowed]
+    assert "needle in the unauthorized session" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_search_sessions_authorization_never_parses_a_foreign_transcript(
+    tmp_path, monkeypatch
+):
+    """Regression: the access gate resolves metadata, never the target's transcript.
+
+    ``_allowed`` used ``peek``, which parses a session's whole JSONL document. So
+    deciding that ``telegram:beta-peer`` may not be read pulled that foreign
+    transcript into memory. Resolving through the metadata-only read leaves the
+    store's full-document load untouched for every key the gate examines.
+    """
+    webui_dir = tmp_path / "webui"
+    monkeypatch.setattr("nanobot.webui.transcript.get_webui_dir", lambda: webui_dir)
+    monkeypatch.setattr("nanobot.webui.session_list_index.get_webui_dir", lambda: webui_dir)
+    writer = SessionManager(tmp_path)
+    source = "telegram:alpha-chat"
+    allowed = "telegram:alpha-peer"
+    forbidden = "telegram:beta-peer"
+    _save_session(
+        writer,
+        source,
+        title="Alpha chat",
+        messages=[{"role": "user", "content": "unrelated"}],
+        metadata=_access_record(),
+    )
+    _save_session(
+        writer,
+        allowed,
+        title="Authorized notes",
+        messages=[{"role": "assistant", "content": "needle in the authorized session"}],
+        updated_at=datetime(2024, 1, 1),
+        metadata=_access_record(),
+    )
+    _save_session(
+        writer,
+        forbidden,
+        title="Other project notes",
+        messages=[{"role": "assistant", "content": "needle in the unauthorized session"}],
+        updated_at=datetime(2025, 1, 1),
+        metadata=_access_record(project_id="beta"),
+    )
+    # A second manager over the same directory keeps every session cold, so a
+    # resident cache entry cannot hide the parse the gate is forbidden to do.
+    manager = SessionManager(tmp_path)
+    parsed_keys: list[str] = []
+    store_load = JsonlSessionStore.load
+
+    def _record_load(store: JsonlSessionStore, key: str) -> object:
+        parsed_keys.append(key)
+        return store_load(store, key)
+
+    monkeypatch.setattr(JsonlSessionStore, "load", _record_load)
+
+    with request_context(RequestContext(
+        channel="telegram",
+        chat_id="alpha-chat",
+        session_key=source,
+    )):
+        result = _decode(await SearchSessionsTool(manager).execute(query="needle"))
+
+    assert [row["session_key"] for row in result["results"]] == [allowed]
+    assert forbidden not in parsed_keys
+
+
+@pytest.mark.asyncio
+async def test_search_sessions_keeps_authorized_results_unchanged(tmp_path, monkeypatch):
+    """A permitted caller still gets the same session, ranking, and excerpt."""
+    webui_dir = tmp_path / "webui"
+    monkeypatch.setattr("nanobot.webui.transcript.get_webui_dir", lambda: webui_dir)
+    monkeypatch.setattr("nanobot.webui.session_list_index.get_webui_dir", lambda: webui_dir)
+    manager = SessionManager(tmp_path)
+    source = "telegram:alpha-chat"
+    peer = "telegram:alpha-peer"
+    _save_session(
+        manager,
+        source,
+        title="Alpha chat",
+        messages=[{"role": "user", "content": "unrelated"}],
+        metadata=_access_record(),
+    )
+    _save_session(
+        manager,
+        peer,
+        title="Recent notes",
+        messages=[{"role": "assistant", "content": "The pricing model is BYOK."}],
+        updated_at=datetime(2025, 1, 1),
+        metadata=_access_record(),
+    )
+
+    with request_context(RequestContext(
+        channel="telegram",
+        chat_id="alpha-chat",
+        session_key=source,
+    )):
+        result = _decode(await SearchSessionsTool(manager).execute(query="pricing"))
+
+    rows = result["results"]
+    assert isinstance(rows, list)
+    assert [row["session_key"] for row in rows] == [peer]
+    assert rows[0]["session_ref"] == "#session/telegram%3Aalpha-peer"
+    assert rows[0]["title"] == "Recent notes"
+    assert rows[0]["updated_at"] == datetime(2025, 1, 1).isoformat()
+    assert rows[0]["excerpts"] == [
+        {
+            "message_index": 0,
+            "role": "assistant",
+            "content": "The pricing model is BYOK.",
+        },
+    ]
 
 
 @pytest.mark.asyncio

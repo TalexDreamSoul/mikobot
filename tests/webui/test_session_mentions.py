@@ -28,6 +28,11 @@ def _handle(manager: SessionManager, key: str) -> SessionHandle:
     return handle
 
 
+def _webui_owner_can_access(session_key: str) -> bool:
+    """Stand-in for the sidebar's ownership predicate: this caller owns websocket sessions."""
+    return session_key.startswith("websocket:")
+
+
 def test_normalize_session_mentions_keeps_only_existing_distinct_other_targets(
     tmp_path,
     monkeypatch,
@@ -125,6 +130,7 @@ def test_session_mentions_do_not_isolate_workspaces(tmp_path, monkeypatch) -> No
         "Other",
         5,
         exclude_session_key="websocket:current",
+        can_access=_webui_owner_can_access,
     )] == ["websocket:other"]
     assert access.read(
         "websocket:other",
