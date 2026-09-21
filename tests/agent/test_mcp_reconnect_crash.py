@@ -15,6 +15,7 @@ import asyncio
 import multiprocessing
 import socket
 import time
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -41,7 +42,7 @@ def _free_port() -> int:
 def _run_mcp_server(port: int, ready_event: multiprocessing.Event) -> None:
     """FastMCP server target for ``multiprocessing.Process``.
 
-    The server exposes a single ``greet`` tool and terminates idle sessions
+    The server exposes a single ``greet`` tool and expires its active session
     after ``_IDLE_TIMEOUT_SECONDS``.
     """
     from mcp.server.fastmcp import FastMCP
@@ -49,9 +50,21 @@ def _run_mcp_server(port: int, ready_event: multiprocessing.Event) -> None:
 
     mcp = FastMCP("IdleTimeoutDemo", json_response=True, port=port)
 
+    async def expire_session_after_idle() -> None:
+        # Current MCP clients keep the server-initiated GET stream open, so
+        # the server idle timer treats the session as in flight.
+        # Expire the transport explicitly after the same interval so this
+        # fixture still exercises the protocol expired-session response.
+        await asyncio.sleep(_IDLE_TIMEOUT_SECONDS)
+        session_manager = mcp._session_manager
+        for session_id, transport in list(session_manager._server_instances.items()):
+            await session_manager._discard_session(session_id, transport)
+
     @mcp.tool()
     def greet(name: str = "World") -> str:  # noqa: N802
         """Greet someone."""
+        if name == "first":
+            asyncio.create_task(expire_session_after_idle())
         return f"Hello, {name}!"
 
     mcp._session_manager = StreamableHTTPSessionManager(
@@ -151,8 +164,12 @@ def allow_loopback_mcp_urls(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_mcp_reconnect_after_session_timeout(tmp_path, mcp_server_url):
-    """Reconnect to a real MCP server after its idle timeout kills the session."""
+async def test_mcp_reconnect_after_session_timeout(
+    tmp_path,
+    mcp_server_url,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Reconnect to a real MCP server after its session expires."""
     cfg = MCPServerConfig(
         type="streamableHttp",
         url=mcp_server_url,
@@ -170,11 +187,14 @@ async def test_mcp_reconnect_after_session_timeout(tmp_path, mcp_server_url):
     output = await asyncio.create_task(tool.execute(name="first"))
     assert "Hello, first" in output
 
-    # Wait for the server-side idle timeout to terminate the session.
+    # Wait for the fixture to terminate the server-side session.
     await asyncio.sleep(_IDLE_TIMEOUT_SECONDS + _IDLE_EXPIRY_GRACE_SECONDS)
 
+    track_reconnect = AsyncMock(wraps=mcp_module.connect_mcp_servers)
+    monkeypatch.setattr(mcp_module, "connect_mcp_servers", track_reconnect)
     output = await asyncio.create_task(tool.execute(name="second"))
     assert "Hello, second" in output
+    track_reconnect.assert_awaited_once()
 
     await asyncio.create_task(provider.aclose())
 
