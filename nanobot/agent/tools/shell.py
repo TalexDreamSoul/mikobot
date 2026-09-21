@@ -876,6 +876,23 @@ class ExecTool(Tool):
                     + _WORKSPACE_BOUNDARY_NOTE
                 )
 
+            # A named user's home (``~root``, ``~deploy/app``) is another
+            # account's directory and can never be the active workspace. Scan
+            # the raw text for it before tokenizing: some platforms cannot
+            # expand the token at all, and a failed expansion must not leave
+            # the guard resolving it as a cwd-relative path. ``~`` alone, ``~/``
+            # and the directory-stack forms ``~+``/``~-`` are handled per token
+            # below, where their meaning depends on the active cwd.
+            if re.search(
+                r"(?:^|[\s=\"'<(])~(?![/+-])[A-Za-z0-9_.@-]+(?:$|/|[\s\"'<>;)|&:])",
+                cmd,
+            ):
+                return ToolResult.error(
+                    "Error: Command blocked by safety guard "
+                    "(path outside working dir)"
+                    + _WORKSPACE_BOUNDARY_NOTE
+                )
+
             cwd_path = Path(cwd).resolve()
             resolved_workspace = (
                 Path(workspace_root).expanduser().resolve()
@@ -907,19 +924,7 @@ class ExecTool(Tool):
                             + _WORKSPACE_BOUNDARY_NOTE
                         )
                     else:
-                        expanded_path = Path(expanded).expanduser()
-                        # A named user's home that this platform cannot
-                        # resolve (``~root`` on Windows, where expanduser()
-                        # leaves the token untouched) is never inside the
-                        # workspace; resolving it against the cwd would let
-                        # the guard treat it as a local path.
-                        if str(expanded_path).startswith("~"):
-                            return ToolResult.error(
-                                "Error: Command blocked by safety guard "
-                                "(path outside working dir)"
-                                + _WORKSPACE_BOUNDARY_NOTE
-                            )
-                        p = expanded_path.resolve()
+                        p = Path(expanded).expanduser().resolve()
                     # Match against the un-resolved path first.  On Linux,
                     # /dev/stderr is a symlink to /proc/self/fd/2 and
                     # ``Path.resolve()`` would mask the device-file intent.
