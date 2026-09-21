@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -321,6 +322,35 @@ def _revert(fixture: _Store, report: Path) -> int:
     )
 
 
+def _dry_run(fixture: _Store, *, report: Path) -> int:
+    return backfill.main(
+        [
+            "--dry-run",
+            "--sessions-root",
+            str(fixture.sessions_root),
+            "--collaboration",
+            str(fixture.collaboration_path),
+            "--workspace",
+            str(fixture.workspace),
+            "--report",
+            str(report),
+        ]
+    )
+
+
+def _planned_keys(report: Path) -> list[str]:
+    """The session keys a run rewrites, in the order the store is scanned."""
+    return [entry["key"] for entry in json.loads(report.read_text())["entries"]]
+
+
+def _rewrite_first_line(path: Path, *, compact: bool) -> None:
+    """Rewrite a metadata line in another, semantically equal serialization."""
+    first, separator, rest = path.read_bytes().partition(b"\n")
+    record = json.loads(first)
+    line = json.dumps(record, ensure_ascii=False, separators=(",", ":") if compact else None)
+    path.write_bytes(line.encode("utf-8") + separator + rest)
+
+
 @pytest.mark.parametrize("mode_args", [[], ["--dry-run"]], ids=["default-mode", "explicit-flag"])
 def test_a_dry_run_reports_every_session_without_writing_anything(
     store: _Store, tmp_path: Path, mode_args: list[str]
@@ -361,6 +391,27 @@ def test_a_dry_run_reports_every_session_without_writing_anything(
         assert entry["record_before"] == previous[key]
 
 
+def test_a_dry_run_never_migrates_or_locks_the_live_collaboration_store(
+    store: _Store, tmp_path: Path
+) -> None:
+    """Resolution reads a copy: a read must not migrate or lock the live document."""
+    document = json.loads(store.collaboration_path.read_text())
+    document["schemaVersion"] = 12  # an older release's document migrates as soon as it loads
+    store.collaboration_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+    sibling = store.collaboration_path.parent
+    for entry in sibling.iterdir():
+        if entry.is_file() and entry != store.collaboration_path:
+            entry.unlink()
+    before = store.collaboration_path.read_bytes()
+
+    assert _dry_run(store, report=tmp_path / "dry-run.json") == 0
+
+    assert store.collaboration_path.read_bytes() == before
+    assert [path.name for path in sibling.iterdir() if path.is_file()] == [
+        store.collaboration_path.name
+    ]
+
+
 def test_apply_stamps_the_resolved_record_and_leaves_history_alone(
     store: _Store, tmp_path: Path
 ) -> None:
@@ -394,6 +445,59 @@ def test_apply_stamps_the_resolved_record_and_leaves_history_alone(
     assert entries[_STALE_KEY]["record_after"] == records[_STALE_KEY]
 
 
+def test_a_host_private_key_keeps_the_record_it_already_carries(store: _Store) -> None:
+    """Stripping a record here would hand the owner's namespace to a sealed session."""
+    path = store.session_path("heartbeat")
+    first, separator, rest = path.read_bytes().partition(b"\n")
+    record = json.loads(first)
+    record["metadata"].update({_KIND: "direct", _USER: store.alice_id, _PROJECT: store.project_id})
+    path.write_bytes(json.dumps(record, ensure_ascii=False).encode("utf-8") + separator + rest)
+    touched = store.files()["heartbeat"]
+
+    report = _applied(store)
+
+    assert store.files()["heartbeat"] == touched
+    assert "heartbeat" not in {entry["key"] for entry in json.loads(report.read_text())["entries"]}
+
+
+def test_a_threaded_route_never_adopts_the_sender_default_project(
+    store: _Store,
+) -> None:
+    """A group topic stays isolated even when its chat id is also a known identity."""
+    CollaborationStore(store_path=store.collaboration_path).bind_identity(
+        "feishu", "oc_room", store.alice_id
+    )
+
+    report = _applied(store)
+
+    entries = {entry["key"]: entry for entry in json.loads(report.read_text())["entries"]}
+    assert entries[_GROUP_THREAD_KEY]["record_after"] == {
+        _KIND: _ISOLATED,
+        _USER: store.alice_id,
+        _PROJECT: None,
+    }
+
+
+def test_a_retired_key_cannot_re_adopt_a_project_the_store_no_longer_authorizes(
+    store: _Store,
+) -> None:
+    """A project that has gone from the store must not come back as live provenance."""
+    path = store.session_path(store.retired_key)
+    first, separator, rest = path.read_bytes().partition(b"\n")
+    record = json.loads(first)
+    record["metadata"]["collaboration_project_id"] = "col_" + "0" * 32
+    path.write_bytes(json.dumps(record, ensure_ascii=False).encode("utf-8") + separator + rest)
+
+    report = _applied(store)
+
+    entries = {entry["key"]: entry for entry in json.loads(report.read_text())["entries"]}
+    assert entries[store.retired_key]["record_after"] == {
+        _KIND: "direct",
+        _USER: store.alice_id,
+        _PROJECT: None,
+    }
+
+
 def test_a_second_apply_is_a_no_op(store: _Store, tmp_path: Path) -> None:
     """Re-running the backfill re-marks nothing and rewrites no byte."""
     _applied(store)
@@ -406,6 +510,91 @@ def test_a_second_apply_is_a_no_op(store: _Store, tmp_path: Path) -> None:
     summary = json.loads(report_path.read_text())["summary"]
     assert summary["marked"] == 0
     assert summary["unchanged"] == len(store.expected_records())
+
+
+def test_apply_verifies_the_whole_plan_before_the_first_write(
+    store: _Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session that moves on after the scan aborts the run before anything is rewritten."""
+    plan = tmp_path / "dry-run.json"
+    assert _dry_run(store, report=plan) == 0
+    victim = _planned_keys(plan)[-1]
+    walk = backfill.iter_session_files
+
+    def stale(sessions_root: Path) -> Iterator[backfill.SessionFile]:
+        for session in walk(sessions_root):
+            if session.key == victim:
+                yield replace(session, rest=b"grew after the scan\n")
+            else:
+                yield session
+
+    monkeypatch.setattr(backfill, "iter_session_files", stale)
+    scanned = store.store_bytes()
+
+    with pytest.raises(SystemExit):
+        _apply(store, report=tmp_path / "apply.json", backup_root=store.backup_root)
+
+    assert store.store_bytes() == scanned
+
+
+def test_apply_leaves_a_revertable_report_when_a_write_fails(
+    store: _Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that dies mid-apply still records every byte a revert has to put back."""
+    report = tmp_path / "apply.json"
+    assert _dry_run(store, report=tmp_path / "dry-run.json") == 0
+    calls: list[str] = []
+    atomic = backfill._write_first_line_atomic
+
+    def flaky(session: backfill.SessionFile, new_line: bytes) -> None:
+        calls.append(session.key)
+        if len(calls) == 2:
+            raise OSError("no space left on device")
+        atomic(session, new_line)
+
+    monkeypatch.setattr(backfill, "_write_first_line_atomic", flaky)
+
+    with pytest.raises(OSError):
+        _apply(store, report=report, backup_root=store.backup_root)
+
+    assert len(calls) == 2
+    assert report.is_file()
+    assert _revert(store, report) == 0
+    assert store.files() == store.originals
+
+
+def test_a_collaboration_path_that_is_not_a_document_is_refused(store: _Store, tmp_path: Path) -> None:
+    """A mis-pointed store must fail loudly, not resolve every session as isolated."""
+    before = store.store_bytes()
+
+    with pytest.raises(SystemExit):
+        backfill.main(
+            [
+                "--apply",
+                "--sessions-root",
+                str(store.sessions_root),
+                "--collaboration",
+                str(store.collaboration_path.parent),
+                "--workspace",
+                str(store.workspace),
+                "--report",
+                str(tmp_path / "apply.json"),
+            ]
+        )
+
+    assert store.store_bytes() == before
+
+
+def test_apply_refuses_before_writing_when_the_report_cannot_be_written(
+    store: _Store, tmp_path: Path
+) -> None:
+    """The revert contract has to be on disk before any session byte moves."""
+    before = store.store_bytes()
+
+    with pytest.raises(SystemExit):
+        _apply(store, report=tmp_path / "missing" / "apply.json", backup_root=store.backup_root)
+
+    assert store.store_bytes() == before
 
 
 def test_apply_backs_up_the_session_and_collaboration_store(
@@ -471,6 +660,49 @@ def test_revert_refuses_when_a_session_moved_on(store: _Store) -> None:
         _revert(store, report)
 
     assert store.files() == moved_on
+
+
+def test_revert_refuses_a_report_written_for_another_store(store: _Store) -> None:
+    """A mistyped root that is still a string prefix of the real one must not revert it."""
+    report = _applied(store)
+    stamped = store.files()
+
+    with pytest.raises(SystemExit):
+        backfill.main(
+            [
+                "--revert",
+                "--report",
+                str(report),
+                "--sessions-root",
+                str(store.sessions_root.parent / "session"),
+            ]
+        )
+
+    assert store.files() == stamped
+
+
+def test_revert_refuses_a_metadata_line_that_moved_on(store: _Store) -> None:
+    """A metadata line rewritten by something else after the apply is not rolled over."""
+    report = _applied(store)
+    _rewrite_first_line(store.session_path(_DIRECT_KEY), compact=True)
+    moved = store.files()
+
+    with pytest.raises(SystemExit):
+        _revert(store, report)
+
+    assert store.files() == moved
+
+
+def test_revert_refuses_a_metadata_line_it_cannot_reproduce(store: _Store) -> None:
+    """A line the store would not serialise itself is left for the backup to restore."""
+    _rewrite_first_line(store.session_path(_STALE_KEY), compact=True)
+    report = _applied(store)
+    stamped = store.files()
+
+    with pytest.raises(SystemExit):
+        _revert(store, report)
+
+    assert store.files() == stamped
 
 
 @pytest.mark.parametrize("mode", ["--apply", "--revert"])
@@ -575,5 +807,45 @@ def test_verify_fails_the_deployment_check_on_a_false_expectation(
     _applied(store)
     expect = tmp_path / "expect.json"
     expect.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert matrix.main(["--sessions-root", str(store.sessions_root), "--expect", str(expect)]) == 1
+
+
+def test_verify_fails_when_the_store_holds_no_sessions(tmp_path: Path) -> None:
+    """A deny assertion must not pass just because the store is missing."""
+    expect = tmp_path / "expect.json"
+    expect.write_text(
+        json.dumps(
+            {"assertions": [{"source": _DIRECT_KEY, "target": _BOUND_KEY, "allowed": False}]}
+        ),
+        encoding="utf-8",
+    )
+
+    assert matrix.main(
+        ["--sessions-root", str(tmp_path / "no-sessions"), "--expect", str(expect)]
+    ) == 1
+
+
+def test_verify_fails_when_it_names_a_session_the_store_does_not_hold(
+    store: _Store, tmp_path: Path
+) -> None:
+    """An assertion about a session that is not there is not evidence of anything."""
+    _applied(store)
+    expect = tmp_path / "expect.json"
+    expect.write_text(
+        json.dumps(
+            {"assertions": [{"source": "telegram:oc_gone", "target": _DIRECT_KEY, "allowed": False}]}
+        ),
+        encoding="utf-8",
+    )
+
+    assert matrix.main(["--sessions-root", str(store.sessions_root), "--expect", str(expect)]) == 1
+
+
+def test_verify_fails_an_expectation_that_asserts_nothing(store: _Store, tmp_path: Path) -> None:
+    """A deployment check with nothing to check cannot report success."""
+    _applied(store)
+    expect = tmp_path / "expect.json"
+    expect.write_text(json.dumps({"assertions": [], "visible": []}), encoding="utf-8")
 
     assert matrix.main(["--sessions-root", str(store.sessions_root), "--expect", str(expect)]) == 1

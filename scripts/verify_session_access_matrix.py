@@ -8,7 +8,9 @@ shared `session_access_allowed` decision lets it read.
 Without `--expect` it prints a per-source visibility summary plus the full
 allow matrix as JSON. With `--expect` (a JSON file of `{"assertions": [{"source",
 "target", "allowed"}], "visible": [{"source", "count"}]}`) it fails when the
-decision disagrees, which is what a deployment check needs.
+decision disagrees, which is what a deployment check needs. A check that names a
+session this store does not hold, or that asserts nothing at all, also fails:
+otherwise a mistyped `--sessions-root` would pass every deny assertion.
 
 Usage:
     python -m scripts.verify_session_access_matrix --json-out /tmp/matrix.json
@@ -22,7 +24,7 @@ import json
 import sys
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from nanobot.session.keys import is_host_private_session_key
 from nanobot.session.privacy import session_access_allowed
@@ -56,12 +58,12 @@ def visible_targets(
 
 
 def iter_assertions(payload: dict[str, Any]) -> Iterator[tuple[str, str, bool]]:
-    for item in payload.get("assertions") or []:
+    for item in cast("list[dict[str, Any]]", payload.get("assertions") or []):
         yield str(item["source"]), str(item["target"]), bool(item["allowed"])
 
 
 def main(argv: Iterable[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--sessions-root", type=Path, default=Path.home() / ".nanobot" / "sessions")
     parser.add_argument("--expect", type=Path, default=None)
     parser.add_argument("--json-out", type=Path, default=None)
@@ -72,6 +74,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     channel_sources = [key for key in matrix if not is_host_private_session_key(key)]
 
     print(f"sessions: {len(metadata)} (channel sources: {len(channel_sources)})")
+    if not metadata:
+        print(f"warning: no sessions under {args.sessions_root}", file=sys.stderr)
     for key in channel_sources:
         targets = matrix[key]
         print(f"  {key[:64]:<64} sees {len(targets):>3}")
@@ -89,15 +93,25 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 0
 
     expected = json.loads(args.expect.read_text())
+    assertions = list(iter_assertions(expected))
+    visible = [
+        (str(item["source"]), int(item["count"]))
+        for item in cast("list[dict[str, Any]]", expected.get("visible") or [])
+    ]
     failures: list[str] = []
-    for source, target, allowed in iter_assertions(expected):
+    if not assertions and not visible:
+        failures.append(f"{args.expect} asserts nothing")
+    for source, target, allowed in assertions:
+        unknown = _unknown(failures, "source", source, metadata)
+        unknown |= _unknown(failures, "target", target, metadata)
         actual = target in matrix.get(source, [])
-        if actual is not allowed:
+        if not unknown and actual is not allowed:
             failures.append(
                 f"{source} -> {target}: expected allowed={allowed} got {actual}"
             )
-    for item in expected.get("visible") or []:
-        source, count = str(item["source"]), int(item["count"])
+    for source, count in visible:
+        if _unknown(failures, "source", source, metadata):
+            continue
         actual = len(matrix.get(source, []))
         if actual != count:
             failures.append(f"{source} visible count: expected {count} got {actual}")
@@ -107,6 +121,19 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 1
     print("assertions: OK")
     return 0
+
+
+def _unknown(
+    failures: list[str],
+    role: str,
+    key: str,
+    metadata: dict[str, dict[str, Any]],
+) -> bool:
+    """Record and report a session the check names but this store does not hold."""
+    if key in metadata:
+        return False
+    failures.append(f"{role} {key}: no such session in this store")
+    return True
 
 
 if __name__ == "__main__":

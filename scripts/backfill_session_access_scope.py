@@ -8,12 +8,20 @@ cross-session access. This operator tool resolves each persisted session's scope
 through the same collaboration store the gateway uses and writes the record.
 
 Host-private keys (`heartbeat`, `heartbeat:*`, `cron:*`, `dream:*`,
-`websocket:*`, `cli:*`) stay unmarked: that is how the decision recognizes the
-owner's own namespace. A session whose scope cannot be resolved is marked
-isolated, which the decision refuses in both directions.
+`websocket:*`, `cli:*`) are left exactly as they are: the tool never writes an
+access record there and never takes one away, because the decision reads a missing
+record in that namespace as the owner's own. A session whose scope cannot be
+resolved is marked isolated, which the decision refuses in both directions.
 
 Only the first JSONL line (session metadata) is rewritten; every later line is
-byte-identical and verified by hash. Run it with the gateway stopped.
+byte-identical and verified by hash. The whole plan is verified before the first
+write, each file is replaced atomically, and the report is written before any byte
+moves, so a failed or interrupted run always leaves a store that `--revert` can
+restore exactly. Run it with the gateway stopped.
+
+Scope resolution reads a private copy of the collaboration document: the store
+migrates a document whose `schemaVersion` trails this code and locks a file beside
+it, so a read must never point at the live document.
 
 Usage:
     python -m scripts.backfill_session_access_scope --dry-run --report /tmp/report.json
@@ -27,20 +35,26 @@ mutate a default store it was not pointed at.
 from __future__ import annotations
 
 import argparse
-import base64
+import errno
 import hashlib
 import json
+import os
+import secrets
 import shutil
+import stat
 import sys
-from collections.abc import Iterable, Iterator
+import tempfile
+from collections.abc import Generator, Iterable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from nanobot.collaboration.pairing import runtime_channel_key
-from nanobot.collaboration.store import CollaborationStore
+from nanobot.collaboration.store import CollaborationStore, CollaborationStoreError
 from nanobot.session.keys import is_host_private_session_key
+from nanobot.session.manager import JsonlSessionStore
 from nanobot.session.privacy import (
     SESSION_ACCESS_KIND_METADATA_KEY,
     SESSION_ACCESS_PROJECT_METADATA_KEY,
@@ -69,33 +83,20 @@ class SessionFile:
     rest: bytes
 
 
-def decode_session_key(stem: str) -> str | None:
-    """Decode a canonical base64url session filename stem back to its session key."""
-    try:
-        raw = base64.urlsafe_b64decode(stem + "=" * (-len(stem) % 4))
-    except (ValueError, TypeError):
-        return None
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-
-
 def iter_session_files(sessions_root: Path) -> Iterator[SessionFile]:
     """Yield every canonical session file under a sessions root, key-first."""
     for path in sorted(sessions_root.rglob("*.jsonl")):
-        key = decode_session_key(path.stem)
+        key = JsonlSessionStore.session_key_from_path(path)
         if key is None:
-            print(f"skip (undecodable filename): {path}", file=sys.stderr)
+            print(f"skip (not a canonical session filename): {path}", file=sys.stderr)
             continue
         payload = path.read_bytes()
-        first_line, _, rest = payload.partition(b"\n")
-        yield SessionFile(
-            path=path,
-            key=key,
-            first_line=first_line.decode("utf-8", errors="replace"),
-            rest=rest,
-        )
+        first_line_bytes, _, rest = payload.partition(b"\n")
+        try:
+            first_line = first_line_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SystemExit(f"{path}: the session metadata line is not valid UTF-8") from exc
+        yield SessionFile(path=path, key=key, first_line=first_line, rest=rest)
 
 
 def read_metadata(session: SessionFile) -> dict[str, Any]:
@@ -104,8 +105,10 @@ def read_metadata(session: SessionFile) -> dict[str, Any]:
         record = json.loads(session.first_line)
     except json.JSONDecodeError:
         return {}
-    metadata = record.get("metadata") if isinstance(record, dict) else None
-    return dict(metadata) if isinstance(metadata, dict) else {}
+    if not isinstance(record, dict):
+        return {}
+    metadata = cast("dict[str, Any]", record).get("metadata")
+    return dict(cast("dict[str, Any]", metadata)) if isinstance(metadata, dict) else {}
 
 
 def current_record(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -114,19 +117,22 @@ def current_record(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def assigned_channel_names(collaboration_path: Path) -> set[str]:
-    """Return the runtime channel names that carry an enabled channel assignment."""
+    """Return the runtime channel names that carry a channel assignment."""
     try:
-        state = json.loads(collaboration_path.read_text())
+        raw = json.loads(collaboration_path.read_text())
     except (OSError, json.JSONDecodeError):
         return set()
-    assignments = state.get("channelAssignments")
+    if not isinstance(raw, dict):
+        return set()
+    assignments = cast("dict[str, Any]", raw).get("channelAssignments")
     if not isinstance(assignments, dict):
         return set()
     names: set[str] = set()
-    for value in assignments.values():
+    for value in cast("dict[str, Any]", assignments).values():
         if not isinstance(value, dict):
             continue
-        channel_type, instance_id = value.get("channelType"), value.get("instanceId")
+        entry = cast("dict[str, Any]", value)
+        channel_type, instance_id = entry.get("channelType"), entry.get("instanceId")
         if isinstance(channel_type, str) and isinstance(instance_id, str):
             names.add(runtime_channel_key(channel_type, instance_id))
     return names
@@ -162,13 +168,10 @@ def resolve_record(
         }
     user_only = session_privacy_scope(session.key)
     if user_only is not None:
-        stored_project = metadata.get("collaboration_project_id")
         return {
             SESSION_ACCESS_KIND_METADATA_KEY: _BOUND if _stored_binding(metadata) else _DIRECT,
             SESSION_ACCESS_USER_METADATA_KEY: user_only,
-            SESSION_ACCESS_PROJECT_METADATA_KEY: (
-                stored_project if isinstance(stored_project, str) and stored_project else None
-            ),
+            SESSION_ACCESS_PROJECT_METADATA_KEY: _stored_project(store, user_only, metadata),
         }
     channel, chat, thread = split_route(session.key)
     if not chat:
@@ -182,7 +185,12 @@ def resolve_record(
     route_channel = stored_channel if isinstance(stored_channel, str) and stored_channel else channel
     route_chat = stored_chat if isinstance(stored_chat, str) and stored_chat else chat
     message_metadata: dict[str, Any] = {"thread_id": thread} if thread else {}
-    if not thread and route_channel in assigned:
+    if thread:
+        # A threaded route is a group topic: the product never resolves one as a
+        # direct chat, and the member behind an old topic is not recoverable from
+        # its key — so the sender cannot stand in for the conversation.
+        message_metadata["chat_type"] = "group"
+    elif route_channel in assigned:
         message_metadata["chat_type"] = "p2p"
     scope = store.resolve_scope(
         route_channel,
@@ -206,6 +214,28 @@ def resolve_record(
 
 def _stored_binding(metadata: dict[str, Any]) -> bool:
     return isinstance(metadata.get("collaboration_binding_id"), str)
+
+
+def _stored_project(
+    store: CollaborationStore,
+    user_id: str,
+    metadata: dict[str, Any],
+) -> str | None:
+    """Return the metadata project while the store still authorizes *user_id* for it.
+
+    A retired user-only key names no project of its own, so its project authority
+    has to be re-confirmed by the collaboration store instead of re-adopted from
+    whatever the session remembered: a project that has since been deleted or that
+    the member no longer belongs to must not come back with the record.
+    """
+    candidate = metadata.get("collaboration_project_id")
+    if not isinstance(candidate, str) or not candidate:
+        return None
+    try:
+        project = store.get_project(user_id, candidate)
+    except CollaborationStoreError:
+        return None
+    return project.id if project is not None else None
 
 
 def render_first_line(session: SessionFile, metadata: dict[str, Any]) -> bytes:
@@ -242,6 +272,27 @@ def backup_store(sessions_root: Path, collaboration_path: Path, backup_root: Pat
     return target
 
 
+@contextmanager
+def _resolution_store(
+    collaboration_path: Path,
+) -> Generator[tuple[CollaborationStore, Path], None, None]:
+    """Resolve scopes against a private copy of the collaboration document.
+
+    ``CollaborationStore`` rewrites a document whose ``schemaVersion`` trails this
+    code (keeping a ``.v<schema>.bak`` beside it) and locks a file next to the store,
+    so resolving against the live path would let a read-only pass modify production
+    collaboration state. The copy carries the same bytes, so every decision is
+    identical.
+    """
+    with tempfile.TemporaryDirectory(prefix="nanobot-session-access-") as directory:
+        copy = Path(directory) / collaboration_path.name
+        if collaboration_path.is_file():
+            shutil.copy2(collaboration_path, copy)
+        elif collaboration_path.exists():
+            raise SystemExit(f"{collaboration_path} is not a file")
+        yield CollaborationStore(store_path=copy), copy
+
+
 def run(
     *,
     sessions_root: Path,
@@ -251,44 +302,50 @@ def run(
     report_path: Path | None,
     backup_root: Path | None,
 ) -> int:
-    store = CollaborationStore(store_path=collaboration_path)
-    assigned = assigned_channel_names(collaboration_path)
+    summary = {"total": 0, "marked": 0, "unchanged": 0, "host_private": 0, "isolated": 0}
     entries: list[dict[str, Any]] = []
-    summary = {"total": 0, "marked": 0, "unchanged": 0, "host_private": 0, "isolated": 0, "unresolved": 0}
+    planned: list[tuple[SessionFile, bytes]] = []
     if mode == "apply" and backup_root is not None:
-        target = backup_store(sessions_root, collaboration_path, backup_root)
-        print(f"backup: {target}")
-    planned: list[tuple[SessionFile, dict[str, Any] | None, bytes]] = []
-    for session in iter_session_files(sessions_root):
-        summary["total"] += 1
-        metadata = read_metadata(session)
-        record = resolve_record(session, metadata, store, workspace, assigned)
-        before = current_record(metadata)
-        after = dict(record) if record is not None else {}
-        if record is None:
-            summary["host_private"] += 1
-        elif record[SESSION_ACCESS_KIND_METADATA_KEY] == _ISOLATED:
-            summary["isolated"] += 1
-        if before == after:
-            summary["unchanged"] += 1
-            continue
-        summary["marked"] += 1
-        new_line = apply_entry(session, record)
-        entries.append({
-            "key": session.key,
-            "file": str(session.path),
-            "record_before": before,
-            "record_after": after,
-            "first_line_sha256_before": _sha(session.first_line.encode("utf-8")),
-            "rest_sha256": _sha(session.rest),
-        })
-        planned.append((session, record, new_line))
-    if mode == "apply":
-        for session, _record, new_line in planned:
-            _write_first_line(session, new_line)
-            entry = next(item for item in entries if item["file"] == str(session.path))
-            entry["first_line_sha256_after"] = _sha(new_line)
-    report = {
+        print(f"backup: {backup_store(sessions_root, collaboration_path, backup_root)}")
+    with _resolution_store(collaboration_path) as (store, resolution_copy):
+        assigned = assigned_channel_names(resolution_copy)
+        for session in iter_session_files(sessions_root):
+            summary["total"] += 1
+            metadata = read_metadata(session)
+            before = current_record(metadata)
+            record = resolve_record(session, metadata, store, workspace, assigned)
+            if record is None:
+                # A host-private key keeps exactly what it carries. Removing a record
+                # here would hand the owner's namespace reach to a `websocket:`/`cli:`
+                # session that the decision had sealed, so the tool never writes one
+                # and never takes one away.
+                summary["host_private"] += 1
+                if before:
+                    print(
+                        f"note: {session.path} is host-private and keeps its record",
+                        file=sys.stderr,
+                    )
+                summary["unchanged"] += 1
+                continue
+            after = dict(record)
+            if record[SESSION_ACCESS_KIND_METADATA_KEY] == _ISOLATED:
+                summary["isolated"] += 1
+            if before == after:
+                summary["unchanged"] += 1
+                continue
+            summary["marked"] += 1
+            new_line = apply_entry(session, record)
+            entries.append({
+                "key": session.key,
+                "file": str(session.path),
+                "record_before": before,
+                "record_after": after,
+                "first_line_sha256_before": _sha(session.first_line.encode("utf-8")),
+                "first_line_sha256_after": _sha(new_line),
+                "rest_sha256": _sha(session.rest),
+            })
+            planned.append((session, new_line))
+    report: dict[str, Any] = {
         "generated_at": datetime.now(UTC).isoformat(),
         "mode": mode,
         "sessions_root": str(sessions_root),
@@ -296,8 +353,16 @@ def run(
         "summary": summary,
         "entries": entries,
     }
+    if mode == "apply":
+        _verify_planned(planned)
+        # The report is the revert contract: it has to be on disk before the first
+        # byte moves, so an interrupted run still leaves an exact record to restore.
+        _write_report(report_path, report)
+        for session, new_line in planned:
+            _write_first_line_atomic(session, new_line)
+        report["applied"] = len(planned)
+    _write_report(report_path, report)
     if report_path is not None:
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
         print(f"report: {report_path}")
     print(
         "mode={mode} total={total} changed={marked} unchanged={unchanged} "
@@ -306,41 +371,124 @@ def run(
     return 0
 
 
-def revert(
-    *,
-    report_path: Path,
-    sessions_root: Path,
-    summary_holder: dict[str, int] | None = None,
-) -> int:
+def revert(*, report_path: Path, sessions_root: Path) -> int:
+    """Restore the bytes one apply recorded, refusing a store that moved on."""
     report = json.loads(report_path.read_text())
-    reverted = 0
+    recorded_root = report.get("sessions_root")
+    if not isinstance(recorded_root, str):
+        raise SystemExit(f"refusing to revert: {report_path} records no sessions root")
+    if Path(recorded_root).resolve() != sessions_root.resolve():
+        raise SystemExit(
+            f"refusing to revert: {report_path} was written for {recorded_root}, not {sessions_root}"
+        )
+    restored: list[tuple[Path, bytes]] = []
+    root = sessions_root.resolve()
     for entry in report.get("entries", []):
         path = Path(entry["file"])
-        if not path.is_file() or not str(path).startswith(str(sessions_root)):
-            continue
-        key = entry.get("key")
-        if not isinstance(key, str):
-            continue
-        payload = path.read_bytes()
-        first_line, _, rest = payload.partition(b"\n")
-        if _sha(rest) != entry.get("rest_sha256"):
-            raise SystemExit(f"refusing to revert {path}: trailing content changed")
-        session = SessionFile(path=path, key=key, first_line=first_line.decode("utf-8"), rest=rest)
-        record = entry.get("record_before") or None
-        path.write_bytes(apply_entry(session, record) + b"\n" + rest)
-        reverted += 1
-    if summary_holder is not None:
-        summary_holder["reverted"] = reverted
-    print(f"mode=revert reverted={reverted}")
+        if not path.resolve().is_relative_to(root):
+            raise SystemExit(f"refusing to revert {path}: outside {sessions_root}")
+        if not path.is_file():
+            raise SystemExit(f"refusing to revert {path}: the session file is gone")
+        first, separator, rest = path.read_bytes().partition(b"\n")
+        _require_recorded_state(entry, path, first, rest)
+        session = SessionFile(
+            path=path,
+            key=entry["key"],
+            first_line=first.decode("utf-8"),
+            rest=rest,
+        )
+        new_line = apply_entry(session, entry.get("record_before") or None)
+        if _sha(new_line) != entry.get("first_line_sha256_before"):
+            raise SystemExit(
+                f"refusing to revert {path}: the recorded metadata line cannot be "
+                "reproduced byte-for-byte; restore this session from the backup instead"
+            )
+        restored.append((path, new_line + separator + rest))
+    for path, payload in restored:
+        _replace_atomically(path, payload)
+    if not restored:
+        print("mode=revert reverted=0 (the report records no change)")
+    else:
+        print(f"mode=revert reverted={len(restored)}")
     return 0
 
 
-def _write_first_line(session: SessionFile, new_line: bytes) -> None:
-    payload = session.path.read_bytes()
-    _first, separator, rest = payload.partition(b"\n")
-    if _sha(rest) != _sha(session.rest):
-        raise SystemExit(f"refusing to write {session.path}: trailing content changed")
-    session.path.write_bytes(new_line + separator + rest)
+def _require_recorded_state(
+    entry: dict[str, Any],
+    path: Path,
+    first: bytes,
+    rest: bytes,
+) -> None:
+    """Refuse a session that is neither the recorded before- nor after-state."""
+    if _sha(rest) != entry.get("rest_sha256"):
+        raise SystemExit(f"refusing to revert {path}: the conversation grew after the report")
+    recorded = {entry.get("first_line_sha256_before"), entry.get("first_line_sha256_after")}
+    if _sha(first) not in recorded:
+        raise SystemExit(f"refusing to revert {path}: the metadata line changed after the report")
+
+
+def _scan_payload(session: SessionFile) -> tuple[bytes, bytes]:
+    """Return the on-disk separator and tail, refusing a session that moved on."""
+    first, separator, rest = session.path.read_bytes().partition(b"\n")
+    if rest != session.rest or first != session.first_line.encode("utf-8"):
+        raise SystemExit(
+            f"refusing to write {session.path}: the session changed after the scan"
+        )
+    return separator, rest
+
+
+def _verify_planned(planned: list[tuple[SessionFile, bytes]]) -> None:
+    """Re-check every planned session before the first write, so a plan never half-lands."""
+    for session, _new_line in planned:
+        _scan_payload(session)
+
+
+def _write_first_line_atomic(session: SessionFile, new_line: bytes) -> None:
+    separator, rest = _scan_payload(session)
+    _replace_atomically(session.path, new_line + separator + rest)
+
+
+def _replace_atomically(path: Path, payload: bytes) -> None:
+    """Replace *path*'s bytes in one step, keeping its mode.
+
+    A plain in-place write truncates first, so a full disk or a killed process can
+    leave a session file cut short. The temporary file is fsynced before the
+    rename, so the target is either the old bytes or the new ones.
+    """
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        with open(temporary, "xb") as handle:
+            os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _fsync_directory(path: Path) -> None:
+    with suppress(PermissionError, NotImplementedError):
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            try:
+                os.fsync(descriptor)
+            except OSError as exc:
+                if exc.errno != errno.EINVAL:
+                    raise
+        finally:
+            os.close(descriptor)
+
+
+def _write_report(report_path: Path | None, report: dict[str, Any]) -> None:
+    """Write the report, refusing the run when the report cannot be recorded."""
+    if report_path is None:
+        return
+    try:
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    except OSError as exc:
+        raise SystemExit(f"refusing to continue: cannot write {report_path}: {exc}") from exc
 
 
 def _sha(payload: bytes) -> str:
@@ -349,7 +497,7 @@ def _sha(payload: bytes) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     home = Path.home() / ".nanobot"
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--sessions-root", type=Path, default=None)
     parser.add_argument("--collaboration", type=Path, default=None)
     parser.add_argument("--workspace", default=None)
@@ -375,6 +523,10 @@ def _resolve_paths(args: argparse.Namespace) -> None:
         args.collaboration = args.home / "collaboration" / "collaboration.json"
     if args.workspace is None:
         args.workspace = str(args.home / "workspace")
+    # Absolute and tilde-free: the report records these paths verbatim, and
+    # `--revert` addresses the same files through them from any working directory.
+    args.sessions_root = Path(args.sessions_root).expanduser().absolute()
+    args.collaboration = Path(args.collaboration).expanduser().absolute()
 
 
 def main(argv: Iterable[str] | None = None) -> int:
