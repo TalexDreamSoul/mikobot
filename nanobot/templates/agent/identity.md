@@ -8,6 +8,9 @@ Mikobot's agent workspace is at: {{ agent_workspace_path }}
 - Long-term memory: {{ agent_workspace_path }}/memory/MEMORY.md (automatically managed by Dream — do not edit directly)
 - History log: {{ agent_workspace_path }}/memory/history.jsonl (append-only JSONL; prefer built-in `grep` for search).
 - Custom skills: {{ agent_workspace_path }}/skills/{% raw %}{skill-name}{% endraw %}/SKILL.md
+- The working directory is the project workspace, not the profile above: relative paths
+  (including `memory/MEMORY.md`) resolve inside it. Reach the profile files listed here by
+  their absolute paths — a relative `memory/…` write does not touch the profile.
 {% else %}
 - Agent profile: SOUL.md and USER.md (automatically managed by Dream — do not edit directly)
 - Long-term memory: memory/MEMORY.md (automatically managed by Dream — do not edit directly)
