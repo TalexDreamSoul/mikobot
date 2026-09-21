@@ -8,6 +8,7 @@ For this fork's tagged releases, see [GitHub Releases](https://github.com/TalexD
 
 
 ## Highlights
+- **2026-09-21** Released **v0.7.2** — persisted session history is now scoped per turn instead of per deployment, so a channel or chat session can only read the sessions its own project owns. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.7.2) for details.
 - **2026-09-15** Released **v0.7.1** — schema-v9 collaboration stores with multiple projects now migrate safely, preserving non-default projects while adding current project fields. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.7.1) for details.
 
 - **2026-09-14** Released **v0.7.0** — project introductions and prompt context, read-only project materials, shared project knowledge, complete project workspace navigation, and the Mikobot product copy sweep. Please see [release notes](https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.7.0) for details.
