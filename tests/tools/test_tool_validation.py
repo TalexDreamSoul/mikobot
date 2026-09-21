@@ -1,3 +1,4 @@
+import pathlib
 import shlex
 import subprocess
 import sys
@@ -401,6 +402,66 @@ def test_exec_guard_blocks_equals_named_user_home_path(tmp_path) -> None:
     assert error.startswith(
         "Error: Command blocked by safety guard (path outside working dir)"
     )
+
+
+@pytest.fixture
+def workspace_with_unresolvable_user_home(tmp_path, monkeypatch):
+    """Emulate Windows, where ``Path.expanduser`` cannot resolve ``~name``.
+
+    Windows leaves an unknown named-user token untouched. The command also runs
+    with the process cwd inside the workspace, as the real exec runtime does --
+    that is what made the pre-fix cwd-relative resolution of the leftover token
+    land inside the workspace and pass the boundary check.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    original_expanduser = pathlib.Path.expanduser
+
+    def fake_expanduser(self: pathlib.Path) -> pathlib.Path:
+        text = str(self)
+        if text == "~":
+            return fake_home
+        if text.startswith("~/"):
+            return fake_home / text[2:]
+        if text.startswith("~"):
+            return self
+        return original_expanduser(self)
+
+    monkeypatch.setattr(pathlib.Path, "expanduser", fake_expanduser)
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat ~root/.bashrc",
+        "cat --config=~root/.bashrc",
+        "cat <~root/.bashrc",
+    ],
+)
+def test_exec_guard_blocks_unresolvable_named_user_home(
+    workspace_with_unresolvable_user_home, command: str
+) -> None:
+    error = ExecTool(restrict_to_workspace=True)._guard_command(
+        command, str(workspace_with_unresolvable_user_home)
+    )
+    assert error is not None
+    assert error.startswith(
+        "Error: Command blocked by safety guard (path outside working dir)"
+    )
+
+
+def test_exec_guard_allows_current_directory_tilde_with_unresolvable_home(
+    workspace_with_unresolvable_user_home,
+) -> None:
+    tool = ExecTool(restrict_to_workspace=True)
+    guard = tool._guard_command(
+        "cat ~+/file.txt", str(workspace_with_unresolvable_user_home)
+    )
+    assert guard is None
 
 
 def test_exec_guard_blocks_quoted_home_path_outside_workspace(tmp_path) -> None:

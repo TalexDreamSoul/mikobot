@@ -907,7 +907,19 @@ class ExecTool(Tool):
                             + _WORKSPACE_BOUNDARY_NOTE
                         )
                     else:
-                        p = Path(expanded).expanduser().resolve()
+                        expanded_path = Path(expanded).expanduser()
+                        # A named user's home that this platform cannot
+                        # resolve (``~root`` on Windows, where expanduser()
+                        # leaves the token untouched) is never inside the
+                        # workspace; resolving it against the cwd would let
+                        # the guard treat it as a local path.
+                        if str(expanded_path).startswith("~"):
+                            return ToolResult.error(
+                                "Error: Command blocked by safety guard "
+                                "(path outside working dir)"
+                                + _WORKSPACE_BOUNDARY_NOTE
+                            )
+                        p = expanded_path.resolve()
                     # Match against the un-resolved path first.  On Linux,
                     # /dev/stderr is a symlink to /proc/self/fd/2 and
                     # ``Path.resolve()`` would mask the device-file intent.
