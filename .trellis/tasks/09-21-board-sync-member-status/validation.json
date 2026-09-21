@@ -1,0 +1,56 @@
+{
+ "task": ".trellis/tasks/09-21-board-sync-member-status",
+ "released": {
+  "version": "0.7.4",
+  "tag": "v0.7.4 -> 1b85c615",
+  "commits": [
+   "6ac60cb6 fix(sessions): authorize cross-session reads from metadata, before any read",
+   "8fa0cbdc feat(self): show a member turn its own channel status",
+   "d81dbc11 docs(prompt): say where a relative path lands in a scoped turn",
+   "5f57d07f chore: release 0.7.4",
+   "1b85c615 chore(trellis): record the board-sync and member-status task"
+  ],
+  "github_release": "https://github.com/TalexDreamSoul/mikobot/releases/tag/v0.7.4 (Latest)",
+  "ci": "run 35603181019 - ALL 8 jobs success (docker, webui, Terminal UI x2, Python 3.11, Python Windows 3.14, Python 3.14 + coverage)",
+  "local_gates": "ruff clean; basedpyright strict 0 errors on every changed file; full local suite 7214 passed with the single known environmental failure (port 8899 held by the user's asr-arena server; the same test also fails on a pristine HEAD export)"
+ },
+ "deployed": {
+  "host": "GG",
+  "window": "2026-09-21 13:13:50Z -> 13:14:27Z (37 s), backup /root/miko-guard/pre-v0.7.4-20260921_211342 (520M)",
+  "service": "active, NRestarts=0, health {status: ok, ready: true, websocket: running}",
+  "wheel": "sha256 79bcd0746a82a5a29d11bc9541180e7d496e4f7f12179f69d5b884921bf4a1c6; deployed site-packages sha256 matches the wheel for sessions.py, session/manager.py, runtime_control.py, templates/agent/identity.md",
+  "public": "https://nanobot.tagzxia.com/ 200 in 76 ms; known-good snapshot taken for 0.7.4"
+ },
+ "verification": {
+  "session_access_matrix_deployed": [
+   "DENY  member feishu DM -> weixin:o9cq800LLcqRyeZsSjdtO9vSpqMI@im.wechat",
+   "DENY  member feishu DM -> unified:default",
+   "ALLOW host cli session -> weixin:...",
+   "ALLOW host cli session -> unified:default"
+  ],
+  "my_channels_deployed": {
+   "member": "channels: {'feishu.assistant-2bf084': {'enabled': True, 'running': False, 'state': 'failed', 'instance_id': 'assistant-2bf084'}} - no other instance, no owner/error/secret fields",
+   "member_refusals": "check subagents refused; set channels refused",
+   "host": "channels: {feishu.assistant-2bf084, weixin.wechat-cea490, telegram}"
+  },
+  "boards": "Tuff total=52 (todo=34, doing=18), QingQi=0, Local=0 - backfill idempotent (second run created=0 skipped=52)",
+  "task_paths": [
+   "weixin DM scope + create_task without project_id -> lands on Tuff (conversation's project), probe deleted",
+   "isolated group scope + explicit project_id -> creates on QingQi, probe deleted"
+  ],
+  "regression_guards": [
+   "tests/agent/tools/test_sessions.py::test_search_sessions_never_reads_unauthorized_matches fails pre-fix at `assert read_keys == [allowed]` (observed ['telegram:beta-peer', 'telegram:alpha-peer'])",
+   "tests/agent/tools/test_sessions.py::test_search_sessions_authorization_never_parses_a_foreign_transcript fails pre-fix at `assert forbidden not in parsed_keys` while the result assertion still passes",
+   "channel-status guards: removing the key fails 7 assertions; reverting only the member gate fails exactly the two member tests"
+  ]
+ },
+ "host_side_configuration": {
+  "persona": "AGENTS.md and SOUL.md now require the board dual-write (create_task/update_task) and give the QingQi project id for group assignments; backup at /root/miko-guard/persona-backup-20260921_204550",
+  "group": "Handoff oc_07e9b450... was dissolved and the bot is no longer in it (API 230002). New group MikoGroup oc_852926c7a63135fc7f1d2986ffcb14d7 - Miko (app cli_aa1e62..., ou_900edf75...) IS a member (chat info code=0, user_count=2); history read needs im:message.group_msg scope (230027), which does not affect @ event delivery. Groups stay unbound (binding would route non-member senders to route_denied)."
+ },
+ "open_followups": [
+  "Confirm @ in MikoGroup reaches the bot (needs one @ from the owner).",
+  "Weixin channel instance is still disconnected (code=-14); the owner re-scans the QR in the channel settings.",
+  "Group assignments from a non-member sender (e.g. a colleague) cannot write to the project board until that sender is bound as an identity and added as a project member."
+ ]
+}
