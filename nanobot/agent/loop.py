@@ -106,7 +106,13 @@ from nanobot.session.model_selection import (
     SESSION_MODEL_PRESET_METADATA_KEY,
     model_preset_from_metadata,
 )
-from nanobot.session.privacy import session_privacy_scope, session_project_scope
+from nanobot.session.privacy import (
+    SESSION_ACCESS_KIND_METADATA_KEY,
+    SESSION_ACCESS_PROJECT_METADATA_KEY,
+    SESSION_ACCESS_USER_METADATA_KEY,
+    session_privacy_scope,
+    session_project_scope,
+)
 from nanobot.session.recovery import (
     PENDING_FOLLOWUP_ID_KEY,
     RECOVERY_INBOUND_METADATA_KEY,
@@ -1046,20 +1052,25 @@ class AgentLoop:
         scope: ConversationScope,
     ) -> None:
         """Persist the authority an internal successor must revalidate."""
+        if not scope.is_local_owner and scope.user_id is not None and scope.project_id is not None:
+            existing_user = session.metadata.get(COLLABORATION_USER_METADATA_KEY)
+            existing_project = session.metadata.get(COLLABORATION_PROJECT_METADATA_KEY)
+            if (
+                existing_user is not None
+                and existing_user != scope.user_id
+                or existing_project is not None
+                and existing_project != scope.project_id
+            ):
+                raise CollaborationPermissionError("session ownership cannot change projects")
+        session.metadata[SESSION_ACCESS_KIND_METADATA_KEY] = scope.kind.value
+        session.metadata[SESSION_ACCESS_USER_METADATA_KEY] = scope.user_id
+        session.metadata[SESSION_ACCESS_PROJECT_METADATA_KEY] = scope.project_id
         if scope.is_local_owner:
+            # The host's own turns keep the host's prompt, memory, media and Dream
+            # routing; only the access record above follows their assignment.
             return
         if scope.user_id is None or scope.project_id is None:
-            session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = None
             return
-        existing_user = session.metadata.get(COLLABORATION_USER_METADATA_KEY)
-        existing_project = session.metadata.get(COLLABORATION_PROJECT_METADATA_KEY)
-        if (
-            existing_user is not None
-            and existing_user != scope.user_id
-            or existing_project is not None
-            and existing_project != scope.project_id
-        ):
-            raise CollaborationPermissionError("session ownership cannot change projects")
         metadata = dict(msg.metadata or {})
         session.metadata[COLLABORATION_USER_METADATA_KEY] = scope.user_id
         session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = scope.project_id
@@ -2350,7 +2361,7 @@ class AgentLoop:
                 and not collaboration_scope.is_local_owner
             ):
                 ctx.attributes["authorized_attachment_paths"] = tuple(msg.media or ())
-                self._persist_conversation_scope(session, msg, collaboration_scope)
+            self._persist_conversation_scope(session, msg, collaboration_scope)
             ctx.tools = self._tools_for_conversation_scope(ctx.tools, collaboration_scope)
             self.sessions.save(session)
         elif self._is_runtime_sender(msg) and self.session_has_collaboration_provenance(session.metadata):

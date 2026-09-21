@@ -25,7 +25,7 @@ from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.runtime_context import RuntimeContextBlock
 from nanobot.session.manager import SessionManager
-from nanobot.session.privacy import same_privacy_scope, same_project_owner
+from nanobot.session.privacy import session_access_allowed
 from nanobot.session.session_handles import (
     SessionHandleResolver,
     normalize_session_handle,
@@ -102,15 +102,12 @@ class ListSessionsTool(Tool):
     def _allowed(self, source_key: str, target_key: str) -> bool:
         source = self._sessions.peek(source_key)
         target = self._sessions.peek(target_key)
-        source_metadata = source.metadata if source is not None else None
-        target_metadata = target.metadata if target is not None else None
-        if same_project_owner(source_metadata, target_metadata):
-            return True
-        scoped = any(
-            metadata is not None and any(key.startswith("collaboration_") for key in metadata)
-            for metadata in (source_metadata, target_metadata)
+        return session_access_allowed(
+            source.metadata if source is not None else None,
+            source_key,
+            target.metadata if target is not None else None,
+            target_key,
         )
-        return not scoped and same_privacy_scope(source_key, target_key)
 
 
 @tool_parameters(
@@ -246,15 +243,11 @@ class SendSessionMessageTool(Tool):
             raise SessionMessageError("source session was not found")
         source_session = self._sessions.peek(source.session_key)
         target_session = self._sessions.peek(target.session_key)
-        source_metadata = source_session.metadata if source_session is not None else None
-        target_metadata = target_session.metadata if target_session is not None else None
-        scoped = any(
-            metadata is not None and any(key.startswith("collaboration_") for key in metadata)
-            for metadata in (source_metadata, target_metadata)
-        )
-        if not (
-            same_project_owner(source_metadata, target_metadata)
-            or (not scoped and same_privacy_scope(source.session_key, target.session_key))
+        if not session_access_allowed(
+            source_session.metadata if source_session is not None else None,
+            source.session_key,
+            target_session.metadata if target_session is not None else None,
+            target.session_key,
         ):
             raise SessionMessageError("cross-project session messaging is not authorized")
         envelope: SessionMessageEnvelope = {

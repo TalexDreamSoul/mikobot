@@ -13,6 +13,11 @@ from nanobot.agent.tools.session_messages import (
 )
 from nanobot.bus.queue import MessageBus
 from nanobot.session.manager import SessionManager
+from nanobot.session.privacy import (
+    SESSION_ACCESS_KIND_METADATA_KEY,
+    SESSION_ACCESS_PROJECT_METADATA_KEY,
+    SESSION_ACCESS_USER_METADATA_KEY,
+)
 from nanobot.session.session_handles import SessionHandle, SessionHandleResolver
 from nanobot.session.session_messages import (
     SESSION_MESSAGE_METADATA_KEY,
@@ -23,6 +28,15 @@ from nanobot.session.session_messages import (
 def _persist(manager: SessionManager, *keys: str) -> None:
     for key in keys:
         manager.save(manager.get_or_create(key))
+
+
+def _mark(manager: SessionManager, key: str, *, user_id: str, project_id: str) -> None:
+    """Persist the access record the agent loop writes for one resolved member turn."""
+    session = manager.get_or_create(key)
+    session.metadata[SESSION_ACCESS_KIND_METADATA_KEY] = "direct"
+    session.metadata[SESSION_ACCESS_USER_METADATA_KEY] = user_id
+    session.metadata[SESSION_ACCESS_PROJECT_METADATA_KEY] = project_id
+    manager.save(session)
 
 
 def _handle(manager: SessionManager, key: str) -> SessionHandle:
@@ -156,6 +170,51 @@ async def test_member_session_message_rejects_other_privacy_scopes_without_deliv
         )
 
     assert rejected.is_error
+    assert bus.inbound.empty()
+
+
+@pytest.mark.asyncio
+async def test_send_follows_the_recorded_access_scope(tmp_path: Path) -> None:
+    """Sending obeys the recorded project of both sessions, not just their channel keys."""
+    sessions = SessionManager(tmp_path)
+    source = "telegram:alpha-chat"
+    same_project = "telegram:alpha-peer"
+    other_project = "telegram:beta-peer"
+    host_history = "websocket:host-history"
+    _mark(sessions, source, user_id="member", project_id="alpha")
+    _mark(sessions, same_project, user_id="member", project_id="alpha")
+    _mark(sessions, other_project, user_id="member", project_id="beta")
+    _persist(sessions, host_history)
+    bus = MessageBus()
+    tool = SendSessionMessageTool(sessions=sessions, bus=bus)
+
+    with request_context(RequestContext(
+        channel="telegram",
+        chat_id="alpha-chat",
+        session_key=source,
+    )):
+        delivered = await tool.execute(
+            to=f"@{_handle(sessions, same_project).name}",
+            content="review the project artifact",
+            expect_reply=False,
+        )
+        other_project_refusal = await tool.execute(
+            to=f"@{_handle(sessions, other_project).name}",
+            content="do not deliver this",
+            expect_reply=False,
+        )
+        host_refusal = await tool.execute(
+            to=f"@{_handle(sessions, host_history).name}",
+            content="do not deliver this either",
+            expect_reply=False,
+        )
+
+    assert delivered == f"Sent to @{_handle(sessions, same_project).name}."
+    assert other_project_refusal.is_error
+    assert host_refusal.is_error
+    inbound = await bus.consume_inbound()
+    assert inbound.session_key_override == same_project
+    assert inbound.content == "review the project artifact"
     assert bus.inbound.empty()
 
 

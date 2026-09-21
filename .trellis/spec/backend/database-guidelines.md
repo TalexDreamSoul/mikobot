@@ -339,6 +339,20 @@ External member keys are `user:<uid>:project:<pid>:<route>` or
 WebUI `websocket:<id>` keys stay stable and pin owner/project metadata. Isolation
 without a project carries no Skill/MCP grants and cannot ingest into host memory.
 
+Cross-session reads and messages (`read_session`, `search_sessions`, `list_sessions`,
+`send_session_message`) all resolve one decision,
+`session_access_allowed(source_metadata, source_key, target_metadata, target_key)` in
+`nanobot/session/privacy.py`. Alongside member capability provenance, the agent loop
+stamps a separate per-turn access record (`session_access_kind`,
+`session_access_user_id`, `session_access_project_id`) on every turn that resolved a
+scope — including the host owner's channel turns and isolated group turns — so access
+follows the route without changing host prompt, memory, media, or Dream routing.
+Evaluation order: an unmarked host-private key (`heartbeat`, `heartbeat:*`, `cron:*`,
+`dream:*`, `websocket:*`, `cli:*`) may read any session; isolation vetoes both
+directions; identical member owner+project (or identical project-qualified keys)
+allows; every other pair, including any pair with one side unmarked, is denied. A
+user-only key never bridges into a project-qualified scope.
+
 Member automatic memory/profile/journals live at
 `<config-dir>/users/<uid>/projects/<pid>/`, outside shared project files. Only exact
 own profile/memory files are writable through member tools; journals are read-only.

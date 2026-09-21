@@ -7,6 +7,23 @@ from typing import Any
 
 UNIFIED_SESSION_KEY = "unified:default"
 LAST_CHANNEL_METADATA_KEY = "last_channel"
+HOST_PRIVATE_SESSION_KEY = "heartbeat"
+_HOST_PRIVATE_SESSION_PREFIXES = ("heartbeat:", "cron:", "dream:", "websocket:", "cli:")
+
+
+def is_host_private_session_key(session_key: str | None) -> bool:
+    """Return whether a session key belongs to the host's own private namespace.
+
+    These sessions carry no external channel conversation: the owner drives them
+    directly (WebUI, CLI) or the runtime drives them for the owner (heartbeat,
+    cron, dream). They may read each other and are never reachable from a
+    channel session.
+    """
+    if not session_key:
+        return False
+    return session_key == HOST_PRIVATE_SESSION_KEY or session_key.startswith(
+        _HOST_PRIVATE_SESSION_PREFIXES
+    )
 
 
 def session_key_for_channel(channel: str, chat_id: str, *, unified_session: bool = False) -> str:

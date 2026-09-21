@@ -1,10 +1,30 @@
-"""Privacy-scope helpers for durable session identifiers."""
+"""Privacy-scope helpers for durable session identifiers.
+
+Two different questions live here:
+
+* **Key-encoded scope** — a session key may name the member and project it
+  belongs to (``user:<uid>:project:<pid>:…``), which survives any metadata loss.
+* **Cross-session access** — whether one persisted session may read or message
+  another. Members answer with their capability provenance; host turns answer
+  with an access record written per turn, so recording access never changes the
+  host's prompt, memory, media, or Dream routing.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from nanobot.session.keys import is_host_private_session_key
+
+SESSION_ACCESS_KIND_METADATA_KEY = "session_access_kind"
+SESSION_ACCESS_USER_METADATA_KEY = "session_access_user_id"
+SESSION_ACCESS_PROJECT_METADATA_KEY = "session_access_project_id"
+
+_ISOLATED_SCOPE_KIND = "isolated"
+_COLLABORATION_USER_METADATA_KEY = "collaboration_user_id"
+_COLLABORATION_PROJECT_METADATA_KEY = "collaboration_project_id"
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +33,15 @@ class SessionPrivacyScope:
 
     user_id: str
     project_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionAccessScope:
+    """Where one persisted session sits for cross-session access decisions."""
+
+    user_id: str | None
+    project_id: str | None
+    isolated: bool = False
 
 
 def session_privacy_scope(session_key: str | None) -> str | None:
@@ -59,21 +88,17 @@ def session_project_scope(session_key: str | None) -> SessionPrivacyScope | None
 
 
 def same_privacy_scope(source_session_key: str | None, target_session_key: str | None) -> bool:
-    """Allow cross-session access only inside a stable privacy namespace.
+    """Allow cross-session access only between equally project-qualified keys.
 
-    Legacy unscoped host sessions retain their historical compatibility. Current
-    collaboration sessions require both the same user and project; user-only
-    legacy member keys never bridge into the project-qualified namespace.
+    A key that names no project carries no cross-session authority, so a
+    project-qualified key never matches an unscoped one.
     """
     source = session_project_scope(source_session_key)
     target = session_project_scope(target_session_key)
-    if source is not None or target is not None:
-        return source is not None and source == target
-    source_user = session_privacy_scope(source_session_key)
-    target_user = session_privacy_scope(target_session_key)
-    if source_user is None and target_user is None:
-        return True
-    return source_user is not None and source_user == target_user
+    if source is None or target is None:
+        return False
+    return source == target
+
 
 def same_project_owner(
     source_metadata: Mapping[str, Any] | None,
@@ -82,10 +107,10 @@ def same_project_owner(
     """Require explicit, identical collaboration owner and project metadata."""
     if not isinstance(source_metadata, Mapping) or not isinstance(target_metadata, Mapping):
         return False
-    source_user = source_metadata.get("collaboration_user_id")
-    source_project = source_metadata.get("collaboration_project_id")
-    target_user = target_metadata.get("collaboration_user_id")
-    target_project = target_metadata.get("collaboration_project_id")
+    source_user = source_metadata.get(_COLLABORATION_USER_METADATA_KEY)
+    source_project = source_metadata.get(_COLLABORATION_PROJECT_METADATA_KEY)
+    target_user = target_metadata.get(_COLLABORATION_USER_METADATA_KEY)
+    target_project = target_metadata.get(_COLLABORATION_PROJECT_METADATA_KEY)
     return (
         isinstance(source_user, str)
         and bool(source_user)
@@ -94,6 +119,73 @@ def same_project_owner(
         and source_user == target_user
         and source_project == target_project
     )
+
+
+def session_access_scope(
+    metadata: Mapping[str, Any] | None,
+    session_key: str | None,
+) -> SessionAccessScope | None:
+    """Return the access scope recorded for one session, or ``None`` when unmarked.
+
+    The per-turn record wins; member capability provenance and a
+    project-qualified key are the remaining, older ways to mark a session.
+    """
+    if isinstance(metadata, Mapping):
+        kind = metadata.get(SESSION_ACCESS_KIND_METADATA_KEY)
+        if isinstance(kind, str) and kind:
+            return SessionAccessScope(
+                _optional_id(metadata.get(SESSION_ACCESS_USER_METADATA_KEY)),
+                _optional_id(metadata.get(SESSION_ACCESS_PROJECT_METADATA_KEY)),
+                isolated=kind == _ISOLATED_SCOPE_KIND,
+            )
+        owner = _optional_id(metadata.get(_COLLABORATION_USER_METADATA_KEY))
+        if owner is not None:
+            return SessionAccessScope(owner, _optional_id(metadata.get(_COLLABORATION_PROJECT_METADATA_KEY)))
+    project_scope = session_project_scope(session_key)
+    if project_scope is not None:
+        return SessionAccessScope(project_scope.user_id, project_scope.project_id)
+    user_id = session_privacy_scope(session_key)
+    if user_id is not None:
+        return SessionAccessScope(user_id, None)
+    return None
+
+
+def session_access_allowed(
+    source_metadata: Mapping[str, Any] | None,
+    source_key: str | None,
+    target_metadata: Mapping[str, Any] | None,
+    target_key: str | None,
+) -> bool:
+    """Decide whether one persisted session may read or message another.
+
+    A member reaches their own sessions, including the project they run in and
+    their retired user-only keys. A channel session reaches only its own
+    project. An isolated (unrouted group) session reaches nothing and nothing
+    reaches it, not even through the member compatibility path. The owner's own
+    host-private turns may read any session this instance persists, and no other
+    session may reach them: an access record that is missing never stands in for
+    one that is present.
+    """
+    source = session_access_scope(source_metadata, source_key)
+    if source is None:
+        return is_host_private_session_key(source_key)
+    target = session_access_scope(target_metadata, target_key)
+    if source.isolated or (target is not None and target.isolated):
+        # Isolation outranks the compatibility path: a conversation that reached
+        # no project stays sealed even while its file still carries older member
+        # provenance from before it lost its binding.
+        return False
+    if same_project_owner(source_metadata, target_metadata):
+        return True
+    if target is None:
+        return False
+    if source.user_id is None or source.user_id != target.user_id:
+        return False
+    return source.project_id == target.project_id
+
+
+def _optional_id(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def user_scoped_session_key(session_key: str) -> str | None:

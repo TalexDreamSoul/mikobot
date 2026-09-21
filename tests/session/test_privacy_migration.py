@@ -6,6 +6,7 @@ from nanobot.session.manager import SessionManager
 from nanobot.session.privacy import (
     SessionPrivacyScope,
     same_privacy_scope,
+    session_access_allowed,
     session_project_scope,
     user_scoped_session_key,
 )
@@ -44,7 +45,7 @@ def test_session_store_renames_vault_scoped_sessions_on_startup(tmp_path: Path) 
 
 
 def test_project_scoped_sessions_require_the_same_member_and_project() -> None:
-    """Cross-session access remains inside one member's current project, while host history stays legacy-compatible."""
+    """Cross-session access stays inside one member's project; host pairing moves to the access gate."""
     alpha_chat = "user:alice:project:alpha:telegram:one"
     alpha_unified = "unified:alice:project:alpha"
     beta_chat = "user:alice:project:beta:telegram:one"
@@ -56,7 +57,8 @@ def test_project_scoped_sessions_require_the_same_member_and_project() -> None:
     assert not same_privacy_scope(alpha_chat, beta_chat)
     assert not same_privacy_scope(alpha_chat, bob_alpha)
     assert not same_privacy_scope(alpha_chat, "user:alice:telegram:one")
-    assert same_privacy_scope("websocket:host-chat", "cli:host-chat")
+    assert not same_privacy_scope("websocket:host-chat", "cli:host-chat")
+    assert session_access_allowed(None, "websocket:host-chat", None, "cli:host-chat")
 
 
 def test_existing_user_scoped_history_is_not_adopted_by_a_project_scope(tmp_path: Path) -> None:

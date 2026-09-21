@@ -11,11 +11,31 @@ import pytest
 from nanobot.agent.tools.context import RequestContext, request_context
 from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.tools.session_messages import ListSessionsTool
 from nanobot.agent.tools.sessions import ReadSessionTool, SearchSessionsTool
 from nanobot.runtime_context import RuntimeContextBlock, append_runtime_context
 from nanobot.session.manager import SessionManager
+from nanobot.session.privacy import (
+    SESSION_ACCESS_KIND_METADATA_KEY,
+    SESSION_ACCESS_PROJECT_METADATA_KEY,
+    SESSION_ACCESS_USER_METADATA_KEY,
+)
 from nanobot.session.session_handles import SessionHandleResolver
 from nanobot.webui.transcript import append_transcript_object
+
+
+def _access_record(
+    *,
+    kind: str = "direct",
+    user_id: str | None = "member",
+    project_id: str | None = "alpha",
+) -> dict[str, object]:
+    """Build the per-turn access record the agent loop writes onto a session."""
+    return {
+        SESSION_ACCESS_KIND_METADATA_KEY: kind,
+        SESSION_ACCESS_USER_METADATA_KEY: user_id,
+        SESSION_ACCESS_PROJECT_METADATA_KEY: project_id,
+    }
 
 
 def _save_session(
@@ -25,10 +45,12 @@ def _save_session(
     title: str,
     messages: list[dict[str, object]],
     updated_at: datetime | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> None:
     session = manager.get_or_create(key)
     session.metadata["title"] = title
     session.metadata["title_user_edited"] = True
+    session.metadata.update(metadata or {})
     session.messages = messages
     if updated_at is not None:
         session.updated_at = updated_at
@@ -287,7 +309,12 @@ async def test_read_session_reports_invalid_requests(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_session_tools_read_persisted_sessions_from_any_channel(tmp_path):
+async def test_channel_session_cannot_search_or_read_other_channels(tmp_path):
+    """Regression: an unmarked channel session cannot reach any other channel's history.
+
+    GG 0.7.1 leaked ``weixin:...@im.wechat`` history (message_index 1389) into a Feishu
+    session because the old gate treated "both sessions unscoped" as permission.
+    """
     manager = SessionManager(tmp_path)
     _save_session(
         manager,
@@ -307,25 +334,94 @@ async def test_session_tools_read_persisted_sessions_from_any_channel(tmp_path):
         title="Current",
         messages=[{"role": "user", "content": "needle"}],
     )
-    tools = SearchSessionsTool(manager), ReadSessionTool(manager)
+    search_tool, read_tool = SearchSessionsTool(manager), ReadSessionTool(manager)
 
     with request_context(RequestContext(
         channel="telegram",
         chat_id="external",
         session_key="telegram:external",
     )):
-        search = _decode(await tools[0].execute(query="needle"))
-        websocket_read = _decode(await tools[1].execute(session_key="websocket:visible"))
-        slack_read = _decode(await tools[1].execute(session_key="slack:history"))
-        current_read = await tools[1].execute(session_key="telegram:external")
+        search = _decode(await search_tool.execute(query="needle"))
+        websocket_read = await read_tool.execute(session_key="websocket:visible")
+        slack_read = await read_tool.execute(session_key="slack:history")
 
-    assert {row["session_key"] for row in search["results"]} == {
-        "websocket:visible",
-        "slack:history",
-    }
-    assert websocket_read["session_key"] == "websocket:visible"
-    assert slack_read["session_key"] == "slack:history"
-    assert current_read.is_error and "session not found" in str(current_read)
+    assert search["results"] == []
+    assert "not authorized" in str(websocket_read)
+    assert "not authorized" in str(slack_read)
+    assert "needle" not in str(websocket_read)
+    assert "needle" not in str(slack_read)
+
+
+@pytest.mark.asyncio
+async def test_marked_session_pair_is_refused_by_listing_search_and_read(tmp_path):
+    """One marked cross-project pair: list, search and read all agree it is unreachable."""
+    manager = SessionManager(tmp_path)
+    source = "telegram:alpha-chat"
+    same_project = "telegram:alpha-peer"
+    other_project = "telegram:beta-peer"
+    other_member = "telegram:bob-peer"
+    host_history = "websocket:host-history"
+    _save_session(
+        manager,
+        source,
+        title="Alpha chat",
+        messages=[{"role": "user", "content": "PRIVACY_MARKER"}],
+        metadata=_access_record(),
+    )
+    _save_session(
+        manager,
+        same_project,
+        title="Alpha peer",
+        messages=[{"role": "user", "content": "PRIVACY_MARKER shared"}],
+        metadata=_access_record(),
+    )
+    _save_session(
+        manager,
+        other_project,
+        title="Beta peer",
+        messages=[{"role": "user", "content": "BETA_SECRET_MARKER"}],
+        metadata=_access_record(project_id="beta"),
+    )
+    _save_session(
+        manager,
+        other_member,
+        title="Bob peer",
+        messages=[{"role": "user", "content": "BOB_SECRET_MARKER"}],
+        metadata=_access_record(user_id="bob"),
+    )
+    _save_session(
+        manager,
+        host_history,
+        title="Host history",
+        messages=[{"role": "user", "content": "HOST_SECRET_MARKER"}],
+    )
+    same_project_handle = SessionHandleResolver(manager).handle_for_session(same_project)
+    assert same_project_handle is not None
+
+    with request_context(RequestContext(
+        channel="telegram",
+        chat_id="alpha-chat",
+        session_key=source,
+    )):
+        listed = json.loads(await ListSessionsTool(manager).execute())
+        discovered = _decode(await SearchSessionsTool(manager).execute(query="MARKER"))
+        allowed = _decode(await ReadSessionTool(manager).execute(session_key=same_project))
+        other_project_read = await ReadSessionTool(manager).execute(session_key=other_project)
+        other_member_read = await ReadSessionTool(manager).execute(session_key=other_member)
+        host_read = await ReadSessionTool(manager).execute(session_key=host_history)
+
+    assert listed == [f"@{same_project_handle.name}"]
+    assert [row["session_key"] for row in discovered["results"]] == [same_project]
+    assert [message["content"] for message in allowed["messages"]] == [
+        "PRIVACY_MARKER shared",
+    ]
+    for refused, marker in (
+        (other_project_read, "BETA_SECRET_MARKER"),
+        (other_member_read, "BOB_SECRET_MARKER"),
+        (host_read, "HOST_SECRET_MARKER"),
+    ):
+        assert "not authorized" in str(refused)
+        assert marker not in str(refused)
 
 
 @pytest.mark.asyncio
@@ -352,6 +448,7 @@ async def test_read_session_accepts_a_persisted_session_handle(tmp_path):
 
 @pytest.mark.asyncio
 async def test_session_tools_work_without_request_context(tmp_path, monkeypatch):
+    """Without a request context there is no principal, so discovery stays closed."""
     webui_dir = tmp_path / "webui"
     monkeypatch.setattr("nanobot.webui.transcript.get_webui_dir", lambda: webui_dir)
     monkeypatch.setattr("nanobot.webui.session_list_index.get_webui_dir", lambda: webui_dir)
@@ -366,8 +463,9 @@ async def test_session_tools_work_without_request_context(tmp_path, monkeypatch)
     result = _decode(await SearchSessionsTool(manager).execute(query="needle"))
     read = _decode(await ReadSessionTool(manager).execute(session_key="custom:history"))
 
-    assert [row["session_key"] for row in result["results"]] == ["custom:history"]
+    assert result["results"] == []
     assert read["session_key"] == "custom:history"
+    assert [message["content"] for message in read["messages"]] == ["custom needle"]
 
 
 @pytest.mark.asyncio
