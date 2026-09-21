@@ -161,6 +161,8 @@ class MyTool(Tool):
             "Scratchpad keys persist across turns but not restarts.\n"
             "Current routing metadata is available read-only via request.channel, "
             "request.chat_id, and request.sender_id.\n"
+            "Channel instance health is available read-only via channels; in a member "
+            "session it reports only the instance serving this conversation.\n"
             "Use model_preset for session-scoped model or context changes; direct "
             "model/context_window_tokens writes are disabled during active sessions.\n"
             "Note: web_config and exec_config are readable but read-only.\n"
@@ -372,11 +374,12 @@ class MyTool(Tool):
         if current_member_scope() is not None and not (
             action in ("inspect", "check")
             and key is not None
-            and (key == "request" or key.startswith("request."))
+            and (key == "request" or key.startswith("request.") or key == "channels")
         ):
             return ToolResult.error(
                 "Error: host runtime state is unavailable in member sessions; "
-                "request.* is read-only and scoped to the current conversation"
+                "request.* is read-only and scoped to the current conversation, "
+                "and channels reports only this conversation's channel instance"
             )
         if action in ("inspect", "check"):
             return self._inspect(key)

@@ -38,6 +38,52 @@ def _my_tool(loop: AgentLoop) -> MyTool:
     return tool
 
 
+def _channel_status() -> dict[str, dict[str, object]]:
+    """The shape of ``ChannelManager.get_status()``: identity, health, and leaks."""
+    return {
+        "feishu.assistant-2bf084": {
+            "enabled": True,
+            "running": False,
+            "state": "failed",
+            "owner": "feishu",
+            "instance_id": "assistant-2bf084",
+            "error": "app secret rejected",
+            "app_secret": "feishu-app-secret",
+        },
+        "telegram": {
+            "enabled": True,
+            "running": True,
+            "state": "running",
+            "owner": "telegram",
+            "instance_id": "default",
+        },
+        "websocket": {
+            "enabled": False,
+            "running": False,
+            "state": "stopped",
+            "owner": "websocket",
+            "instance_id": "default",
+            "pairing_only": True,
+            "token": "webui-session-token",
+            "config_path": "/etc/nanobot/gateway-secret.json",
+        },
+    }
+
+
+_CHANNEL_SENSITIVE = (
+    "owner",
+    "error",
+    "pairing_only",
+    "app_secret",
+    "feishu-app-secret",
+    "app secret rejected",
+    "token",
+    "webui-session-token",
+    "config_path",
+    "/etc/nanobot/gateway-secret.json",
+)
+
+
 def test_agent_loop_assembles_my_tool_with_runtime_control(tmp_path: Path) -> None:
     loop = _make_loop(tmp_path)
     tool = _my_tool(loop)
@@ -70,6 +116,7 @@ def test_runtime_snapshot_has_exact_allowlist_and_redacts_secrets(tmp_path: Path
         "web_config",
         "exec_config",
         "subagents",
+        "channels",
     })
     assert RUNTIME_SNAPSHOT_KEYS == expected_snapshot_keys
     assert frozenset(values) == expected_snapshot_keys
@@ -110,6 +157,79 @@ def test_runtime_snapshot_is_detached_from_mutable_config(tmp_path: Path) -> Non
     assert refreshed_search["provider"] == loop.web_config.search.provider
     assert refreshed.exec_config["allow_patterns"] == loop.exec_config.allow_patterns
     assert "mutated" not in refreshed.tool_names
+
+
+def test_host_channel_status_exposes_every_instance_with_only_allowed_fields(
+    tmp_path: Path,
+) -> None:
+    loop = _make_loop(tmp_path)
+    loop.register_channel_status_provider(_channel_status)
+    tool = _my_tool(loop)
+
+    snapshot = tool._runtime_control.snapshot()
+
+    assert snapshot.channels == {
+        "feishu.assistant-2bf084": {
+            "enabled": True,
+            "running": False,
+            "state": "failed",
+            "instance_id": "assistant-2bf084",
+        },
+        "telegram": {
+            "enabled": True,
+            "running": True,
+            "state": "running",
+            "instance_id": "default",
+        },
+        "websocket": {
+            "enabled": False,
+            "running": False,
+            "state": "stopped",
+            "instance_id": "default",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_host_check_renders_channel_status_without_host_only_fields(
+    tmp_path: Path,
+) -> None:
+    loop = _make_loop(tmp_path)
+    loop.register_channel_status_provider(_channel_status)
+    tool = _my_tool(loop)
+
+    result = await tool.execute(action="check", key="channels")
+
+    for visible in ("feishu.assistant-2bf084", "telegram", "websocket"):
+        assert visible in result
+    for hidden in _CHANNEL_SENSITIVE:
+        assert hidden not in result
+
+
+def test_channel_status_snapshot_is_detached_from_the_status_source(tmp_path: Path) -> None:
+    loop = _make_loop(tmp_path)
+    loop.register_channel_status_provider(_channel_status)
+    tool = _my_tool(loop)
+
+    snapshot = tool._runtime_control.snapshot()
+    snapshot.channels["telegram"]["state"] = "mutated"
+    snapshot.channels["injected"] = {"enabled": True}
+
+    refreshed = tool._runtime_control.snapshot().channels
+    assert refreshed["telegram"]["state"] == "running"
+    assert "injected" not in refreshed
+
+
+@pytest.mark.asyncio
+async def test_channel_status_cannot_be_modified(tmp_path: Path) -> None:
+    loop = _make_loop(tmp_path, allow_set=True)
+    loop.register_channel_status_provider(_channel_status)
+    tool = _my_tool(loop)
+
+    result = await tool.execute(action="set", key="channels", value={"telegram": {}})
+
+    assert result == "Error: 'channels' is read-only and cannot be modified"
+    assert tool._runtime_control.snapshot().channels != {"telegram": {}}
 
 
 @pytest.mark.asyncio

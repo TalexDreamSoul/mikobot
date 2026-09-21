@@ -96,6 +96,9 @@ class _GatewayAgentContractStub:
     def pending_local_trigger_ids_for_session(_session_key: str) -> set[str]:
         return set()
 
+    def register_channel_status_provider(self, _provider: object) -> None:
+        return None
+
     async def submit_local_trigger_turn(
         self,
         _msg: InboundMessage,

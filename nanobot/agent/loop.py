@@ -416,6 +416,9 @@ class AgentLoop:
         self._unified_session = unified_session
         self._running = False
         self._runtime_context_providers: list[RuntimeContextProvider] = []
+        self._channel_status_provider: (
+            Callable[[], Mapping[str, Mapping[str, object]]] | None
+        ) = None
         self._active_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._discarding_sessions: set[str] = set()
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -670,6 +673,25 @@ class AgentLoop:
                 self._runtime_context_providers.remove(provider)
 
         return _unsubscribe
+
+    def register_channel_status_provider(
+        self,
+        provider: Callable[[], Mapping[str, Mapping[str, object]]],
+    ) -> None:
+        """Attach the gateway's channel status reader.
+
+        The gateway creates channels after the loop, so the loop owns no channel
+        manager and reads live channel state through this one provider.
+        """
+        self._channel_status_provider = provider
+
+    @property
+    def channel_status(self) -> Mapping[str, Mapping[str, object]]:
+        """Return live channel runtime status, or an empty mapping when unattached."""
+        provider = self._channel_status_provider
+        if provider is None:
+            return {}
+        return provider()
 
     async def submit_cron_turn(self, msg: InboundMessage) -> OutboundMessage | None:
         return await self._cron_turns.submit(msg)

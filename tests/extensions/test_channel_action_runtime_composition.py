@@ -166,6 +166,10 @@ def test_gateway_channel_services_defer_manager_actions_and_scope_config_writes(
         context = SimpleNamespace(memory=object(), skills=None)
         model = "test-model"
         collaboration = None
+        channel_status_provider: object | None = None
+
+        def register_channel_status_provider(self, provider: object) -> None:
+            self.channel_status_provider = provider
 
         def pending_cron_job_ids_for_session(self, _session_id: str) -> tuple[object, ...]:
             return ()
@@ -209,13 +213,22 @@ def test_gateway_channel_services_defer_manager_actions_and_scope_config_writes(
 
     class FakeManager:
         enabled_channels: tuple[str, ...] = ()
+        status_payload: dict[str, object] = {
+            "demo": {
+                "enabled": True,
+                "running": False,
+                "state": "stopped",
+                "owner": "demo",
+                "instance_id": "selected",
+            }
+        }
 
         def __init__(self, *_args: object, **kwargs: object) -> None:
             timeline.append("manager")
             assert kwargs["webui_extension_registry"] is captured["registry"]
 
         def get_status(self) -> dict[str, object]:
-            return {}
+            return self.status_payload
 
         async def apply_channel_instance_action(
             self, action: str, channel_type: str, instance_id: str
@@ -261,8 +274,14 @@ def test_gateway_channel_services_defer_manager_actions_and_scope_config_writes(
     monkeypatch.setattr(gateway_runtime, "MCPProvider", SimpleNamespace(
         from_config=lambda _config, _tools: FakeMcpProvider()
     ))
+    agents: list[FakeAgent] = []
+
+    def build_agent(*_args: object, **_kwargs: object) -> FakeAgent:
+        agents.append(FakeAgent())
+        return agents[-1]
+
     monkeypatch.setattr(gateway_runtime, "AgentLoop", SimpleNamespace(
-        from_config=lambda *_args, **_kwargs: FakeAgent()
+        from_config=build_agent
     ))
     monkeypatch.setattr("nanobot.config.loader.load_config", load_config)
     monkeypatch.setattr("nanobot.config.loader.save_config", save_config)
@@ -305,6 +324,10 @@ def test_gateway_channel_services_defer_manager_actions_and_scope_config_writes(
     assert isinstance(services, ChannelExtensionServices)
     assert timeline == ["registry", "manager"]
     assert metadata_calls == []
+
+    provider = agents[-1].channel_status_provider
+    assert callable(provider)
+    assert provider() is FakeManager.status_payload
 
     assert services.refresh_metadata is not None
     runtime_result = asyncio.run(services.runtime_action("enable", "demo", "selected"))

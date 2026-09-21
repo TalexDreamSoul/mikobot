@@ -59,6 +59,9 @@ my(action="check", key="model")
 
 my(action="check", key="web_config.enable")
 # → Whether web search is enabled
+
+my(action="check", key="channels")
+# → Channel instance health: enabled, running, state, instance_id
 ```
 
 ### What you can do with it
@@ -72,6 +75,7 @@ my(action="check", key="web_config.enable")
 | "Where is your working directory?" | `check("workspace")` |
 | "Show me your full config" | `check()` |
 | "Are there any subagents running?" | `check("subagents")` — shows phase, iteration, elapsed time, tool events |
+| "Is my channel instance alive?" | `check("channels")` — enabled/running/state for your instance; a member session sees only its own |
 
 ---
 
@@ -204,7 +208,10 @@ Can be checked but not set:
 | Subagent manager | `subagents` | Observable, but replacing breaks the system |
 | Execution config | `exec_config` | Can check sandbox/enable status, cannot change it |
 | Web config | `web_config` | Can check enable status, cannot change it |
+| Channel status | `channels` | Live gateway channel health; the gateway owns channel lifecycles |
 
 ### Sensitive field protection
 
 Sub-fields matching sensitive names (`api_key`, `password`, `secret`, `token`, etc.) are blocked from both check and set, regardless of parent path. This prevents credential leaks via dot-path traversal (e.g. `web_config.search.api_key`).
+
+`channels` exposes only four per-instance fields — `enabled`, `running`, `state`, and `instance_id`. Owner names, failure details, credentials, and app ids never cross that boundary. In a member (project-scoped) session the tool reports exactly one entry, the channel instance serving that conversation, and reports nothing when that instance is not running in this process.

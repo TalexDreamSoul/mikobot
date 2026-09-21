@@ -891,6 +891,10 @@ def _run_gateway(
         config_path=Path(config_path),
     )
 
+    # The agent reports channel instance health through the same reader the
+    # extensions use; the runtime snapshot narrows it for member turns.
+    agent.register_channel_status_provider(_channel_runtime_status)
+
     async def _job_project(job: CronJob) -> Project | None:
         """Resolve the project a built-in automation belongs to."""
         repository = getattr(agent, "collaboration", None)
