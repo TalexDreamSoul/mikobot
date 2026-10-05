@@ -49,9 +49,14 @@ from nanobot.extensions.adapters import (
 from nanobot.extensions.runtime import build_core_extension_registry, runtime_skills_loader
 from nanobot.gateway.runtime import GatewayInstance
 from nanobot.security.network import is_loopback_host
-from nanobot.session.keys import UNIFIED_SESSION_KEY, last_channel_from_metadata
+from nanobot.session.keys import (
+    HEARTBEAT_SESSION_KEY,
+    UNIFIED_SESSION_KEY,
+    last_channel_from_metadata,
+)
 from nanobot.utils.evaluator import evaluate_response, resolve_evaluator_prompt
 from nanobot.utils.helpers import bundled_default_text, sync_workspace_templates
+from nanobot.utils.token_encoding import warmup_token_encoding
 from nanobot.webui.build import BuildMode
 from nanobot.webui.dev import WebUIDevError, WebUIDevServer
 from nanobot.webui.sidebar_state import read_webui_sidebar_state
@@ -391,13 +396,12 @@ def _run_gateway(
     from nanobot.agent.tools.message import MessageTool
     from nanobot.agent.turn_delivery import TurnDeliveryFactory
     from nanobot.bus.queue import MessageBus
-    from nanobot.bus.runtime_events import RuntimeEventBus
     from nanobot.channels.manager import ChannelManager
     from nanobot.config.watcher import watch_config_file
     from nanobot.cron.bound_runner import run_bound_cron_job
     from nanobot.cron.service import CronJobSkippedError, CronService
     from nanobot.cron.session_turns import is_bound_cron_job
-    from nanobot.cron.types import CronJob
+    from nanobot.cron.types import CronJob, CronRunResult
     from nanobot.llm_usage import record_llm_call
     from nanobot.llm_usage.context import llm_usage_source
     from nanobot.providers.factory import (
@@ -437,6 +441,7 @@ def _run_gateway(
         raise typer.Exit(1)
 
     console.print(f"{__logo__} Starting nanobot gateway version {__version__} on port {port}...")
+    warmup_token_encoding()
     _prepare_webui_bundle_for_gateway(
         config,
         mode=webui_bundle_mode,
@@ -444,7 +449,6 @@ def _run_gateway(
     )
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
-    runtime_events = RuntimeEventBus()
     fallback_model_observer = build_webui_fallback_model_observer(bus)
 
     def _observe_provider(snapshot: ProviderSnapshot) -> ProviderSnapshot:
@@ -503,7 +507,6 @@ def _run_gateway(
 
     turn_delivery_factory = TurnDeliveryFactory(
         bus,
-        runtime_events,
         route_policy=WebuiTurnRoutePolicy(session_manager),
     )
 
@@ -537,7 +540,6 @@ def _run_gateway(
         image_generation_provider_configs=image_gen_provider_configs(config),
         provider_snapshot_loader=_load_gateway_provider_snapshot,
         preset_catalog_loader=load_model_preset_catalog,
-        runtime_events=runtime_events,
         turn_delivery_factory=turn_delivery_factory,
         provider_signature=provider_snapshot.signature,
         local_trigger_store=trigger_store,
@@ -574,10 +576,20 @@ def _run_gateway(
         except Exception:
             logger.warning("Channel metadata refresh failed after enablement")
 
+    channel_repository = collaboration
+
+    async def _revoke_channel_instance(
+        actor_id: str, channel_type: str, instance_id: str,
+    ) -> None:
+        await channel_repository.revoke_channel_instance(
+            actor_id, channel_type=channel_type, instance_id=instance_id,
+        )
+
     channel_services = ChannelExtensionServices(
         mutate_config=_mutate_channel_config,
         runtime_action=_apply_channel_runtime_action,
         refresh_metadata=_refresh_channel_metadata,
+        revoke_instance=_revoke_channel_instance,
     )
     optional_feature_services = OptionalFeatureExtensionServices()
 
@@ -614,7 +626,6 @@ def _run_gateway(
         schedule_background=_schedule_webui_background,
         recovery=recovery,
     )
-    webui_turn_coordinator.subscribe(runtime_events)
     from nanobot.bus.events import OutboundMessage
     from nanobot.session.keys import session_key_for_channel
 
@@ -662,7 +673,7 @@ def _run_gateway(
         message_tool.set_send_callback(_deliver_to_channel)
 
     # Set cron callback (needs agent)
-    async def on_cron_job(job: CronJob) -> str | None:
+    async def on_cron_job(job: CronJob) -> str | CronRunResult | None:
         """Execute a cron job through the agent."""
         async def _silent(*_args: Any, **_kwargs: Any) -> None:
             pass
@@ -782,7 +793,7 @@ def _run_gateway(
                 logger.debug("Heartbeat: {} has no conversation to report to", project.id)
                 return None
             channel, chat_id, scope = target
-            session_key = "heartbeat" if project.is_builtin else f"heartbeat:{project.id}"
+            session_key = HEARTBEAT_SESSION_KEY if project.is_builtin else f"heartbeat:{project.id}"
 
             prompt = (
                 _HEARTBEAT_PREAMBLE
@@ -808,11 +819,6 @@ def _run_gateway(
             finally:
                 if isinstance(message_tool, MessageTool) and suppress_token is not None:
                     message_tool.reset_suppress_delivery(suppress_token)
-
-            # Keep a small tail of heartbeat history so the loop stays bounded.
-            session = agent.sessions.get_or_create(session_key)
-            session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
-            agent.sessions.save(session)
 
             if not resp or not resp.content:
                 return
@@ -888,6 +894,8 @@ def _run_gateway(
         webui_mcp_reload=mcp_provider.reload,
         webui_skill_state_action=_webui_skill_state_action,
         webui_recovery_action=recovery.handle_action,
+        webui_subagent_manager=agent.subagents,
+        webui_discard_session=agent.discard_session,
         config_path=Path(config_path),
     )
 
@@ -1229,6 +1237,7 @@ def _run_gateway(
                     tasks,
                     runtime_tasks,
                 )
+                await bus.drain()
                 # Flush all cached sessions to durable storage before exit.
                 # This prevents data loss on filesystems with write-back
                 # caching (rclone VFS, NFS, FUSE mounts, etc.).
@@ -1238,7 +1247,11 @@ def _run_gateway(
             finally:
                 restore_shutdown_handlers()
 
-    with gateway_runtime.foreground_instance(gateway_start_options):
+    with (
+        gateway_runtime.foreground_instance(gateway_start_options),
+        webui_turn_coordinator.connected(),
+    ):
+        agent.subagents.recover_interrupted()
         if health_server_enabled:
             gateway_runtime.publish_health_host(config.gateway.host)
         asyncio.run(run())

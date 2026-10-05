@@ -154,6 +154,10 @@ class CollaborationRepository(Protocol):
         self, actor_user_id: str, *, channel_type: str, instance_id: str
     ) -> bool: ...
 
+    async def revoke_channel_instance(
+        self, actor_user_id: str, *, channel_type: str, instance_id: str
+    ) -> bool: ...
+
     async def create_pairing_challenge(
         self,
         actor_user_id: str,
@@ -163,6 +167,7 @@ class CollaborationRepository(Protocol):
         instance_id: str,
         assignee_user_id: str | None = None,
         ttl_seconds: int = 600,
+        replace_assignment: bool = False,
     ) -> tuple[PairingChallenge, str]: ...
 
     async def get_pairing_challenge(

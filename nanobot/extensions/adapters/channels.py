@@ -105,6 +105,7 @@ class ChannelExtensionServices:
     runtime_action: Callable[[str, str, str], Awaitable[Mapping[str, object]]]
     prepare_dependencies: Callable[..., ChannelDependencyPreparation] = prepare_channel_dependencies
     refresh_metadata: Callable[[str, str], None] | None = None
+    revoke_instance: Callable[[str, str, str], Awaitable[None]] | None = None
 
 
 class ChannelExtensionAdapter:
@@ -225,6 +226,10 @@ class ChannelExtensionAdapter:
             fingerprint = self._target_fingerprints.get(request.target_id)
             if fingerprint is None:
                 return self._failure(request, package.id, "Channel action target is unavailable.")
+            if request.action is ExtensionAction.DELETE_INSTANCE:
+                return await self._delete_instance(
+                    request, package, channel_type, instance_id, fingerprint
+                )
             if request.action is ExtensionAction.CONFIGURE:
                 return await self._configure(request, package, channel_type, instance_id, fingerprint)
             if request.action is ExtensionAction.ENABLE:
@@ -365,6 +370,77 @@ class ChannelExtensionAdapter:
                     logger.warning("Channel metadata refresh failed after enablement")
         return result
 
+    async def _delete_instance(
+        self,
+        request: ExtensionActionRequest,
+        package: ExtensionPackageDescriptor,
+        channel_type: str,
+        instance_id: str,
+        fingerprint: str,
+    ) -> ExtensionActionResult:
+        services = self._services
+        if services is None or services.revoke_instance is None or channel_type != "weixin":
+            return self._failure(request, package.id, "Instance deletion is not supported.")
+        if not request.risk_acknowledged:
+            return self._failure(request, package.id, "Instance deletion requires acknowledgement.")
+        plugin = self._plugin(channel_type)
+        if plugin is None:
+            return self._failure(request, package.id, "Channel action target is unavailable.")
+        try:
+            await asyncio.to_thread(
+                services.mutate_config,
+                lambda config: self._require_current_fingerprint(
+                    plugin, getattr(config.channels, channel_type, None), instance_id, fingerprint
+                ),
+            )
+        except _ChannelActionStaleError:
+            return self._failure(request, package.id, "Channel action revision is stale.")
+        except Exception:
+            logger.exception("Channel deletion preflight failed")
+            return self._failure(request, package.id, "Instance deletion could not be started.")
+        try:
+            await services.revoke_instance(request.context.actor_id, channel_type, instance_id)
+            runtime = await services.runtime_action("delete_instance", channel_type, instance_id)
+            if runtime.get("ok") is not True or runtime.get("handled") is not True:
+                return self._failure(
+                    request, package.id,
+                    "Instance authority was revoked, but runtime cleanup failed. Retry deletion.",
+                    ExtensionLifecycle.FAILED,
+                )
+            await asyncio.to_thread(
+                services.mutate_config,
+                lambda config: self._remove_weixin_config(config, plugin, instance_id, fingerprint),
+            )
+        except Exception:
+            logger.exception("Channel instance deletion cleanup failed")
+            return self._failure(
+                request, package.id,
+                "Instance deletion is incomplete; authority may be revoked. Refresh and retry.",
+                ExtensionLifecycle.FAILED,
+            )
+        return self._current_result(request, package.id, "WeChat instance deleted; history retained.")
+
+    def _remove_weixin_config(
+        self, config: Config, plugin: ChannelPlugin, instance_id: str, fingerprint: str
+    ) -> None:
+        from pathlib import Path
+
+        from nanobot.channels.weixin.instances import remove_weixin_instance
+
+        section = getattr(config.channels, "weixin", None)
+        self._require_current_fingerprint(plugin, section, instance_id, fingerprint)
+        selected = next(
+            spec for spec in channel_instance_specs(plugin, section, enabled_only=False)
+            if spec.instance_id == instance_id
+        )
+        updated = remove_weixin_instance(section, instance_id)
+        # No recursive cleanup: a custom/shared root owns only this known credential file.
+        state_dir = channel_field_value(selected.config, "stateDir")
+        if not isinstance(state_dir, str) or not state_dir:
+            raise ValueError("WeChat instance state directory is unavailable")
+        (Path(state_dir).expanduser() / "account.json").unlink(missing_ok=True)
+        setattr(config.channels, "weixin", updated)
+
     async def _disable(
         self,
         request: ExtensionActionRequest,
@@ -489,6 +565,19 @@ class ChannelExtensionAdapter:
     @staticmethod
     def _configured(plugin: ChannelPlugin, instance_config: object, local_state: bool) -> bool:
         if plugin.setup is not None:
+            if plugin.name == "weixin" and local_state:
+                # Saved QR credentials satisfy only this instance's token requirement.
+                return all(
+                    any(
+                        all(
+                            field == "token"
+                            or channel_value_present(channel_field_value(instance_config, field))
+                            for field in group
+                        )
+                        for group in requirement.alternatives
+                    )
+                    for requirement in plugin.setup.required
+                )
             return not plugin.setup.required or bool(plugin.setup.is_configured(instance_config))
         if plugin.management.local_state_present is not None:
             return local_state
@@ -513,7 +602,7 @@ class ChannelExtensionAdapter:
             return self._configured(
                 plugin,
                 instance.config,
-                channel_local_state_present(plugin, section),
+                channel_local_state_present(plugin, instance.config),
             )
         except Exception:
             return False
@@ -602,7 +691,6 @@ class ChannelExtensionAdapter:
         if len(capability_values) > _MAX_CAPABILITIES or len(capabilities) != len(capability_values):
             raise TypeError("channel capabilities must be a bounded collection of strings")
         dependencies_ready = bool(self._dependencies_installed(raw_name, list(dependencies) or None))
-        local_state = channel_local_state_present(plugin, section)
         setup_fields = self._setup_fields(plugin, section)
         configuration = ExtensionConfigurationTarget(section="channels", item=name)
 
@@ -617,6 +705,7 @@ class ChannelExtensionAdapter:
             if component_id in targets:
                 raise ValueError("channel package has duplicate canonical instance IDs")
             desired = ChannelActivation.from_config(instance.config).resolve(default=plugin.default_enabled)
+            local_state = channel_local_state_present(plugin, instance.config)
             configured = self._configured(plugin, instance.config, local_state)
             lifecycle = self._component_lifecycle(
                 desired=desired,
@@ -651,6 +740,8 @@ class ChannelExtensionAdapter:
                     actions.update({ExtensionAction.ENABLE, ExtensionAction.DISABLE})
                 if plugin.connector is not None:
                     actions.add(ExtensionAction.RECONNECT)
+                if raw_name == "weixin" and self._services.revoke_instance is not None:
+                    actions.add(ExtensionAction.DELETE_INSTANCE)
             components.append(
                 ExtensionComponentDescriptor(
                     id=component_id,

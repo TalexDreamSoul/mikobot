@@ -78,6 +78,7 @@ const ACTION_FALLBACKS: Record<NanobotExtensionAction, string> = {
   reconnect: "Reconnect",
   install: "Install",
   uninstall: "Uninstall",
+  delete_instance: "Delete instance",
   restart_required: "Restart required",
 };
 

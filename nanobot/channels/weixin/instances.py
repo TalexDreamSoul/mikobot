@@ -230,6 +230,17 @@ def upsert_weixin_instance(
     return canonical
 
 
+def remove_weixin_instance(section: Any, instance_id: str) -> dict[str, Any]:
+    """Remove one exact configuration without synthesizing a default instance."""
+    instance_id = validate_instance_id(instance_id)
+    canonical = canonical_weixin_section(section, weixin_default_config())
+    instances = cast(list[dict[str, Any]], canonical["instances"])
+    remaining = [item for item in instances if item["instanceId"] != instance_id]
+    if len(remaining) == len(instances):
+        raise ValueError("WeChat instance is not available")
+    return {"instances": remaining}
+
+
 def update_weixin_instance_preserving_shape(
     section: Any,
     defaults: dict[str, Any],
@@ -264,6 +275,7 @@ __all__ = [
     "DEFAULT_INSTANCE_ID",
     "WEIXIN_MANAGEMENT",
     "canonical_weixin_section",
+    "remove_weixin_instance",
     "runtime_channel_name",
     "update_weixin_instance_preserving_shape",
     "upsert_weixin_instance",

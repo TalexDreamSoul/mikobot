@@ -1,6 +1,6 @@
 # Security Boundaries
 
-The agent operates with significant power (file system, shell, web). The following guards must not be bypassed when modifying related code.
+Consult this document when changing path access, outbound HTTP/MCP, or shell execution. The agent operates with filesystem, shell, and network access; preserve the guards below on every affected path.
 
 ## Workspace Restriction
 
@@ -26,9 +26,11 @@ HTTP/SSE MCP transports are part of this boundary: validate configured MCP URLs 
 
 ## Shell Sandbox
 
-`tools/sandbox.py` ships only `bwrap` (Linux Bubblewrap). All modes isolate PID/IPC namespaces; member mode additionally isolates networking and rejects host extra binds. Owner commands without a configured backend retain their native-shell policy. Member commands always require the supported backend, including on hosts where it is unavailable.
+`tools/sandbox.py` provides owner-command wrapping with `bwrap` (Linux) and `seatbelt` (`sandbox-exec`, macOS). Seatbelt scratch stays in the workspace and does not expose shared host temporary directories. Owner commands without a configured backend retain their native-shell policy; a configured backend that cannot start never falls back to the native shell.
 
-**Rule**: If adding a new sandbox backend, implement `_wrap_<name>(command, workspace, cwd) -> str` and register it in `_BACKENDS`.
+Member shell requests always require Linux Bubblewrap. They isolate process/IPC/network namespaces, clear the environment, expose only their project and authorized read roots, and reject host extra binds, outer shells and login scripts. Unsupported platforms or unavailable backends fail before spawn.
+
+**Rule**: New backends must match the callable contract in `nanobot/agent/tools/sandbox.py` and register in `_BACKENDS`; preserve explicit read/write roots and failure behavior. Owner Seatbelt support does not authorize member shell execution on macOS.
 
 ## Identity and Derived Work
 

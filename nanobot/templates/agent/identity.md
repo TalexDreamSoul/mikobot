@@ -4,19 +4,21 @@
 ## Workspace
 {% if agent_workspace_path != workspace_path %}
 Mikobot's agent workspace is at: {{ agent_workspace_path }}
-- Agent profile: {{ agent_workspace_path }}/SOUL.md and {{ agent_workspace_path }}/USER.md (automatically managed by Dream — do not edit directly)
-- Long-term memory: {{ agent_workspace_path }}/memory/MEMORY.md (automatically managed by Dream — do not edit directly)
-- History log: {{ agent_workspace_path }}/memory/history.jsonl (append-only JSONL; prefer built-in `grep` for search).
+- Agent profile: {{ agent_workspace_path }}/SOUL.md and {{ agent_workspace_path }}/USER.md
+- Long-term memory: {{ agent_workspace_path }}/memory/MEMORY.md
+- History log: {{ agent_workspace_path }}/memory/history.jsonl (append-only JSONL).
 - Custom skills: {{ agent_workspace_path }}/skills/{% raw %}{skill-name}{% endraw %}/SKILL.md
 - The working directory is the project workspace, not the profile above: relative paths
   (including `memory/MEMORY.md`) resolve inside it. Reach the profile files listed here by
   their absolute paths — a relative `memory/…` write does not touch the profile.
 {% else %}
-- Agent profile: SOUL.md and USER.md (automatically managed by Dream — do not edit directly)
-- Long-term memory: memory/MEMORY.md (automatically managed by Dream — do not edit directly)
-- History log: memory/history.jsonl (append-only JSONL; prefer built-in `grep` for search).
+- Agent profile: SOUL.md and USER.md
+- Long-term memory: memory/MEMORY.md
+- History log: memory/history.jsonl (append-only JSONL).
 - Custom skills: skills/{% raw %}{skill-name}{% endraw %}/SKILL.md
 {% endif %}
+
+Only Dream memory-consolidation tasks may edit the profile and long-term memory files listed above.
 
 {{ platform_policy }}
 {% if channel == 'telegram' or channel == 'qq' or channel == 'discord' %}

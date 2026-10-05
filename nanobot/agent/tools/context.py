@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.file_state import FileStates
     from nanobot.agent.tools.runtime_control import RuntimeControl
     from nanobot.bus.queue import MessageBus
-    from nanobot.bus.runtime_events import RuntimeEventBus
+    from nanobot.bus.runtime_events import RuntimeEventPublisher
     from nanobot.collaboration import CollaborationRepository
     from nanobot.config.schema import ProviderConfig, ToolsConfig
     from nanobot.cron.service import CronService
@@ -44,6 +44,10 @@ class RequestContext:
     workspace: Path | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
     authorize_tool: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
+    log_content: bool = True
+    # The host can consume completion messages after this request returns.
+    can_receive_background_results: bool = True
+    persist_session: bool = True
 
 
 @runtime_checkable
@@ -85,6 +89,12 @@ def current_request_context() -> RequestContext | None:
     return _CURRENT_REQUEST_CONTEXT.get()
 
 
+def tool_log_content_allowed() -> bool:
+    """Whether diagnostics may include content from the current tool request."""
+    ctx = current_request_context()
+    return ctx is None or ctx.log_content
+
+
 def current_request_session_key() -> str | None:
     ctx = current_request_context()
     return ctx.session_key if ctx else None
@@ -104,6 +114,6 @@ class ToolContext:
     image_generation_provider_configs: dict[str, ProviderConfig] | None = None
     timezone: str = "UTC"
     workspace_sandbox: WorkspaceSandboxStatus | None = None
-    runtime_events: RuntimeEventBus | None = None
+    runtime_events: RuntimeEventPublisher | None = None
     collaboration_repository: CollaborationRepository | None = None
     runtime_control: RuntimeControl | None = None

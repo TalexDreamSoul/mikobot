@@ -6,9 +6,10 @@ from collections.abc import Mapping, MutableMapping
 from typing import Any
 
 UNIFIED_SESSION_KEY = "unified:default"
+HEARTBEAT_SESSION_KEY = "heartbeat"
 LAST_CHANNEL_METADATA_KEY = "last_channel"
 HOST_PRIVATE_SESSION_KEY = "heartbeat"
-_HOST_PRIVATE_SESSION_PREFIXES = ("heartbeat:", "cron:", "dream:", "websocket:", "cli:")
+_HOST_PRIVATE_SESSION_PREFIXES = ("heartbeat:", "cron:", "dream:", "websocket:", "cli:", "sdk:")
 
 
 def is_host_private_session_key(session_key: str | None) -> bool:
@@ -24,6 +25,16 @@ def is_host_private_session_key(session_key: str | None) -> bool:
     return session_key == HOST_PRIVATE_SESSION_KEY or session_key.startswith(
         _HOST_PRIVATE_SESSION_PREFIXES
     )
+
+
+def is_dream_session(key: str) -> bool:
+    """Identify the per-run session namespace owned by Dream."""
+    return key.startswith("dream:")
+
+
+def is_internal_session(key: str) -> bool:
+    """Identify maintenance sessions whose context is not a user conversation."""
+    return key == HEARTBEAT_SESSION_KEY or is_dream_session(key)
 
 
 def session_key_for_channel(channel: str, chat_id: str, *, unified_session: bool = False) -> str:

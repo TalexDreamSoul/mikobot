@@ -1,17 +1,8 @@
 {
-  "description": "Sử dụng Mikobot từ các cuộc trò chuyện WeChat.",
-  "requirements": "Cài đặt kênh WeChat và gateway",
   "setup": {
     "primaryAction": "Kết nối WeChat",
     "docsLabel": "Mở hướng dẫn WeChat",
     "officialLabel": "Mở WeChat",
-    "tryIt": "Sau khi đăng nhập QR, gửi tin nhắn riêng đến tài khoản đã kết nối.",
-    "summary": "WeChat đăng nhập bằng mã QR và lưu trạng thái tài khoản cục bộ.",
-    "steps": [
-      "Nhấn Kết nối và quét QR bằng WeChat.",
-      "Giữ gateway cục bộ chạy khi WeChat nhận tin nhắn.",
-      "Gửi tin nhắn riêng thử để xác nhận kết nối."
-    ],
     "fields": {
       "allowFrom": {
         "label": "Người dùng được phép",
@@ -22,28 +13,28 @@
         "placeholder": "Được lưu khi đăng nhập QR"
       },
       "sendProgress": {
-        "label": "Gửi tiến trình"
+        "label": "Gửi thông báo tiến độ"
       },
       "sendToolHints": {
-        "label": "Gửi gợi ý công cụ"
+        "label": "Gửi tóm tắt hoạt động công cụ"
       },
       "streaming": {
-        "label": "Sử dụng API phát trực tiếp"
+        "label": "Dùng API truyền theo luồng"
       },
       "replyProgressMessages": {
-        "label": "Gửi tiến trình có cấu trúc"
+        "label": "Gửi tiến độ theo từng bước"
       },
       "replyProgressMaxMessages": {
-        "label": "Giới hạn tiến trình có cấu trúc"
+        "label": "Số thông báo tiến độ tối đa"
       },
       "contextMessageBudget": {
-        "label": "Ngân sách tin nhắn ngữ cảnh"
+        "label": "Số tin nhắn ngữ cảnh tối đa"
       },
       "blockStreaming": {
         "label": "Gửi phản hồi theo khối"
       },
       "blockStreamingMinChars": {
-        "label": "Kích thước khối tối thiểu"
+        "label": "Số ký tự tối thiểu mỗi phần"
       },
       "blockStreamingMaxMessages": {
         "label": "Giới hạn tin nhắn theo khối"
@@ -61,15 +52,14 @@
         "label": "Thư mục trạng thái"
       },
       "pollTimeout": {
-        "label": "Thời gian chờ thăm dò"
+        "label": "Thời gian chờ thăm dò (giây)"
       }
     }
   },
   "custom": {
     "qrAlt": "Mã QR đăng nhập WeChat",
     "scanTitle": "Quét bằng WeChat",
-    "scanDescription": "Quét bằng WeChat trên điện thoại. Mikobot lưu trạng thái cục bộ sau khi đăng nhập.",
-    "waiting": "Đang chờ quét WeChat...",
+    "waiting": "Đang chờ bạn quét mã bằng WeChat…",
     "connected": "WeChat đã kết nối.",
     "stopped": "Đăng nhập WeChat đã dừng.",
     "connecting": "Đang kết nối...",
@@ -79,6 +69,18 @@
     "expired": "Đăng nhập WeChat đã hết hạn. Hãy quét lại để kết nối lại.",
     "failed": "Không thể kết nối WeChat. Hãy thử lại.",
     "verifyPlaceholder": "Mã",
-    "verifySubmit": "Xác minh"
+    "verifySubmit": "Xác minh",
+    "deleteInstance": "Xóa phiên bản",
+    "deleteInstanceTitle": "Xóa phiên bản WeChat này?",
+    "deleteInstanceWarning": "Thao tác này xóa tài khoản cục bộ và phiên bản, đồng thời thu hồi liên kết dự án, cấu hình cấp sẵn và các mã ghép đôi còn hiệu lực. Lịch sử trò chuyện được giữ lại.",
+    "deleteInstanceConfirm": "Xóa phiên bản",
+    "rescan": "Quét lại",
+    "rescanTitle": "Thay thế đăng nhập WeChat?",
+    "rescanWarning": "Quét mã QR mới cho cùng phiên bản này. Thông tin xác thực đã lưu không thay đổi nếu bạn hủy hoặc đăng nhập thất bại; chỉ được thay thế sau khi đăng nhập thành công.",
+    "rescanConfirm": "Quét mã QR mới",
+    "rePair": "Ghép đôi lại",
+    "rePairTitle": "Hủy liên kết và ghép đôi lại phiên bản này?",
+    "rePairWarning": "Thao tác này hủy liên kết dự án hiện tại và vô hiệu hóa mã cũ. Tài khoản vẫn đăng nhập, nhưng việc gửi tin thông thường bị tạm dừng cho đến khi mã ghép đôi mới được xác minh và sử dụng.",
+    "rePairConfirm": "Hủy liên kết và tạo mã"
   }
 }

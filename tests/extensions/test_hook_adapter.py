@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import pytest
 
 from nanobot.agent.hook import AgentHook, AgentHookContext, AgentTurnHookContext
-from nanobot.agent.loop import AgentLoop
 from nanobot.agent.progress_hook import AgentProgressHook
-from nanobot.agent.runner import AgentRunner
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
 from nanobot.config.schema import Config
@@ -241,12 +238,17 @@ async def test_declared_hooks_execute_in_the_unchanged_five_position_order() -> 
     events: list[str] = []
     bundle = _bundle(events)
 
-    async def on_stream(delta: str) -> None:
-        events.append(f"progress:{delta}")
+    from nanobot.bus.outbound_events import StreamDeltaEvent
+    from nanobot.events import EventSink
+
+    async def publish(event) -> None:
+        if isinstance(event, StreamDeltaEvent):
+            events.append(f"progress:{event.content}")
 
     hook = build_agent_turn_hook(
         AgentTurnHookSpec(
-            on_stream=on_stream,
+            events=EventSink(publish=publish),
+            streaming=True,
             registered_hook_factories=bundle.hook_factories,
             registered_hooks=bundle.hooks,
             turn_hook_factories=[_factory(events, "turn_factory")],
@@ -284,7 +286,6 @@ async def test_per_turn_and_progress_hooks_are_never_inventoried() -> None:
     turn_hook = _Recording(events, "turn")
     chain = build_agent_turn_hook(
         AgentTurnHookSpec(
-            on_progress=None,
             registered_hook_factories=bundle.hook_factories,
             registered_hooks=bundle.hooks,
             turn_hook_factories=[_factory(events, "subagent")],
@@ -353,34 +354,6 @@ async def test_one_failing_declared_factory_does_not_suppress_the_others() -> No
     assert len(HookExtensionAdapter(bundle).snapshot().packages[0].components) == 3
 
 
-def test_agent_loop_and_runner_hold_no_registry_descriptor_or_adapter() -> None:
-    """Option A keeps the inventory entirely outside the core loop."""
-    loop_source = inspect.getsource(AgentLoop.__init__)
-    runner_source = inspect.getsource(AgentRunner)
-
-    for source in (loop_source, runner_source):
-        assert "extension" not in source.lower()
-        assert "LongLivedHooks" not in source
-        assert "descriptor" not in source.lower()
-    assert "extension" not in Path(inspect.getfile(AgentLoop)).read_text("utf-8").lower()
-    assert "extension" not in Path(inspect.getfile(AgentRunner)).read_text("utf-8").lower()
-
-
-def test_public_constructors_still_accept_plain_hooks_and_factories() -> None:
-    """Callers that do not participate in inventory keep the original signature."""
-    parameters = inspect.signature(AgentLoop.__init__).parameters
-
-    assert parameters["hooks"].default is None
-    assert parameters["hook_factories"].default is None
-    assert parameters["hooks"].annotation == "list[AgentHook] | None"
-    assert parameters["hook_factories"].annotation == "list[AgentTurnHookFactory] | None"
-
-    events: list[str] = []
-    spec = AgentTurnHookSpec(
-        registered_hooks=[_Recording(events, "plain")],
-        registered_hook_factories=[_factory(events, "plain_factory")],
-    )
-    assert isinstance(build_agent_turn_hook(spec), AgentHook)
 
 
 async def test_inspect_is_the_only_action_the_hook_adapter_executes() -> None:

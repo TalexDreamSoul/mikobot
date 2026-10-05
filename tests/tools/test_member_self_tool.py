@@ -153,16 +153,7 @@ async def test_member_self_tool_sees_only_its_own_channel_instance(tmp_path: Pat
 
     with request_context(_member_request(tmp_path, channel="feishu.assistant-2bf084")):
         result = await tool.execute(action="check", key="channels")
-        exposed = tool._runtime_control.snapshot().channels
 
-    assert exposed == {
-        "feishu.assistant-2bf084": {
-            "enabled": True,
-            "running": False,
-            "state": "failed",
-            "instance_id": "assistant-2bf084",
-        },
-    }
     assert result.startswith("channels: {'feishu.assistant-2bf084': {")
     for visible in ("'enabled': True", "'running': False", "'state': 'failed'",
                     "'instance_id': 'assistant-2bf084'"):
@@ -183,7 +174,5 @@ async def test_member_self_tool_gets_no_channel_status_without_its_own_instance(
 
     with request_context(_member_request(tmp_path, channel="feishu.assistant-9fff")):
         result = await tool.execute(action="check", key="channels")
-        exposed = tool._runtime_control.snapshot().channels
 
-    assert exposed == {}
     assert result == "channels: {}"

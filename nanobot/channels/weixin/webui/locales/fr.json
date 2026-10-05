@@ -1,17 +1,8 @@
 {
-  "description": "Utilisez Mikobot depuis les conversations WeChat.",
-  "requirements": "Configuration du canal WeChat et passerelle",
   "setup": {
     "primaryAction": "Connecter WeChat",
     "docsLabel": "Ouvrir le guide WeChat",
     "officialLabel": "Ouvrir WeChat",
-    "tryIt": "Après la connexion par QR code, envoyez un message privé au compte connecté.",
-    "summary": "WeChat se connecte par QR code et enregistre localement l’état du compte.",
-    "steps": [
-      "Cliquez sur Connecter et scannez le QR code avec WeChat.",
-      "Gardez la passerelle locale active pendant la réception des messages.",
-      "Envoyez un message privé test pour confirmer la connexion."
-    ],
     "fields": {
       "allowFrom": {
         "label": "Utilisateurs autorisés",
@@ -25,7 +16,7 @@
         "label": "Envoyer la progression"
       },
       "sendToolHints": {
-        "label": "Envoyer les indications d’outils"
+        "label": "Envoyer un résumé de l’activité des outils"
       },
       "streaming": {
         "label": "Utiliser l’API de streaming"
@@ -37,7 +28,7 @@
         "label": "Limite de progression structurée"
       },
       "contextMessageBudget": {
-        "label": "Budget de messages du contexte"
+        "label": "Nombre maximal de messages de contexte"
       },
       "blockStreaming": {
         "label": "Envoyer la réponse par blocs"
@@ -61,15 +52,14 @@
         "label": "Répertoire d’état"
       },
       "pollTimeout": {
-        "label": "Délai d’interrogation"
+        "label": "Délai d’interrogation (secondes)"
       }
     }
   },
   "custom": {
     "qrAlt": "QR code de connexion WeChat",
     "scanTitle": "Scanner avec WeChat",
-    "scanDescription": "Scannez ce code avec WeChat. Mikobot enregistre localement l’état du compte après la connexion.",
-    "waiting": "En attente du scan WeChat...",
+    "waiting": "En attente de lecture du QR code avec WeChat…",
     "connected": "WeChat est connecté.",
     "stopped": "Connexion WeChat arrêtée.",
     "connecting": "Connexion...",
@@ -79,6 +69,18 @@
     "expired": "La connexion WeChat a expiré. Scannez à nouveau pour vous reconnecter.",
     "failed": "Impossible de connecter WeChat. Réessayez.",
     "verifyPlaceholder": "Code",
-    "verifySubmit": "Vérifier"
+    "verifySubmit": "Vérifier",
+    "deleteInstance": "Supprimer l’instance",
+    "deleteInstanceTitle": "Supprimer cette instance WeChat ?",
+    "deleteInstanceWarning": "Le compte local et l’instance seront supprimés ; son affectation au projet, son provisionnement et ses codes d’association actifs seront révoqués. L’historique des conversations sera conservé.",
+    "deleteInstanceConfirm": "Supprimer l’instance",
+    "rescan": "Scanner à nouveau",
+    "rescanTitle": "Remplacer la connexion WeChat ?",
+    "rescanWarning": "Scannez un nouveau code QR pour cette même instance. Les identifiants enregistrés restent inchangés en cas d’annulation ou d’échec ; ils ne sont remplacés qu’après une connexion réussie.",
+    "rescanConfirm": "Scanner un nouveau code QR",
+    "rePair": "Associer à nouveau",
+    "rePairTitle": "Dissocier puis réassocier cette instance ?",
+    "rePairWarning": "L’affectation actuelle au projet sera supprimée et les anciens codes invalidés. Le compte reste connecté, mais la livraison normale est suspendue jusqu’à la vérification et l’utilisation du nouveau code.",
+    "rePairConfirm": "Dissocier et créer un code"
   }
 }

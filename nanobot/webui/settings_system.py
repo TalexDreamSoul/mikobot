@@ -39,6 +39,7 @@ from nanobot.webui.settings_contracts import (
     query_first,
     query_first_alias,
 )
+from nanobot.webui.settings_runtime import runtime_config_payload
 
 if TYPE_CHECKING:
     from nanobot.webui.settings_services import WebUISettingsServices
@@ -80,6 +81,7 @@ def _safe_action_error(exc: Exception) -> str:
 
 @dataclass(frozen=True)
 class SystemSettingsOperations:
+    update_runtime_config: SettingsOperation
     cli_apps_payload: SettingsOperation
     cli_apps_action: SettingsOperation
     validate_channel_config: SettingsOperation
@@ -96,6 +98,7 @@ _MAX_PAIRING_ACKNOWLEDGEMENTS = 256
 
 
 class SystemSettingsPayload(TypedDict):
+    runtime_config: dict[str, Any]
     runtime: dict[str, Any]
     usage: dict[str, Any]
     advanced: dict[str, Any]
@@ -145,6 +148,7 @@ def system_settings_payload(
         workspace=config.workspace_path,
     )
     return {
+        "runtime_config": runtime_config_payload(config),
         "runtime": {
             "config_path": str(config_path.expanduser()),
             "workspace_path": str(config.workspace_path),
@@ -153,7 +157,6 @@ def system_settings_payload(
             "heartbeat": {
                 "enabled": config.gateway.heartbeat.enabled,
                 "interval_s": config.gateway.heartbeat.interval_s,
-                "keep_recent_messages": config.gateway.heartbeat.keep_recent_messages,
             },
             "dream": {
                 "schedule": defaults.dream.describe_schedule(),
@@ -263,6 +266,8 @@ def _requires_system_admin(action: str) -> bool:
     """
     if action.startswith("pairing-"):
         return True
+    if action == "runtime-config-update":
+        return True
     return action.startswith("cli-") and action != "cli-list"
 
 
@@ -330,6 +335,24 @@ class SystemSettingsHandler:
         self._channel_pairing_acknowledgements.discard(key)
         return stored
 
+    async def close(self) -> None:
+        """Release channel-owned setup sessions during gateway shutdown."""
+        connectors = tuple(self._channel_connectors.items())
+        self._channel_connectors.clear()
+        for channel_name, connector in connectors:
+            close = getattr(connector, "close", None)
+            if not callable(close):
+                continue
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                self.logger.exception(
+                    "failed to close {} WebUI connector",
+                    channel_name,
+                )
+
     async def handle(
         self,
         action: str,
@@ -342,6 +365,22 @@ class SystemSettingsHandler:
         if _requires_system_admin(action) and not _is_server_derived_admin(request):
             return SettingsRouteResult.failure(
                 403, "System administrator access is required"
+            )
+        if action == "runtime-config-update":
+            values = (request.payload or {}).get("values")
+            if not isinstance(values, dict):
+                return SettingsRouteResult.failure(400, "Runtime settings must be an object")
+            try:
+                payload = await asyncio.to_thread(
+                    self.settings.mutate,
+                    operations.update_runtime_config,
+                    values,
+                    local_browser=request.local_browser,
+                )
+            except WebUISettingsError as exc:
+                return SettingsRouteResult.failure(exc.status, exc.message)
+            return SettingsRouteResult.success(
+                payload, decorate_restart=True, restart_section="runtime",
             )
         if action == "cli-list":
             return await self._cli_apps(request, operations)
@@ -519,8 +558,7 @@ class SystemSettingsHandler:
         action: str,
         operations: SystemSettingsOperations,
     ) -> SettingsRouteResult:
-        # The registry refuses a non-administrator too, but only after the target has been
-        # resolved and reported. Refusing here keeps authorization ahead of disclosure.
+        # Refuse before resolving and disclosing an extension target.
         if not _is_server_derived_admin(request):
             return SettingsRouteResult.failure(
                 403, "System administrator access is required"
@@ -701,6 +739,16 @@ class SystemSettingsHandler:
             target = resolve_nanobot_feature_target(
                 self._registry().snapshot(), channel_name, requested_instance_id
             )
+            if channel_name == "weixin" and (
+                (action == "start" and query_first(request.query, "mode") == "create")
+                or action in {"poll", "cancel"}
+            ):
+                package_target = resolve_extension_package_target(
+                    self._registry().snapshot(), channel_name,
+                    source=ExtensionSource.CHANNEL_PACKAGE,
+                )
+                if package_target is not None and package_target.target_id == extension_id:
+                    target = package_target
             if target is None or target.target_id != extension_id:
                 raise OptionalFeatureError("extension action target is unavailable", status=404)
             if action == "start" and (not revision or target.revision != revision):

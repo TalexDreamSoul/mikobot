@@ -170,21 +170,13 @@ describe("Capability install risk acknowledgement", () => {
 
     renderSettingsView({ initialSection: "browser", initialSettings: payload });
 
-    fireEvent.pointerDown(await screen.findByRole("button", { name: /DuckDuckGo/ }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Olostep" }));
-    expect(
-      await screen.findByText(
-        "Saving asks you to confirm the Olostep support install first. Save again once it finishes.",
-      ),
-    ).toBeInTheDocument();
+    fireEvent.keyDown(await screen.findByRole("combobox", { name: /DuckDuckGo/ }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: "Olostep" }));
 
     fireEvent.change(screen.getByPlaceholderText("Enter API key"), {
       target: { value: "olostep-key" },
     });
-    const save = screen
-      .getAllByRole("button", { name: "Save" })
-      .find((button) => !(button as HTMLButtonElement).disabled);
-    if (!save) throw new Error("enabled Save button was not found");
+    const save = screen.getByRole("button", { name: "Install and enable", exact: true });
     fireEvent.click(save);
 
     const confirmation = await screen.findByRole("dialog", {

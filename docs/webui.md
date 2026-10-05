@@ -2,9 +2,14 @@
 
 <!-- Meta description: Run nanobot from a browser WebUI with persistent and temporary chats, visible tool activity, workspace controls, Apps, skill discovery, settings, and Automations. -->
 
-The WebUI is nanobot's browser workbench for persistent topics, temporary
-chats, visible agent activity, workspace controls, Apps, skill discovery,
-settings, and Automations in one place.
+The WebUI is nanobot's browser workbench for persistent topics, grouped
+conversation panes, temporary chats, visible agent activity, workspace controls,
+Apps, skill discovery, settings, and Automations in one place. It shares the
+gateway and saved sessions with the native terminal client.
+
+For a visual tour, see the [README feature gallery](../README.md#-webui).
+This guide follows the current source tree; some features are newer than the
+published release.
 
 The published `nanobot-ai` wheel already includes the WebUI bundle. You only need
 the `webui/` source directory when you are changing the frontend itself.
@@ -78,7 +83,9 @@ This path avoids hand-editing `config.json` for normal setup. Use the reference 
 | Area | Use it for |
 |---|---|
 | Topics | Start persistent topics or temporary chats; switch, search, reorder, fork, or delete persistent topics |
+| Conversation groups | Arrange up to four independent topics in one workbench with resizable panes |
 | Agent activity | See thinking, tool calls, file edits with diffs, command output, and generated artifacts in context |
+| Context usage | Inspect current context size, per-round token and cache usage, and compaction progress |
 | Workspace | Pick the project workspace before asking for file or shell work |
 | Access | Choose the access mode for local capabilities allowed by your gateway configuration |
 | Composer | Send text, images, voice input, slash commands, and `@` mentions for topics, Apps, or MCP presets |
@@ -108,6 +115,14 @@ Designating a main project does not change the active project, memberships, or t
 permanent built-in home. Switch the designation elsewhere before deleting the main
 project. Replacing it also revokes the previous project's cross-project tool
 authority; an affected running turn must start again with the current policy.
+### Optional GitHub invitation
+
+Returning users may see an illustrated invitation to star nanobot on GitHub.
+It follows the WebUI language and theme; the button's star animation also
+supports keyboard focus and respects reduced-motion preferences. **Maybe later**,
+the close button, or Escape dismisses it for now. **Don't ask again** or opening
+GitHub from the invitation stops future reminders for the gateway instance,
+including in other browsers. Starring is optional and never required to use nanobot.
 
 ## Topic Workspace
 
@@ -116,22 +131,154 @@ workspace selection, and linked automations. Use a new topic when you want a
 separate context; use fork when you want to continue from an existing point
 without changing the original thread.
 
+On touch devices, sidebar action buttons stay visible with larger touch areas
+for topics, conversation groups, panes, and projects. Tap a title to select it
+or the adjacent action button for its menu. Desktop actions still appear on
+hover or keyboard focus. Press Escape in an action menu to return focus to its
+button and continue with Tab, including from the **Move to** submenu. ArrowLeft
+leaves the submenu and returns to **Move to** without closing the parent menu.
+Choosing Rename instead moves focus into the
+dialog; clicking outside a menu keeps focus at the clicked destination.
+
 Drag a topic within its current sidebar group to keep frequently used work in
 your preferred order. Drag a topic from the sidebar into the composer when you
 want to reference it in the next message instead of switching to it.
 
-The message timeline shows both user-visible replies and agent activity. Long
-tool or reasoning sections can be expanded when you need the details.
+### Conversation groups and panes
+
+Open a topic's sidebar action menu and choose **Create group** to turn it into
+a conversation group. Use **Add pane** in the workbench header to start another
+topic alongside it. A group holds up to four panes. To bring in an existing
+topic, drag it onto the group or use **Move to** in its action menu.
+
+Use **Pane layout** to choose columns, rows, a grid, BSP, or a main pane with a
+stack. Drag a divider to resize panes. Each pane has its own conversation;
+select one to direct the shared composer to that topic. Group membership and
+layout persist across refreshes. Grouping topics does not merge their histories.
+
+To bring another topic's work into a conversation, select it from the `@` menu
+or drag it from the sidebar into the composer. The agent can read the selected
+session and exchange messages with other saved sessions. See [Composer](#composer)
+for the distinction between an attached reference and plain text.
+
+### Activity and context usage
+
+The message timeline shows replies and agent activity. Expand the **Worked for**
+section to inspect the reasoning and tool activity for a completed turn.
 
 When the agent writes or edits files, the activity item shows the target path,
-status, changed line counts, and, when available, a unified diff. Use **View
-diff** to expand the change; large diffs may hide unchanged lines or truncate the
-inline preview. Use **Open file** from a file edit to open the read-only file
-preview panel.
+status, and changed line counts. Choose **Settings → Appearance → File edit
+display** to control the detail: **Summary** shows the change summary, **Diff**
+shows available unified patches inline, and **Collapsed diff** lets you expand
+them with **View diff**. Large diffs may hide unchanged lines or truncate the
+inline preview. Select the filename in the activity row to open the read-only
+file preview panel.
+
+Files open as tabs in one preview pane. Select another file to add or switch a
+tab without reopening the pane; close a tab with its **×**, or close the pane
+with **Escape**. Tabs and width follow each session while the WebUI remains open.
+They are kept only in memory and cleared when that session is deleted or the
+connection ends. The pane overlays the conversation on narrow screens.
+
+Text previews include up to 384 KiB, with a notice when the file is truncated.
+Large previews show readable text before adding syntax colors; very large or
+minified source stays plain text. All previewed text remains available for
+selection and browser search, and the code pane scrolls in both directions.
+
+PNG, JPEG, GIF and WebP files up to 8 MiB can be previewed as images.
+Hover or focus an image file reference for a compact quick look, or select it
+to open the pane. Select the preview image for the full-size viewer, which
+supports zoom controls, pinch-to-zoom and panning. HTML and SVG files remain
+read-only source previews rather than executable pages.
+
+A plain image file link does not automatically insert a large image into the
+reply. Explicit Markdown images appear inline; image attachments use a compact
+gallery, showing at most four thumbnails before a count of the remaining images.
+An image already displayed inline is not duplicated in the attachment gallery.
+
+Select a file reference to preview it. Right-click the reference or its preview
+tab to copy its absolute or project-relative path. Keyboard users can focus a
+reference and press **Shift+F10**.
+Paths are resolved on the gateway machine, which may not be the computer running
+your browser. Files outside the project do not have a project-relative path.
+If a reference cannot be resolved, you can still copy the original reference;
+the menu does not invent an absolute path. Finder, external editor and terminal
+launching are not available from this browser menu.
 
 File previews follow the active topic's access mode. Restricted workspace access
 previews only files under the selected workspace. Full Access can preview files
 outside the workspace when that access mode is allowed by the gateway.
+
+Website links normally open in a new browser tab. Right-click a link (or press
+**Shift+F10** while it is focused) for link actions. On mobile, use the reply's
+**Message actions → View links** menu. **Preview website** appears only when the
+current browser and URL allow credential-isolated embedding; otherwise the menu
+explains the restriction and keeps **Open in browser** and **Copy link** available.
+Sites can still refuse embedding through their own security headers. nanobot
+does not proxy pages or bypass those restrictions; use **Open in browser** instead.
+
+On touch devices with Visual Viewport support, the app follows the visible area
+when the on-screen keyboard opens or pans the page. Navigation and the composer
+stay in view while messages scroll independently. Session search also follows
+the visible area: the search field stays above the keyboard and results scroll
+inside the dialog. In short landscape viewports, its input and results sit side
+by side so a result remains reachable. Taller dialogs scroll from their top
+instead of centering content outside the visible area. The `@` mention and `/` command
+menus use the visible app area above or below the composer, including when the
+keyboard pans the page. Scroll within a menu to reach more results. Mention rows
+use the app's larger touch targets on phones while retaining desktop density.
+In very short, wide viewports (such as landscape with the keyboard open), menus
+sit beside the input instead of overflowing the scrollable composer. Scroll the
+menu for more candidates and the input area for its controls. If the browser
+bars and keyboard leave no usable page area, dismiss
+the keyboard or return to portrait. Pinch zoom keeps the existing layout instead of resizing it to the
+magnified area; normal fitting resumes when
+you return to the default zoom. Non-touch desktop and native-host layout remain
+unchanged.
+
+On touch devices, compact text fields use a readable 16px minimum baseline to
+avoid Safari automatically zooming the page on focus. Desktop field density
+and manual page zoom remain unchanged.
+
+On touch devices, preview tab controls and
+the full-screen image viewer's close button use larger touch areas without
+enlarging the icons. Preview tabs remain horizontally scrollable when space is
+limited.
+
+Open the context indicator beside the composer model badge to see how much of
+the model's context window is in use. The **Recent rounds** chart shows input
+tokens for each logical model round, including tool-call rounds. Hover or focus
+a bar for input tokens, output tokens, generation time, and the KV cache hit
+rate when reported. Provider usage may be estimated or unavailable; these
+figures are not a billing statement.
+
+When nanobot compacts context, the timeline shows its progress and outcome.
+The model continues with a summary and any messages after it; messages covered
+by the summary remain in your chat history but are no longer sent to the model
+verbatim. Use `/compact` to compact the current topic's context manually.
+See [Memory](./memory.md) for compaction and Dream consolidation.
+
+### Delegated work
+
+When nanobot delegates work to subagents, a work group appears under the request
+that started it. Progress continues to update after the main reply finishes.
+Completed tasks stay available for inspection, and refreshing or reopening the
+WebUI restores saved progress and results without restarting the work.
+
+Work groups follow the browser's **Activity details** preference: **Auto** opens
+running work and folds it when all tasks finish; **Expanded** keeps it open by
+default. You can also expand or fold a group manually to check individual
+outcomes, including failures and partial results.
+
+Select a task to open its read-only conversation on the right, or across the
+screen on mobile. Read its messages, tool activity, file edits, and results,
+including formatted Markdown. Closing the details leaves the task running; its
+stop button cancels only that task. Give follow-up instructions to nanobot in
+the main conversation.
+
+These controls appear when the connected host supports subagent tasks. See
+[Subagents](./concepts.md#subagents) for cancellation, saved history, and gateway
+restart behavior.
 
 ## Temporary Chats
 
@@ -147,9 +294,16 @@ You can keep more than one temporary chat open and switch between them under
 open. Reloading or closing the page, restarting the gateway, or losing the
 WebSocket connection ends all of them. They cannot be recovered afterward.
 
+Temporary chats do not create saved files for oversized text tool results; these
+stay in memory and are truncated to the configured tool-result limit. Tool-call
+arguments and execution-error details are hidden from the built-in tool logs,
+while tool activity remains visible in the current chat.
+
 Temporary does not mean consequence-free. Requests still go to the configured
 model provider, and tools can still change files, run commands, or affect
-external services. Temporary chats always use the default workspace in
+external services. Files and image artifacts created or exported by tools
+(including images returned by MCP tools) are not erased when the chat closes.
+Temporary chats always use the default workspace in
 Restricted mode; the project picker and Full Access are unavailable. Commands
 and tools that create durable goals, automations, or subagent work are also
 unavailable. Use a regular topic when you need reusable context, scheduled work,
@@ -160,7 +314,8 @@ or a result you must retain.
 Use the workspace picker before starting project-specific work. This gives the
 agent the right project context for file paths, shell commands, and topic
 metadata. A locally hosted WebUI opens the operating system's folder chooser
-when one is available; remote deployments keep the manual absolute path entry.
+when one is available; remote deployments use a manual absolute path on the
+nanobot host. The browser's local filesystem is never used for project selection.
 
 Selecting a project does not replace the configured agent workspace. The two
 paths have different responsibilities:
@@ -189,9 +344,10 @@ neighboring memory or profile files, and it does not allow writes outside the
 selected project. These tool exceptions do not broaden the browser's file
 preview boundary.
 
-Remote WebUI connections may reduce access for the current workspace. Selecting a
-different workspace or enabling Full Access remains limited to local and native
-clients.
+Remote WebUI connections may reduce access for the current workspace and may
+select a different workspace by entering its server-side path. A remote project
+change must use Restricted mode; enabling Full Access remains limited to local
+and native clients.
 
 ## Composer
 
@@ -202,10 +358,24 @@ MCP presets, or persisted topics. Topics have short, pronounceable handles such 
 from the menu, or drag it from the sidebar, to attach its structured reference.
 Typing the same text without selecting it remains plain text.
 
-The agent can inspect an attached topic with `read_session`, discover persisted
+On touch-primary phones and tablets, **Enter** inserts a newline; tap the send
+arrow to submit. This also applies when a coarse-pointer tablet has a hardware
+keyboard attached. On desktop, **Enter** sends and **Shift+Enter** adds a newline.
+An open slash-command or mention menu takes precedence: Enter selects its item.
+
+While a response is running, the send arrow delivers a ready draft as guidance
+for the active turn; it does not issue a stop command. Other messages already
+waiting in the queue stay there. On desktop, Enter queues guidance and a second
+Enter with an empty input sends that queued message immediately. Queued messages
+also have a **Send now** action. The primary button shows **Stop** when there is
+no sendable draft; clear the draft or use `/stop` to stop instead of sending it.
+
+The agent can inspect attached topics with `read_session`, discover persisted
 topics with `list_sessions`, and send asynchronous `send_session_message` requests.
-Member references and messages require the same user and project; membership in two
-projects does not merge their conversation contexts.
+Member references and messages require the same user and project; membership in
+two projects does not merge their conversation contexts. The host owner's King
+authority is separate from ordinary project or member access.
+
 The model badge shows the current model or preset and links to model settings when
 setup is incomplete.
 
@@ -226,6 +396,25 @@ Open **Settings → Channels** to connect chat apps without assembling JSON by h
 The platform itself may still require you to create a bot, enable event permissions, copy a token, or configure a webhook. Use [`chat-apps.md`](./chat-apps.md) for those platform-side prerequisites and for manual JSON/reference options.
 
 Test a new channel with a private DM. When a supported channel sends a pairing code, the WebUI surfaces the pending request so you can approve the sender. Keep access narrow; do not use a wildcard allowlist unless public access is intentional.
+
+### WeChat instance controls
+
+Each configured WeChat instance has three separate actions:
+
+- **Scan again** confirms replacement of that same instance and requests a fresh QR
+  immediately. Cancellation and failure preserve saved credentials. Polling does not
+  block cancellation; a cancelled or deleted session cannot commit late credentials.
+- **Pair again** keeps the account and selects a target project and permitted assignee.
+  After unlink confirmation, generating a new one-time Pair Code revokes the old
+  assignment and superseded codes. Normal delivery stays suspended until the new code
+  is verified and consumed. Runtime activation failures remain visible separately.
+- **Delete instance** confirms the exact displayed identity and revision, stops only
+  its runtime, removes its known account file/configuration, and revokes assignment,
+  provisioning and active codes. Siblings, projects and conversation history remain.
+
+Deleting the last instance leaves an empty instance list; it does not recreate a
+default account. Use **Add another WeChat bot** to begin a new connection.
+
 
 ### Projects, members, and channel assignments
 
@@ -341,6 +530,11 @@ default **Ready** view shows only capabilities that can be used immediately:
   page. Presets such as Xmind, Notion, and Linear already use OAuth. HTTPS and
   localhost WebUIs return automatically; a remote plain-HTTP WebUI shows one
   field for pasting the complete localhost callback URL.
+
+CLI Apps run with a limited environment that excludes provider API keys. On
+Unix, they inherit `XDG_RUNTIME_DIR` when it is set in the gateway's environment,
+so desktop CLIs such as Obsidian can locate the running application. Start the
+gateway in the same desktop session as the app to inherit that runtime directory.
 
 Apps intentionally does not list nanobot runtime support packages such as
 `api` or `bedrock`. Those packages enable providers, servers, or channels; they
@@ -500,6 +694,55 @@ Leave remote package installs disabled when the WebUI is exposed beyond a
 private, trusted network.
 
 ## Troubleshooting
+
+### Links and website previews
+
+HTTP(S) links in replies have a **Link actions** menu: right-click the link or
+press Shift+F10 while it is focused. Touch and hold keeps the browser's native
+link menu. For in-app actions on touch devices, open the message's existing
+**Message actions → View links** entry. It lists only the web links rendered in
+that message, not URLs inside code blocks or file references. Choose a link to
+copy it, open it externally, or preview it beside the current conversation.
+On phone-sized screens, Copy and Message actions sit below the message, leaving
+the full text width available. Message actions opens a bottom sheet; close it
+with its close button, by tapping outside, or with Escape. Desktop keeps the
+hover-triggered message popover.
+On desktop, hovering or focusing a message also reveals a short timestamp below
+its actions: a 24-hour clock for today, or month/day for every other date. Hover
+or focus that label for the full local date and time, including the year. Replies
+use their completion timestamp when available, otherwise their creation timestamp.
+There is no persistent action button beside each link and no custom long-press
+gesture to interfere with scrolling or text selection.
+Ordinary clicks still open links in a browser tab. File and session links keep
+their own behavior.
+
+The sidebar shares space with file previews and has refresh, external-open and
+close controls. Escape closes it when focus is in the nanobot page, unless a
+menu or dialog handles Escape first. Once focus is inside a third-party page,
+use the sidebar's close button. The opened address and width are remembered
+per session for this app connection, not written to browser storage. Returning
+to a session reloads the original address; it does not preserve the website's
+DOM, navigation history or forms. The header shows the **original link**, not a
+live address bar for navigation inside the embedded page.
+
+This is a restricted preview, not a full browser. It requires browser support
+for credentialless iframes and is disabled in the native host until a separate
+untrusted-content boundary is available. Unsupported browsers can still copy
+links and open new tabs. Previews use an opaque-origin sandbox with scripts
+but without same-origin access, forms, popups, downloads or top navigation.
+No gateway token, host bridge or parent storage is passed into the frame.
+
+Sites may refuse embedding via CSP or X-Frame-Options, and sign-in or some
+interactive features may not work. Use **Open in browser** if the frame is blank
+or reports a failure. The browser does not reliably expose an embedding failure
+to nanobot, so a frame load event is not presented as a success signal. Nanobot
+does not proxy pages or bypass their headers. Same-origin nanobot URLs and
+HTTP pages embedded from an HTTPS WebUI are not previewed.
+
+`localhost` and loopback addresses refer to the device running your browser,
+not a remote nanobot gateway. This feature does not forward remote ports.
+
+### Connection checks
 
 If the page does not open, check these in order:
 

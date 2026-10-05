@@ -4,7 +4,6 @@ import asyncio
 import json
 import time
 from dataclasses import replace
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -99,6 +98,67 @@ def test_reply_progress_opt_in_enables_progress_transport() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("guard", ["accepted", "stale", "unacknowledged", "non_admin"])
+async def test_delete_instance_preserves_sibling_credentials_and_history(tmp_path, monkeypatch, guard):
+    from nanobot.collaboration import CollaborationStore
+
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = store.ensure_local_owner(tmp_path / "workspace")
+    for instance in ("default", "sibling"):
+        store.record_channel_provision(owner.id, channel_type="weixin", instance_id=instance)
+        directory = tmp_path / instance
+        directory.mkdir()
+        (directory / "account.json").write_text(json.dumps({"token": instance}), encoding="utf-8")
+        (directory / "history.jsonl").write_text("retained conversation", encoding="utf-8")
+    config = Config.model_validate({"channels": {"weixin": {"instances": [
+        {"id": instance, "token": instance, "stateDir": str(tmp_path / instance), "enabled": False}
+        for instance in ("default", "sibling")
+    ]}}})
+    plugin = ChannelPlugin(
+        name="weixin", display_name="WeChat", runtime=f"{__name__}:_PairingRuntime",
+        management=WEIXIN_MANAGEMENT,
+    )
+    monkeypatch.setattr(channel_adapters, "discover_plugins", lambda _names=None: {"weixin": plugin})
+
+    def mutate(change):
+        return change(config)
+
+    async def revoke(actor, channel, instance):
+        store.revoke_channel_instance(actor, channel_type=channel, instance_id=instance)
+
+    async def runtime_action(action, channel, instance):
+        return {"ok": True, "handled": True}
+
+    adapter = ChannelExtensionAdapter(
+        lambda: config, dependencies_installed=lambda *_args: True,
+        services=ChannelExtensionServices(
+            mutate_config=mutate, runtime_action=runtime_action, revoke_instance=revoke,
+        ),
+    )
+    [package] = adapter.snapshot().packages
+    selected = next(component for component in package.components if component.id.endswith(":default"))
+    before = store.path.read_bytes()
+    config_before = config.model_dump()
+    result = await adapter.execute(ExtensionActionRequest(
+        context=ExtensionActionContext(actor_id=owner.id, is_system_admin=guard != "non_admin"),
+        target_id=selected.id, action=ExtensionAction.DELETE_INSTANCE,
+        expected_revision="stale" if guard == "stale" else selected.revision,
+        risk_acknowledged=guard != "unacknowledged",
+    ))
+    assert result.ok is (guard == "accepted")
+    assert (tmp_path / "sibling" / "account.json").read_text() == json.dumps({"token": "sibling"})
+    assert (tmp_path / "default" / "history.jsonl").read_text() == "retained conversation"
+    if guard == "accepted":
+        assert not (tmp_path / "default" / "account.json").exists()
+        assert [row["id"] for row in config.channels.weixin["instances"]] == ["sibling"]
+        assert [row.instance_id for row in store.list_claimable_channels(owner.id)] == ["sibling"]
+    else:
+        assert store.path.read_bytes() == before
+        assert config.model_dump() == config_before
+        assert (tmp_path / "default" / "account.json").read_text() == json.dumps({"token": "default"})
+
+
+@pytest.mark.asyncio
 async def test_pairing_completion_persists_once_then_reconciles_only_selected_instance(
     tmp_path, monkeypatch
 ) -> None:
@@ -121,14 +181,9 @@ async def test_pairing_completion_persists_once_then_reconciles_only_selected_in
             },
         ]
     }
-    config = SimpleNamespace(
-        channels=SimpleNamespace(
-            weixin=section,
-            send_progress=False,
-            send_tool_hints=False,
-            show_reasoning=False,
-        )
-    )
+    from nanobot.config.schema import Config
+
+    config = Config.model_validate({"channels": {"weixin": section}})
     saved: list[object] = []
     runtime_actions: list[tuple[str, str, str]] = []
     plugin = ChannelPlugin(
@@ -153,18 +208,10 @@ async def test_pairing_completion_persists_once_then_reconciles_only_selected_in
         ),
     )
 
-    manager = ChannelManager.__new__(ChannelManager)
-    manager.config = config
-    manager.bus = MessageBus()
-    manager._config_path = tmp_path / "config.json"
-    manager.channels = {}
-    manager._channel_owners = {}
-    manager._channel_runtime_specs = {}
-    manager._channel_errors = {}
-    manager._channel_tasks = {}
-    manager._pairing_only_channels = set()
-    manager._started = False
-    manager._collaboration_repository = object()
+    manager = ChannelManager(
+        config, MessageBus(), config_path=tmp_path / "config.json",
+        collaboration_repository=object(),
+    )
     manager._verify_assignment_pairing = AsyncMock(return_value=True)
 
     pairing = await manager.channel_pairing_action("weixin", "default")

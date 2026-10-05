@@ -714,6 +714,37 @@ class CollaborationStore:
             self._save(state)
             return True
 
+    def revoke_channel_instance(
+        self, actor_user_id: str, *, channel_type: str, instance_id: str
+    ) -> bool:
+        """Revoke one deleted instance without removing conversation history."""
+        actor_user_id = _id(actor_user_id, "actor_user_id")
+        channel_type = _key(channel_type, "channel_type")
+        instance_id = _key(instance_id, "instance_id")
+        with self._state() as state:
+            self._require_user(state, actor_user_id)
+            key = _channel_instance_key(channel_type, instance_id)
+            assignment_value = state["channelAssignments"].get(key)
+            provision_value = state["channelProvisions"].get(key)
+            if not self._is_admin(state, actor_user_id):
+                if assignment_value is not None:
+                    permitted = (
+                        _channel_assignment(assignment_value).assignee_user_id == actor_user_id
+                    )
+                else:
+                    permitted = (
+                        provision_value is not None
+                        and _channel_provision(provision_value).created_by_user_id == actor_user_id
+                    )
+                if not permitted:
+                    raise CollaborationPermissionError("channel instance control is required")
+            existed = assignment_value is not None or provision_value is not None
+            self._discard_active_pairing_challenges_for_instance(state, channel_type, instance_id)
+            state["channelAssignments"].pop(key, None)
+            state["channelProvisions"].pop(key, None)
+            self._save(state)
+            return existed
+
     # -- assignment pairing --------------------------------------------------
 
     def create_pairing_challenge(
@@ -725,6 +756,7 @@ class CollaborationStore:
         instance_id: str,
         assignee_user_id: str | None = None,
         ttl_seconds: int = 600,
+        replace_assignment: bool = False,
     ) -> tuple[PairingChallenge, str]:
         """Issue a one-time Pair Code that assigns one instance to one project.
 
@@ -758,6 +790,20 @@ class CollaborationStore:
                 ):
                     raise CollaborationPermissionError(
                         "only an administrator may pair an instance you did not connect")
+            instance_key = _channel_instance_key(channel_type, instance_id)
+            assignment_value = state["channelAssignments"].get(instance_key)
+            if assignment_value is not None:
+                if not replace_assignment:
+                    raise CollaborationConflictError("confirm replacement of the current assignment")
+                assignment = _channel_assignment(assignment_value)
+                if not self._is_admin(state, actor_user_id) and (
+                    assignment.assignee_user_id != actor_user_id
+                ):
+                    raise CollaborationPermissionError("channel instance control is required")
+            if replace_assignment:
+                self._discard_active_pairing_challenges_for_instance(
+                    state, channel_type, instance_id
+                )
             now = _now()
             for key, value in tuple(state["pairingChallenges"].items()):
                 challenge = _pairing_challenge(value)
@@ -785,6 +831,8 @@ class CollaborationStore:
                 consumed_at_ms=None,
                 created_at_ms=now,
             )
+            if replace_assignment:
+                state["channelAssignments"].pop(instance_key, None)
             state["pairingChallenges"][challenge.id] = _encode_pairing_challenge(challenge)
             self._save(state)
             return challenge, code

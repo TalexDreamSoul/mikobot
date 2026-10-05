@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
@@ -24,7 +23,6 @@ from nanobot.config_base import Base
 from nanobot.security.member_access import current_member_scope
 
 if TYPE_CHECKING:
-    from nanobot.agent.subagent import SubagentStatus
     from nanobot.agent.tools.context import ToolContext
 
 
@@ -32,21 +30,6 @@ class MyToolConfig(Base):
     """Self-inspection tool configuration."""
     enable: bool = True
     allow_set: bool = False
-
-
-def _is_subagent_status(value: object) -> TypeGuard[SubagentStatus]:
-    from nanobot.agent.subagent import SubagentStatus
-
-    return isinstance(value, SubagentStatus)
-
-
-def _is_subagent_status_snapshot(value: object) -> TypeGuard[Mapping[str, object]]:
-    if not isinstance(value, Mapping):
-        return False
-    return all(
-        field in value
-        for field in ("task_id", "label", "task_description", "started_at", "phase")
-    )
 
 
 def _is_string_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
@@ -84,7 +67,7 @@ class MyTool(Tool):
         # Config management
         "_runtime_vars",
         # Subsystems
-        "runner", "sessions", "consolidator",
+        "runner", "sessions", "consolidator", "subagents",
         "dream", "auto_compact", "context", "commands",
         # Sensitive runtime state (credentials, message routing, task tracking)
         "_pending_queues",
@@ -95,13 +78,13 @@ class MyTool(Tool):
     })
 
     READ_ONLY = frozenset({
-        "subagents",  # observable but replacing it would break the system
         "tool_names",
         "exec_config",  # inspect allowed (e.g. check sandbox), modify blocked
         "web_config",  # inspect allowed (e.g. check enable), modify blocked
         "model_presets",  # config-derived catalog; changes require config reload
         "workspace_sandbox",  # read-only view of workspace enforcement level
         "request",  # current message routing metadata
+        "channels",  # only public health for the exact serving instance
     })
 
     _REQUEST_FIELDS = ("channel", "chat_id", "sender_id")
@@ -251,88 +234,7 @@ class MyTool(Tool):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _format_status(
-        st: "SubagentStatus | Mapping[str, object]",
-        indent: str = "  ",
-    ) -> str:
-        if isinstance(st, Mapping):
-            started_at = st.get("started_at", time.monotonic())
-            raw_events = st.get("tool_events", [])
-            phase = st.get("phase", "unknown")
-            iteration = st.get("iteration", 0)
-            usage = st.get("usage", {})
-            error = st.get("error")
-            stop_reason = st.get("stop_reason")
-        else:
-            started_at = st.started_at
-            raw_events = st.tool_events
-            phase = st.phase
-            iteration = st.iteration
-            usage = st.usage
-            error = st.error
-            stop_reason = st.stop_reason
-        elapsed = time.monotonic() - (
-            float(started_at) if isinstance(started_at, (int, float)) else time.monotonic()
-        )
-        tool_events = cast(list[object], raw_events) if isinstance(raw_events, list) else []
-        tool_summaries: list[str] = []
-        for raw_event in tool_events[-5:]:
-            if not isinstance(raw_event, Mapping):
-                continue
-            event = cast(Mapping[str, object], raw_event)
-            tool_summaries.append(
-                f"{event.get('name', '?')}({event.get('status', '?')})"
-            )
-        tool_summary = ", ".join(tool_summaries) or "none"
-        lines = [
-            f"{indent}phase: {phase}, iteration: {iteration}, elapsed: {elapsed:.1f}s",
-            f"{indent}tools: {tool_summary}",
-            f"{indent}usage: {usage or 'n/a'}",
-        ]
-        if error:
-            lines.append(f"{indent}error: {error}")
-        if stop_reason:
-            lines.append(f"{indent}stop_reason: {stop_reason}")
-        return "\n".join(lines)
-
-    @staticmethod
     def _format_value(val: Any, key: str = "") -> str:
-        if _is_subagent_status(val):
-            header = f"Subagent [{val.task_id}] '{val.label}'"
-            detail = MyTool._format_status(val, "  ")
-            return f"{header}\n  task: {val.task_description}\n{detail}"
-        if _is_subagent_status_snapshot(val):
-            header = f"Subagent [{val['task_id']}] '{val['label']}'"
-            detail = MyTool._format_status(val, "  ")
-            return f"{header}\n  task: {val['task_description']}\n{detail}"
-        if isinstance(val, Mapping):
-            mapping = cast(Mapping[object, object], val)
-        else:
-            mapping = None
-        if mapping and set(mapping) == {"_task_statuses"}:
-            task_statuses = mapping["_task_statuses"]
-            if isinstance(task_statuses, Mapping):
-                return MyTool._format_value(task_statuses, key)
-        if (
-            mapping
-            and (
-                _is_subagent_status(next(iter(mapping.values())))
-                or _is_subagent_status_snapshot(next(iter(mapping.values())))
-            )
-        ):
-            prefix = f"{key}: " if key else ""
-            lines = [f"{prefix}{len(mapping)} subagent(s):"]
-            for tid, st in mapping.items():
-                if _is_subagent_status(st):
-                    detail = MyTool._format_status(st, "    ")
-                    label = st.label
-                elif _is_subagent_status_snapshot(st):
-                    detail = MyTool._format_status(st, "    ")
-                    label = st.get("label", "?")
-                else:
-                    continue
-                lines.append(f"  [{tid}] '{label}'\n{detail}")
-            return "\n".join(lines)
         # Scalar types — repr is fine
         if isinstance(val, (str, int, float, bool, type(None))):
             r = repr(val)
@@ -421,6 +323,15 @@ class MyTool(Tool):
             if field not in self._REQUEST_FIELDS:
                 return ToolResult.error(f"Error: '{key}' not found")
             return self._format_value(request_values[field], key)
+        if key == "channels":
+            request_ctx = current_request_context()
+            channel = request_ctx.channel if (
+                current_member_scope() is not None and request_ctx is not None
+            ) else None
+            channels = self._runtime_control.channel_status(channel)
+            return f"channels: {channels!r}"
+        if key.startswith("channels."):
+            return ToolResult.error("Error: channels does not support dot-path access")
         if "." not in key:
             found, value = self._current_runtime_value(key)
             if found:
@@ -460,7 +371,6 @@ class MyTool(Tool):
             "max_tool_result_chars",
             "web_config",
             "exec_config",
-            "subagents",
         ):
             parts.append(self._format_value(values[k], k))
         if snapshot.scratchpad:

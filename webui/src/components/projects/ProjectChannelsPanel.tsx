@@ -24,7 +24,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Select } from "@/components/ui/select";
 import type { CollaborationProjectsController } from "@/hooks/useCollaborationProjects";
 import {
   ApiError,
@@ -61,9 +60,18 @@ function instanceLabel(assignment: CollaborationChannelAssignment): string {
 export function ProjectChannelsPanel({
   detail,
   projects,
+  pairingTarget,
+  replaceAssignment = false,
+  onPaired,
+  onPairingCreated,
 }: {
   detail: CollaborationProjectPayload;
   projects: CollaborationProjectsController;
+  pairingTarget?: { channelType: string; instanceId: string; label: string };
+  /** Only set after the operator confirms unlinking the previous assignment. */
+  replaceAssignment?: boolean;
+  onPaired?: () => void | Promise<void>;
+  onPairingCreated?: () => void | Promise<void>;
 }) {
   const { t } = useTranslation();
   const { getToken } = useClient();
@@ -72,7 +80,7 @@ export function ProjectChannelsPanel({
   const [channelsRestricted, setChannelsRestricted] = useState(false);
   const [discoveryRevision, setDiscoveryRevision] = useState(0);
   const [claimable, setClaimable] = useState<CollaborationClaimableChannel[]>([]);
-  const [selectedChannel, setSelectedChannel] = useState("");
+  const [selectedChannel, setSelectedChannel] = useState(() => pairingTarget ? `${pairingTarget.channelType}:${pairingTarget.instanceId}` : "");
   const [assigneeUserId, setAssigneeUserId] = useState("");
   const [pairing, setPairing] = useState<CollaborationPairingChallenge | null>(null);
   const [channelActivation, setChannelActivation] = useState<
@@ -134,7 +142,7 @@ export function ProjectChannelsPanel({
     setAssigneeUserId((current) => (
       current && assigneeOptions.some((member) => member.userId === current)
         ? current
-        : currentUserId || assigneeOptions[0]?.userId || ""
+        : assigneeOptions.find((member) => member.userId === currentUserId)?.userId || assigneeOptions[0]?.userId || ""
     ));
   }, [assigneeOptions, currentUserId, projects.isAdmin]);
 
@@ -203,6 +211,7 @@ export function ProjectChannelsPanel({
         setPairingError(null);
         if (payload.pairing.verified && !payload.pairing.consumed) {
           const completed = await projects.finishPairing(payload.pairing.id);
+          if (!cancelled) await onPaired?.();
           if (!cancelled) {
             setChannelActivation(completed.channel_activation ?? null);
             setPairing(withCode(completed.pairing));
@@ -223,7 +232,7 @@ export function ProjectChannelsPanel({
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [getToken, pairing, projects.finishPairing]);
+  }, [getToken, onPaired, pairing, projects.finishPairing]);
 
   const channelOptions = useMemo(() => claimable.map((channel) => {
     // The same instance appears in the channel's settings page as a name and an
@@ -238,10 +247,9 @@ export function ProjectChannelsPanel({
     };
   }), [claimable]);
 
-  const selected = channelOptions.find(
+  const selected = pairingTarget ?? channelOptions.find(
     (option) => `${option.channelType}:${option.instanceId}` === selectedChannel,
   ) ?? null;
-
   const beginAssignment = async () => {
     if (!selected) return;
     setPairingError(null);
@@ -254,11 +262,13 @@ export function ProjectChannelsPanel({
         instanceId: selected.instanceId,
         projectId,
         assigneeUserId: projects.isAdmin ? assignee || currentUserId : null,
+        ...(replaceAssignment ? { replaceAssignment: true } : {}),
       });
       setPairing(payload.pairing);
       setChannelActivation(null);
-    } catch {
-      // The shared error region reports why the Pair Code was refused.
+      await onPairingCreated?.();
+    } catch (reason) {
+      setPairingError((reason as Error).message);
     }
   };
 
@@ -283,6 +293,7 @@ export function ProjectChannelsPanel({
 
   return (
     <>
+      {!pairingTarget ? (
       <section aria-labelledby="assigned-channels-title" className="overflow-hidden rounded-panel bg-settings-surface">
         <header className="flex items-start gap-3 px-4 py-4 sm:px-5">
           <Cable className="mt-0.5 h-4 w-4 text-muted-foreground" aria-hidden />
@@ -362,7 +373,7 @@ export function ProjectChannelsPanel({
                       >
                         {t("channels.project")}
                       </label>
-                      <Select
+                      <select
                         id={`channel-project-${key}`}
                         value={assignment.project_id}
                         disabled={Boolean(projects.busyKey)}
@@ -371,13 +382,12 @@ export function ProjectChannelsPanel({
                           assignment.instance_id,
                           event.target.value,
                         )}
-                        containerClassName="w-auto min-w-[12rem] max-w-full"
                         className="h-9 text-[13px]"
                       >
                         {manageableProjects.map((project) => (
                           <option key={project.id} value={project.id}>{project.name}</option>
                         ))}
-                      </Select>
+                      </select>
                     </div>
                   ) : null}
                 </li>
@@ -390,6 +400,7 @@ export function ProjectChannelsPanel({
           </p>
         )}
       </section>
+      ) : null}
 
       {canManage ? (
         <section aria-labelledby="assign-channel-title" className="rounded-panel bg-settings-surface p-4 sm:p-5">
@@ -426,15 +437,15 @@ export function ProjectChannelsPanel({
               <label className="block text-xs font-medium" htmlFor="channel-instance">
                 {t("channels.channelInstance")}
               </label>
-              <Select
+              <select
                 id="channel-instance"
                 value={selectedChannel}
                 onChange={(event) => setSelectedChannel(event.target.value)}
-                disabled={channelsLoading || Boolean(channelsError) || channelsRestricted}
-                containerClassName="mt-1.5"
+                disabled={Boolean(pairingTarget) || channelsLoading || Boolean(channelsError) || channelsRestricted}
                 className="h-11"
               >
                 <option value="">{t("channels.chooseChannel")}</option>
+                {pairingTarget ? <option value={`${pairingTarget.channelType}:${pairingTarget.instanceId}`}>{pairingTarget.label} · {pairingTarget.instanceId}</option> : null}
                 {channelOptions.map((option) => (
                   <option
                     key={`${option.channelType}:${option.instanceId}`}
@@ -443,19 +454,18 @@ export function ProjectChannelsPanel({
                     {option.label} · {option.status}
                   </option>
                 ))}
-              </Select>
+              </select>
             </div>
             {projects.isAdmin ? (
               <div>
                 <label className="block text-xs font-medium" htmlFor="channel-assignee">
                   {t("channels.assigneeUserId")}
                 </label>
-                <Select
+                <select
                   id="channel-assignee"
                   value={assigneeUserId}
                   onChange={(event) => setAssigneeUserId(event.target.value)}
                   disabled={!assigneeOptions.length}
-                  containerClassName="mt-1.5"
                   className="h-11"
                 >
                   {assigneeOptions.map((member) => (
@@ -470,7 +480,7 @@ export function ProjectChannelsPanel({
                         })}
                     </option>
                   ))}
-                </Select>
+                </select>
                 <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
                   {t("channels.assigneeHelp")}
                 </p>

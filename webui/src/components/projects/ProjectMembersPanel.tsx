@@ -14,7 +14,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import type {
   CollaborationProjectMember,
@@ -208,18 +207,17 @@ export function ProjectMembersPanel({
               </div>
               <div>
                 <label htmlFor="project-member-role" className="text-xs font-medium">{t("projects.members.projectRole")}</label>
-                <Select
+                <select
                   id="project-member-role"
                   value={role}
                   onChange={(event) => setRole(event.target.value as CollaborationProjectRole)}
                   disabled={Boolean(busyKey)}
-                  containerClassName="mt-1.5"
                   className="h-11"
                 >
                   {PROJECT_ROLES.map((option) => (
                     <option key={option} value={option}>{t(`projects.members.roles.${option}`)}</option>
                   ))}
-                </Select>
+                </select>
               </div>
               <Button type="submit" disabled={!memberUserId.trim() || Boolean(busyKey)} className="h-11 w-full sm:w-auto">
                 {busyKey?.startsWith("project:member:add:") ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : null}

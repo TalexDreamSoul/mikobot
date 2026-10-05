@@ -255,14 +255,14 @@ def test_snapshot_prioritizes_dependency_desired_configuration_and_local_state_t
     disabled = _plugin("Disabled", setup=configured)
     unconfigured = _plugin("Unconfigured", setup=configured)
     local_state = _plugin(
-        "Local",
+        "LocalState",
         management=_management(local_state_present=lambda section: bool(section["present"])),
     )
     statuses = {
         "dependency": {"owner": "Dependency", "instance_id": "default", "state": "running"},
         "disabled": {"owner": "Disabled", "instance_id": "default", "state": "running"},
         "unconfigured": {"owner": "Unconfigured", "instance_id": "default", "state": "running"},
-        "local": {"owner": "Local", "instance_id": "default", "state": "running"},
+        "local": {"owner": "LocalState", "instance_id": "default", "state": "running"},
     }
     adapter = _adapter(
         monkeypatch,
@@ -274,7 +274,7 @@ def test_snapshot_prioritizes_dependency_desired_configuration_and_local_state_t
             Dependency={"instances": [{"instance_id": "default", "enabled": True, "token": "set"}]},
             Disabled={"instances": [{"instance_id": "default", "enabled": False, "token": "set"}]},
             Unconfigured={"instances": [{"instance_id": "default", "enabled": True, "token": ""}]},
-            Local={"present": True, "instances": [{"instance_id": "default", "enabled": True}]},
+            LocalState={"instances": [{"instance_id": "default", "enabled": True, "present": True}]},
         ),
         statuses=statuses,
         installed=lambda name, _requirements: name != "Dependency",
@@ -285,7 +285,7 @@ def test_snapshot_prioritizes_dependency_desired_configuration_and_local_state_t
     assert packages["Dependency"].components[0].lifecycle is ExtensionLifecycle.UNAVAILABLE
     assert packages["Disabled"].components[0].lifecycle is ExtensionLifecycle.ENABLED
     assert packages["Unconfigured"].components[0].lifecycle is ExtensionLifecycle.ENABLED
-    assert packages["Local"].components[0].lifecycle is ExtensionLifecycle.ENABLED
+    assert packages["LocalState"].components[0].lifecycle is ExtensionLifecycle.ENABLED
 
 
 def test_snapshot_revision_rotates_for_private_value_replacements_without_disclosing_them(

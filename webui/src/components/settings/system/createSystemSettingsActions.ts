@@ -111,6 +111,7 @@ export function createSystemSettingsActions({
     mcpOAuthFlowRef,
     mcpOAuthNavigatedUrlRef,
     mcpOAuthPopupRef,
+    nanobotFeatureActionRef,
     setApiService,
     setApiServiceAction,
     setApiServiceError,
@@ -149,6 +150,18 @@ export function createSystemSettingsActions({
   // otherwise hands the first missing one to the install confirmation dialog,
   // which performs the acknowledged install through handleNanobotFeatureAction.
   // Cancelling the dialog leaves the capability and the caller untouched.
+  const beginNanobotFeatureAction = (key: string) => {
+    if (nanobotFeatureActionRef.current) return false;
+    nanobotFeatureActionRef.current = key;
+    setNanobotFeatureAction(key);
+    return true;
+  };
+
+  const endNanobotFeatureAction = (key: string) => {
+    if (nanobotFeatureActionRef.current !== key) return;
+    nanobotFeatureActionRef.current = null;
+    setNanobotFeatureAction(null);
+  };
   const installCapabilities = async (names: string[]): Promise<boolean> => {
     const unavailable = names.find(
       (name) => !featureCatalog.some((feature) => feature.name === name),
@@ -162,7 +175,7 @@ export function createSystemSettingsActions({
     );
     if (!missing.length) return true;
     setNanobotFeaturesError(null);
-    setNanobotFeatureConfirm(missing[0]);
+    setNanobotFeatureConfirm({ feature: missing[0], installOnly: false });
     return false;
   };
 
@@ -223,20 +236,20 @@ export function createSystemSettingsActions({
   const handleNanobotFeatureAction = async (
     action: "enable" | "disable",
     name: string,
-    confirmed = false,
+    options: { confirmed?: boolean; installOnly?: boolean; target?: NanobotFeatureInfo } = {},
   ) => {
-    const feature = featureCatalog.find((item) => item.name === name);
+    const feature = options.target ?? featureCatalog.find((item) => item.name === name);
     if (!feature) {
       setNanobotFeaturesError("Extension action target is unavailable.");
       return;
     }
-    if (action === "enable" && !confirmed && !feature.installed && feature.install_supported) {
+    if (action === "enable" && !options.confirmed && !feature.installed && feature.install_supported) {
       setNanobotFeaturesError(null);
-      setNanobotFeatureConfirm(feature);
+      setNanobotFeatureConfirm({ feature, installOnly: Boolean(options.installOnly) });
       return;
     }
-    const key = `${action}:${name}`;
-    setNanobotFeatureAction(key);
+    const key = `${action === "enable" && options.installOnly ? "install" : action}:${name}`;
+    if (!beginNanobotFeatureAction(key)) return;
     setNanobotFeatureConfirm(null);
     setNanobotFeaturesError(null);
     try {
@@ -244,7 +257,8 @@ export function createSystemSettingsActions({
       const payload = action === "enable"
         ? await enableNanobotFeature(client, name, {
           ...actionOptions,
-          ...(confirmed ? { riskAcknowledged: true } : {}),
+          installOnly: options.installOnly,
+          ...(options.confirmed ? { riskAcknowledged: true } : {}),
         })
         : await disableNanobotFeature(client, name, actionOptions);
       setNanobotFeatures(payload);
@@ -252,9 +266,15 @@ export function createSystemSettingsActions({
         setPendingRestartSections((prev) => ({ ...prev, runtime: true }));
       }
     } catch (err) {
-      setNanobotFeaturesError((err as Error).message);
+      console.error("nanobot feature action failed", {
+        action,
+        name,
+        installOnly: Boolean(options.installOnly),
+        error: err,
+      });
+      setNanobotFeaturesError(err instanceof Error ? err.message : String(err));
     } finally {
-      setNanobotFeatureAction(null);
+      endNanobotFeatureAction(key);
     }
   };
 

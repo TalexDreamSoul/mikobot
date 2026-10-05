@@ -21,7 +21,6 @@ from nanobot.session.privacy import (
     SESSION_ACCESS_USER_METADATA_KEY,
 )
 from nanobot.session.session_handles import SessionHandleResolver
-from nanobot.webui.transcript import append_transcript_object
 
 
 def _access_record(
@@ -101,39 +100,7 @@ def test_session_tools_do_not_own_runtime_context(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_sessions_reads_the_full_webui_transcript_after_compaction(
-    tmp_path,
-    monkeypatch,
-):
-    webui_dir = tmp_path / "webui"
-    monkeypatch.setattr("nanobot.webui.transcript.get_webui_dir", lambda: webui_dir)
-    monkeypatch.setattr("nanobot.webui.session_list_index.get_webui_dir", lambda: webui_dir)
-    manager = SessionManager(tmp_path)
-    _save_session(
-        manager,
-        "websocket:history",
-        title="History",
-        messages=[{"role": "assistant", "content": "retained suffix"}],
-    )
-    append_transcript_object("websocket:history", {
-        "event": "user",
-        "text": "decision only in the old transcript",
-    })
-
-    with _webui_request():
-        result = _decode(await SearchSessionsTool(manager).execute(query="old transcript"))
-
-    assert [row["session_key"] for row in result["results"]] == ["websocket:history"]
-    assert result["results"][0]["excerpts"][0]["content"] == (
-        "decision only in the old transcript"
-    )
-
-
-@pytest.mark.asyncio
-async def test_search_sessions_has_no_hidden_content_scan_cutoff(tmp_path, monkeypatch):
-    webui_dir = tmp_path / "webui"
-    monkeypatch.setattr("nanobot.webui.transcript.get_webui_dir", lambda: webui_dir)
-    monkeypatch.setattr("nanobot.webui.session_list_index.get_webui_dir", lambda: webui_dir)
+async def test_search_sessions_has_no_hidden_content_scan_cutoff(tmp_path):
     manager = SessionManager(tmp_path)
     for index in range(200):
         _save_session(
@@ -158,10 +125,7 @@ async def test_search_sessions_has_no_hidden_content_scan_cutoff(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_search_sessions_ranks_titles_before_message_matches(tmp_path, monkeypatch):
-    webui_dir = tmp_path / "webui"
-    monkeypatch.setattr("nanobot.webui.transcript.get_webui_dir", lambda: webui_dir)
-    monkeypatch.setattr("nanobot.webui.session_list_index.get_webui_dir", lambda: webui_dir)
+async def test_search_sessions_ranks_titles_before_message_matches(tmp_path):
     manager = SessionManager(tmp_path)
     _save_session(
         manager,
@@ -374,10 +338,10 @@ async def test_session_tools_hide_private_and_non_conversation_messages(tmp_path
     _save_session(
         manager,
         "websocket:history",
-        title="History",
+        title="",
         messages=[
-            {"role": "user", "content": content, "_runtime_context": marker},
             {"role": "user", "content": "hidden needle", "_hidden_history": True},
+            {"role": "user", "content": content, "_runtime_context": marker},
             {"role": "tool", "content": "tool needle"},
             {"role": "assistant", "content": "visible answer"},
         ],
@@ -395,6 +359,7 @@ async def test_session_tools_hide_private_and_non_conversation_messages(tmp_path
         "visible question",
         "visible answer",
     ]
+    assert [message["message_index"] for message in messages] == [1, 3]
     assert all("secret runtime context" not in message["content"] for message in messages)
 
 

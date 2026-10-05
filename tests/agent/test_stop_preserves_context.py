@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
+from agent.session_helpers import run_session
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
 from nanobot.collaboration import AsyncLocalCollaborationRepository, CollaborationStore
@@ -73,9 +74,6 @@ async def test_dispatch_cancellation_restores_checkpoint(
     in-flight runtime checkpoint into session.messages before the cancellation
     unwinds, so the next turn can see the partial work.
 
-    This exercises the real _dispatch path (locks, pending queues, the
-    CancelledError handler), so a future refactor that drops the cancel-time
-    restore is caught by CI instead of silently regressing.
     """
     from nanobot.bus.events import InboundMessage
     from nanobot.bus.queue import MessageBus
@@ -135,7 +133,7 @@ async def test_dispatch_cancellation_restores_checkpoint(
     msg = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="work")
 
     with pytest.raises(asyncio.CancelledError):
-        await loop._dispatch(msg)
+        await run_session(loop, msg)
 
     roles = [m.get("role") for m in session.messages]
     assert roles == ["user", "assistant", "tool"], (
@@ -178,7 +176,7 @@ async def test_dispatch_cancellation_keeps_checkpoint_for_gateway_shutdown(
     from nanobot.bus.events import InboundMessage
 
     with pytest.raises(asyncio.CancelledError):
-        await loop._dispatch(
+        await run_session(loop,
             InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="work")
         )
 

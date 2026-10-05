@@ -47,7 +47,12 @@ from nanobot.channels.weixin.instances import (
 )
 from nanobot.config.paths import get_media_dir, get_runtime_subdir
 from nanobot.config.schema import Base
-from nanobot.utils.helpers import safe_filename
+from nanobot.events import ContextCompactionEvent
+from nanobot.utils.helpers import (
+    _write_text_atomic,  # pyright: ignore[reportPrivateUsage]
+    safe_filename,
+)
+from nanobot.utils.logging_bridge import redirect_lib_logging
 
 # ---------------------------------------------------------------------------
 # Protocol constants (from openclaw-weixin types.ts)
@@ -340,6 +345,8 @@ class WeixinChannel(BaseChannel):
         self._state_dir: Path | None = None
         self._token: str = ""
         self._replaced_config_token_hash: str = ""
+        self._connect_config_guard = False
+        self._connect_config_signature: str | None = None
         self._poll_task: asyncio.Task[None] | None = None
         self._next_poll_timeout_s: int = DEFAULT_LONG_POLL_TIMEOUT_S
         self._auth_required = False
@@ -443,7 +450,7 @@ class WeixinChannel(BaseChannel):
                 self.config.base_url = base_url
             return bool(self._token)
         except Exception:
-            self.logger.error("Failed to load Weixin account state", exc_info=True)
+            self.logger.opt(exception=True).error("Failed to load Weixin account state")
             return False
 
     def _save_state(self, *, force: bool = False) -> None:
@@ -505,50 +512,72 @@ class WeixinChannel(BaseChannel):
         )
         if base_url:
             self.config.base_url = base_url
-        self._save_state(force=True)
         self._persist_connect_credentials(token=token, base_url=base_url)
 
+    def _current_connect_signature(self, section: Any) -> str | None:
+        from nanobot.channels.weixin.instances import managed_weixin_instance_specs
+
+        selected = next(
+            (spec for spec in managed_weixin_instance_specs(section, enabled_only=False)
+             if spec.instance_id == self.instance_id),
+            None,
+        )
+        return (
+            json.dumps(selected.config, sort_keys=True, ensure_ascii=True)
+            if selected is not None else None
+        )
+
     def _persist_connect_credentials(self, *, token: str, base_url: str) -> None:
-        """Persist QR credentials to this exact managed Weixin instance."""
+        """Commit QR credentials under the exact config generation and file lock."""
         from nanobot.channels.weixin.instances import (
             update_weixin_instance_preserving_shape,
             weixin_default_config,
         )
         from nanobot.config.loader import get_config_path, load_config, save_config
 
-        try:
-            config_path = get_config_path()
-            config_lock = FileLock(
-                str(config_path.with_suffix(f"{config_path.suffix}.lock"))
+        config_path = get_config_path()
+        config_lock = FileLock(str(config_path.with_suffix(f"{config_path.suffix}.lock")))
+        with config_lock:
+            full_config = load_config(config_path)
+            section = getattr(full_config.channels, "weixin", None)
+            if self._connect_config_guard and (
+                self._current_connect_signature(section) != self._connect_config_signature
+            ):
+                raise ValueError("WeChat instance changed during QR login")
+            values: dict[str, Any] = {
+                "token": token,
+                "stateDir": self.config.state_dir,
+                "enabled": False,
+                "pairingRequired": True,
+                "allowFrom": [],
+                CHANNEL_INSTANCE_REVISION_FIELD: new_channel_instance_revision(),
+            }
+            if base_url:
+                values["baseUrl"] = base_url
+            updated = update_weixin_instance_preserving_shape(
+                section, weixin_default_config(), self.instance_id, values,
             )
-            with config_lock:
-                full_config = load_config(config_path)
-                section = getattr(full_config.channels, "weixin", None)
-                # Keep a live, deny-by-default listener so the external Pair Code
-                # can be verified; normal routing requires collaboration assignment.
-                values: dict[str, Any] = {
-                    "token": token,
-                    "stateDir": self.config.state_dir,
-                    "enabled": False,
-                    "pairingRequired": True,
-                    "allowFrom": [],
-                    CHANNEL_INSTANCE_REVISION_FIELD: new_channel_instance_revision(),
-                }
-                if base_url:
-                    values["baseUrl"] = base_url
-                updated = update_weixin_instance_preserving_shape(
-                    section,
-                    weixin_default_config(),
-                    self.instance_id,
-                    values,
-                )
-                setattr(full_config.channels, "weixin", updated)
+            state_file = self._get_state_dir() / "account.json"
+            old_state = state_file.read_text(encoding="utf-8") if state_file.exists() else None
+            data: dict[str, Any] = {
+                "token": self._token,
+                "get_updates_buf": self._get_updates_buf,
+                "context_tokens": self._context_tokens,
+                "typing_tickets": self._typing_tickets,
+                "base_url": self.config.base_url,
+            }
+            if self._replaced_config_token_hash:
+                data[_REPLACED_CONFIG_TOKEN_HASH_KEY] = self._replaced_config_token_hash
+            setattr(full_config.channels, "weixin", updated)
+            try:
+                _write_text_atomic(state_file, json.dumps(data, ensure_ascii=False))
                 save_config(full_config, config_path)
-        except Exception:
-            self.logger.exception(
-                "Failed to persist WeChat credentials for instance {}",
-                self.instance_id,
-            )
+            except Exception:
+                if old_state is None:
+                    state_file.unlink(missing_ok=True)
+                else:
+                    _write_text_atomic(state_file, old_state)
+                raise
 
     # ------------------------------------------------------------------
     # HTTP helpers  (matches api.ts buildHeaders / apiFetch)
@@ -708,23 +737,6 @@ class WeixinChannel(BaseChannel):
             )
             return WeixinChannel._is_retryable_http_status(status_code)
         return False
-
-    async def _api_get(
-        self,
-        endpoint: str,
-        params: dict[str, Any] | None = None,
-        *,
-        auth: bool = True,
-        extra_headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        assert self._client is not None
-        url = f"{self.config.base_url}/{endpoint}"
-        hdrs = self._make_headers(auth=auth)
-        if extra_headers:
-            hdrs.update(extra_headers)
-        return await self._request_json(
-            "GET", url, endpoint=endpoint, params=params, headers=hdrs,
-        )
 
     async def _api_get_with_base(
         self,
@@ -956,8 +968,16 @@ class WeixinChannel(BaseChannel):
         """Load an existing account for the interactive connection flow."""
         return self._load_state()
 
-    def connect_open_client(self) -> None:
+    def connect_open_client(self, *, require_existing: bool = False) -> None:
         """Open the short-lived HTTP client used by WebUI QR login."""
+        from nanobot.config.loader import load_config
+
+        self._connect_config_signature = self._current_connect_signature(
+            getattr(load_config().channels, "weixin", None)
+        )
+        if require_existing and self._connect_config_signature is None:
+            raise ValueError("WeChat instance is not available")
+        self._connect_config_guard = True
         self._client = self._new_http_client(httpx.Timeout(60, connect=30))
         self._running = True
 
@@ -1030,6 +1050,7 @@ class WeixinChannel(BaseChannel):
                 self._client = None
 
     async def start(self) -> None:
+        redirect_lib_logging("httpx", level="WARNING")
         self._running = True
         self._next_poll_timeout_s = self.config.poll_timeout
         self._client = self._new_http_client(
@@ -1984,13 +2005,17 @@ class WeixinChannel(BaseChannel):
         self._record_context_send(context_token)
 
     async def send(self, msg: OutboundMessage) -> None:
+        event = getattr(msg, "event", None)
+        if isinstance(event, ContextCompactionEvent) and not (
+            event.notify or self.show_compaction_notices
+        ):
+            return
         if not self._client or not self._token:
             raise RuntimeError("WeChat client not initialized or not authenticated")
         self._assert_session_active()
 
         delivery_id = self._delivery_id(msg)
         delivery_state = self._delivery_state(delivery_id)
-        event = getattr(msg, "event", None)
         progress_event = event if isinstance(event, ProgressEvent) else None
         is_progress = progress_event is not None
 

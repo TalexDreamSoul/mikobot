@@ -6,6 +6,7 @@ platform-specific binaries (all subprocess calls are mocked).
 """
 
 import asyncio
+import os
 import shutil
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -98,6 +99,29 @@ class TestBuildEnvWindows:
         with patch("nanobot.agent.tools.shell._IS_WINDOWS", True):
             env = ExecTool()._build_env()
         assert env["SYSTEMROOT"] == r"D:\Windows"
+
+
+# ---------------------------------------------------------------------------
+# argument-vector PATH
+# ---------------------------------------------------------------------------
+
+class TestArgumentVectorPath:
+
+    def test_uses_parent_path_for_executable_lookup(self):
+        parent_path = os.pathsep.join(("parent-bin", "system-bin"))
+        with (
+            patch("nanobot.agent.tools.shell._IS_WINDOWS", False),
+            patch.dict(
+                "os.environ",
+                {"PATH": parent_path, "NANOBOT_SECRET_TOKEN": "super-secret-value"},
+                clear=True,
+            ),
+        ):
+            prepared = ExecTool()._prepare_command(["rg", "--version"])
+
+        assert not isinstance(prepared, str)
+        assert prepared.env["PATH"] == parent_path
+        assert "NANOBOT_SECRET_TOKEN" not in prepared.env
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +313,21 @@ class TestSpawnWindows:
         """PowerShell needs & before quoted executable paths with arguments."""
         env = {"PATH": ""}
         command = r'"D:\Program Files\Python\python.exe" -u -c "print(1)"'
+        with (
+            patch("nanobot.agent.tools.shell._IS_WINDOWS", True),
+            patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+        ):
+            mock_exec.return_value = AsyncMock()
+            await ExecTool._spawn(command, r"C:\work", env)
+
+        powershell_command = mock_exec.call_args[0][-1]
+        assert f"\n& {command}\n" in powershell_command
+
+    @pytest.mark.asyncio
+    async def test_powershell_invokes_quoted_windows_executable_without_arguments(self):
+        """A quoted executable path is still a command when it has no arguments."""
+        env = {"PATH": ""}
+        command = r'"D:\Program Files\Git\cmd\git.exe"'
         with (
             patch("nanobot.agent.tools.shell._IS_WINDOWS", True),
             patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
@@ -497,7 +536,8 @@ class TestSandboxPlatform:
         spawn.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_bwrap_applied_on_unix(self):
+    @pytest.mark.parametrize("backend", ["bwrap", "seatbelt"])
+    async def test_sandbox_applied_on_unix(self, backend):
         """On Unix, sandbox wrapping should still happen normally."""
         mock_proc = AsyncMock()
         mock_proc.communicate.return_value = (b"sandboxed", b"")
@@ -505,20 +545,21 @@ class TestSandboxPlatform:
 
         with (
             patch("nanobot.agent.tools.shell._IS_WINDOWS", False),
-            patch("nanobot.agent.tools.shell.wrap_command", return_value="bwrap -- sh -c ls") as mock_wrap,
+            patch("nanobot.agent.tools.shell.wrap_command", return_value=f"{backend} -- sh -c ls") as mock_wrap,
             patch.object(ExecTool, "_spawn", return_value=mock_proc) as mock_spawn,
             patch.object(ExecTool, "_guard_command", return_value=None),
         ):
-            tool = ExecTool(sandbox="bwrap", working_dir="/workspace")
+            tool = ExecTool(sandbox=backend, working_dir="/workspace")
             await tool.execute(command="ls")
 
         mock_wrap.assert_called_once()
         spawned_cmd = mock_spawn.call_args[0][0]
-        assert "bwrap" in spawned_cmd
+        assert backend in spawned_cmd
 
     @pytest.mark.asyncio
-    async def test_bwrap_receives_configured_bind_roots(self, tmp_path):
-        """Configured bwrap bind roots should be forwarded to the sandbox wrapper."""
+    @pytest.mark.parametrize("backend", ["bwrap", "seatbelt"])
+    async def test_sandbox_receives_configured_bind_roots(self, tmp_path, backend):
+        """Configured bind roots should be forwarded to the sandbox wrapper."""
         mock_proc = AsyncMock()
         mock_proc.communicate.return_value = (b"sandboxed", b"")
         mock_proc.returncode = 0
@@ -527,12 +568,12 @@ class TestSandboxPlatform:
 
         with (
             patch("nanobot.agent.tools.shell._IS_WINDOWS", False),
-            patch("nanobot.agent.tools.shell.wrap_command", return_value="bwrap -- sh -c ls") as mock_wrap,
+            patch("nanobot.agent.tools.shell.wrap_command", return_value=f"{backend} -- sh -c ls") as mock_wrap,
             patch.object(ExecTool, "_spawn", return_value=mock_proc),
             patch.object(ExecTool, "_guard_command", return_value=None),
         ):
             tool = ExecTool(
-                sandbox="bwrap",
+                sandbox=backend,
                 working_dir="/workspace",
                 sandbox_ro_binds=[str(tool_bin)],
                 sandbox_rw_binds=[str(tool_cache)],

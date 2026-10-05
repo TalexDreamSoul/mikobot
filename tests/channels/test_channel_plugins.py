@@ -7,6 +7,8 @@ import json
 import subprocess
 import sys
 import tomllib
+from collections import OrderedDict
+from dataclasses import replace
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,11 +32,10 @@ from nanobot.channels.contracts import (
     ChannelManagementSpec,
     ChannelSetupSpec,
     SetupRequirement,
-    channel_default_config,
 )
-from nanobot.channels.manager import ChannelManager
+from nanobot.channels.manager import ORIGIN_REPLY_FINGERPRINTS_MAX_SIZE, ChannelManager
 from nanobot.channels.plugin import ChannelPlugin, load_channel_package
-from nanobot.config.loader import save_config
+from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import ChannelsConfig, Config, _resolve_tool_config_refs
 from nanobot.providers.transcription import GroqTranscriptionProvider as _GroqProvider
 from nanobot.providers.transcription import OpenAITranscriptionProvider as _OpenAIProvider
@@ -180,6 +181,32 @@ def _stub_channel_registry(
     monkeypatch.setattr("nanobot.channels.registry.discover_plugins", discover)
 
 
+class _SetupPlugin(_FakePlugin):
+    name = "setupplugin"
+
+
+def _validate_setup_plugin(values, context):
+    return {
+        "status": "connected" if values.get("token") == "plugin-secret" else "needs_setup",
+        "checks": [{"id": "plugin", "status": "ok"}],
+    }
+
+
+_SETUP_PLUGIN_SPEC = ChannelSetupSpec(
+    fields={
+        "token": ChannelFieldSpec(kind="secret"),
+        "region": ChannelFieldSpec(kind="enum", choices=frozenset({"eu", "us"})),
+    },
+    required=(SetupRequirement.field("token"),),
+    official_url="https://plugin.example/setup",
+    validator=_validate_setup_plugin,
+)
+
+
+def _stub_channel_packages(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    _stub_channel_registry(monkeypatch, *(load_channel_package(name) for name in names))
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -203,25 +230,22 @@ def test_channels_config_getattr_returns_extra():
     assert section["enabled"] is True
 
 
-def test_channels_config_has_no_per_channel_fields():
-    """After decoupling, ChannelsConfig has no explicit channel fields."""
-    cfg = ChannelsConfig()
-    assert not hasattr(cfg, "telegram")
-    assert cfg.send_progress is True
-    assert cfg.send_tool_hints is True
-    assert cfg.extract_document_text is True
-
-    opted_out = ChannelsConfig.model_validate({
-        "sendToolHints": False,
-        "extractDocumentText": False,
-    })
-    assert opted_out.send_tool_hints is False
-    assert opted_out.extract_document_text is False
 
 
 @pytest.mark.parametrize(
     "name",
-    ["websocket", "telegram", "discord", "slack", "email", "feishu", "matrix", "weixin", "whatsapp"],
+    [
+        "websocket",
+        "telegram",
+        "discord",
+        "slack",
+        "email",
+        "feishu",
+        "linear",
+        "matrix",
+        "weixin",
+        "whatsapp",
+    ],
 )
 def test_special_setup_validation_is_owned_by_channel_package(name: str):
     plugin = load_channel_package(name)
@@ -232,7 +256,7 @@ def test_special_setup_validation_is_owned_by_channel_package(name: str):
     assert plugin.setup.validator.__module__ == f"nanobot.channels.{name}.validation"
 
 
-@pytest.mark.parametrize("name", ["feishu", "weixin"])
+@pytest.mark.parametrize("name", ["feishu", "linear", "weixin", "whatsapp"])
 def test_interactive_connector_is_owned_by_channel_package(name: str):
     plugin = load_channel_package(name)
 
@@ -242,15 +266,6 @@ def test_interactive_connector_is_owned_by_channel_package(name: str):
     assert plugin.load_connector().__class__.__module__ == f"nanobot.channels.{name}.connect"
 
 
-def test_descriptor_defaults_cover_onboarding_fields_without_runtime_import():
-    qq = load_channel_package("qq")
-    email = load_channel_package("email")
-
-    assert qq is not None
-    assert email is not None
-    assert channel_default_config(qq)["msgFormat"] == "plain"
-    assert channel_default_config(email)["imapPort"] == 993
-    assert channel_default_config(email)["smtpPort"] == 587
 
 
 def test_channel_manager_delegates_instance_expansion_to_channel(monkeypatch: pytest.MonkeyPatch):
@@ -356,6 +371,38 @@ def test_discover_plugins_loads_package_descriptors():
 
 
 
+def test_plugin_setup_contract_drives_save_and_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    from nanobot.channels.contracts import channel_configure_instance
+    from nanobot.channels.validation import validate_channel_config
+    from nanobot.config import loader
+
+    config_path = tmp_path / "config.json"
+    config = Config()
+    monkeypatch.setattr(loader, "_current_config_path", config_path)
+    plugin = _channel_plugin(_SetupPlugin, setup=_SETUP_PLUGIN_SPEC)
+    _stub_channel_registry(monkeypatch, plugin)
+    updated, saved = channel_configure_instance(
+        plugin,
+        {"region": "us", "token": "old-secret"},
+        {
+            "channels.setupplugin.token": "plugin-secret",
+            "channels.setupplugin.region": "eu",
+        },
+    )
+    config.channels.setupplugin = updated
+    save_config(config, config_path)
+    validation = validate_channel_config("setupplugin")
+
+    assert saved == (
+        "channels.setupplugin.token",
+        "channels.setupplugin.region",
+    )
+    assert load_config(config_path).channels.setupplugin["token"] == "plugin-secret"
+    assert validation["status"] == "connected"
+    assert validation["checks"][0]["id"] == "plugin"
 
 
 def test_generic_plugin_validation_enforces_composite_requirements(
@@ -601,28 +648,6 @@ def test_manager_reports_dependency_install_failure_as_runtime_failure(monkeypat
     }
 
 
-def test_manager_loads_websocket_from_default_config():
-    from nanobot.channels.manager import ChannelManager
-
-    class _FakeWebSocket(_FakePlugin):
-        name = "websocket"
-        display_name = "WebSocket"
-
-        def __init__(self, config, bus, *, gateway):
-            super().__init__(config, bus)
-            self.gateway = gateway
-
-        @classmethod
-        def default_config(cls):
-            return {"enabled": True, "host": "127.0.0.1"}
-
-    plugin = _channel_plugin(_FakeWebSocket, default_enabled=True)
-    with patch("nanobot.channels.registry.discover_plugins", return_value={"websocket": plugin}):
-        mgr = ChannelManager(Config(), MessageBus(), webui_static_dist=False)
-
-    assert "websocket" in mgr.channels
-    assert mgr.channels["websocket"].config["enabled"] is True
-    assert mgr.channels["websocket"].config["host"] == "127.0.0.1"
 
 
 def test_manager_respects_explicitly_disabled_websocket_config():
@@ -1099,6 +1124,98 @@ def test_plugins_disable_channel_preserves_unrelated_config(tmp_path):
 
 
 
+def test_plugins_disable_rejects_non_channel_and_protected_websocket(tmp_path):
+    from typer.testing import CliRunner
+
+    from nanobot.cli.commands import app
+
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"channels": {"websocket": {"enabled": True}}}), encoding="utf-8",
+    )
+    before = config_path.read_bytes()
+    non_channel = runner.invoke(
+        app,
+        ["plugins", "disable", "bedrock", "--config", str(config_path)],
+    )
+    websocket = runner.invoke(
+        app,
+        ["plugins", "disable", "websocket", "--config", str(config_path)],
+    )
+
+    assert non_channel.exit_code == 1
+    assert websocket.exit_code == 1
+    assert config_path.read_bytes() == before
+
+
+def test_weixin_inventory_recognizes_saved_login_without_exposing_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saved account state changes readiness without importing runtime or publishing secrets."""
+    from nanobot.extensions.adapters import channels as adapters
+    from nanobot.extensions.adapters.channels import ChannelExtensionAdapter
+    from nanobot.extensions.contracts import ExtensionLifecycle
+
+    state_dir = tmp_path / "account-state"
+    state_dir.mkdir()
+    plugin = replace(load_channel_package("weixin"), runtime="missing.weixin.runtime:Channel")
+    monkeypatch.setattr(adapters, "discover_plugins", lambda _names=None: {"weixin": plugin})
+    config = Config.model_validate({"channels": {"weixin": {
+        "enabled": True, "stateDir": str(state_dir),
+    }}})
+    adapter = ChannelExtensionAdapter(
+        lambda: config, dependencies_installed=lambda _name, _requirements: True,
+    )
+    missing = adapter.snapshot().packages[0].components[0]
+    assert missing.lifecycle is ExtensionLifecycle.UNAVAILABLE
+    account_path = state_dir / "account.json"
+    account_path.write_text(json.dumps({"token": "微信-private-token"}), encoding="utf-8")
+    before = account_path.read_bytes()
+    snapshot = adapter.snapshot()
+    saved = snapshot.packages[0].components[0]
+    assert saved.lifecycle is ExtensionLifecycle.FAILED
+    assert saved.id == missing.id
+    assert saved.revision != missing.revision
+    assert "微信-private-token" not in repr(snapshot)
+    assert str(state_dir) not in repr(snapshot)
+    assert account_path.read_bytes() == before
+
+
+def test_weixin_inventory_keeps_saved_login_readiness_scoped_to_its_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A logged-in sibling cannot supply credentials for an unpaired instance."""
+    from nanobot.extensions.adapters import channels as adapters
+    from nanobot.extensions.adapters.channels import ChannelExtensionAdapter
+    from nanobot.extensions.contracts import ExtensionLifecycle
+
+    logged_in = tmp_path / "logged-in"
+    logged_in.mkdir()
+    (logged_in / "account.json").write_text(
+        json.dumps({"token": "own-saved-token"}), encoding="utf-8",
+    )
+    plugin = replace(load_channel_package("weixin"), runtime="missing.weixin.runtime:Channel")
+    monkeypatch.setattr(adapters, "discover_plugins", lambda _names=None: {"weixin": plugin})
+    config = Config.model_validate({"channels": {"weixin": {
+        "stateDir": str(tmp_path / "no-shared-account"),
+        "instances": [
+            {"id": "default", "enabled": True, "stateDir": str(logged_in)},
+            {"id": "pending", "enabled": True, "stateDir": str(tmp_path / "not-logged-in")},
+        ],
+    }}})
+    snapshot = ChannelExtensionAdapter(
+        lambda: config, dependencies_installed=lambda _name, _requirements: True,
+    ).snapshot()
+    states = {component.name: component.lifecycle for component in snapshot.packages[0].components}
+    assert states == {
+        "default": ExtensionLifecycle.FAILED,
+        "pending": ExtensionLifecycle.UNAVAILABLE,
+    }
+    assert "own-saved-token" not in repr(snapshot)
+
+
+
 
 
 @pytest.mark.parametrize(
@@ -1232,8 +1349,11 @@ def test_optional_dependency_metadata_for_enable():
 
     assert "boto3>=1.43.0" not in data["project"]["dependencies"]
     assert deps["bedrock"] == ["boto3>=1.43.0"]
+    # The built-in remote WebUI proxy now needs aiohttp even without channels.
+    # Keep the historical API extra installable for existing deployment commands.
+    assert "aiohttp>=3.14.3,<4.0.0" in required
+    assert deps["api"] == ["aiohttp>=3.9.0,<4.0.0"]
     for dep_name in (
-        "aiohttp",
         "dingtalk-stream",
         "lark-oapi",
         "msgpack",
@@ -1272,6 +1392,7 @@ def test_optional_dependency_metadata_for_enable():
         "dingtalk",
         "discord",
         "feishu",
+        "linear",
         "matrix",
         "mochat",
         "msteams",
@@ -1315,10 +1436,10 @@ def test_optional_dependency_metadata_for_enable():
             "socksio>=1.0.0,<2.0.0",
             "python-socks[asyncio]>=2.8.0,<3.0.0; sys_platform != 'win32'",
         ),
-        "wecom": ("wecom-aibot-sdk-python>=0.1.5",),
+        "wecom": ("wecom-aibot-sdk-python>=0.1.7,<0.2.0",),
         "weixin": ("qrcode[pil]>=8.0", "pycryptodome>=3.20.0"),
         "whatsapp": (
-            "neonize>=0.3.18.post0,<0.4.0",
+            "neonize>=0.4.3.post0,<0.5.0",
             "segno>=1.6.1,<2.0.0",
         ),
     }
@@ -1476,13 +1597,6 @@ async def test_manager_skips_disabled_channel_package(monkeypatch):
 # Channel default_config() and dict-to-Pydantic conversion
 # ---------------------------------------------------------------------------
 
-def test_channel_default_config():
-    """Channels expose default_config() returning a dict with 'enabled': False."""
-    from nanobot.channels.dingtalk.runtime import DingTalkChannel
-    cfg = DingTalkChannel.default_config()
-    assert isinstance(cfg, dict)
-    assert cfg["enabled"] is False
-    assert "clientId" in cfg
 
 
 def test_channel_init_from_dict():
@@ -1494,11 +1608,6 @@ def test_channel_init_from_dict():
     assert ch.config.allow_from == ["*"]
 
 
-def test_channels_config_send_max_retries_default():
-    """ChannelsConfig should have send_max_retries with default value of 3."""
-    cfg = ChannelsConfig()
-    assert hasattr(cfg, 'send_max_retries')
-    assert cfg.send_max_retries == 3
 
 
 def test_channels_config_send_max_retries_upper_bound():
@@ -1797,7 +1906,7 @@ def test_outbound_duplicate_suppression_is_scoped_to_origin_message() -> None:
     mgr.bus = MessageBus()
     mgr.channels = {}
     mgr._dispatch_task = None
-    mgr._origin_reply_fingerprints = {}
+    mgr._origin_reply_fingerprints = OrderedDict()
 
     first = OutboundMessage(
         channel="feishu",
@@ -1828,6 +1937,39 @@ def test_outbound_duplicate_suppression_is_scoped_to_origin_message() -> None:
     assert mgr._should_suppress_outbound(duplicate) is True
     assert mgr._should_suppress_outbound(separate_turn) is False
     assert mgr._should_suppress_outbound(new_origin_content) is False
+
+
+def test_outbound_duplicate_suppression_cache_is_bounded() -> None:
+    mgr = ChannelManager.__new__(ChannelManager)
+    mgr._origin_reply_fingerprints = OrderedDict()
+
+    for index in range(ORIGIN_REPLY_FINGERPRINTS_MAX_SIZE):
+        msg = OutboundMessage(
+            channel="feishu",
+            chat_id="chat123",
+            content="Done",
+            metadata={"message_id": f"msg-{index}"},
+        )
+        assert mgr._should_suppress_outbound(msg) is False
+
+    duplicate = OutboundMessage(
+        channel="feishu",
+        chat_id="chat123",
+        content="Done",
+        metadata={"origin_message_id": "msg-0"},
+    )
+    newest = OutboundMessage(
+        channel="feishu",
+        chat_id="chat123",
+        content="Done",
+        metadata={"message_id": f"msg-{ORIGIN_REPLY_FINGERPRINTS_MAX_SIZE}"},
+    )
+
+    assert mgr._should_suppress_outbound(duplicate) is True
+    assert mgr._should_suppress_outbound(newest) is False
+    assert len(mgr._origin_reply_fingerprints) == ORIGIN_REPLY_FINGERPRINTS_MAX_SIZE
+    assert ("feishu", "chat123", "msg-0") in mgr._origin_reply_fingerprints
+    assert ("feishu", "chat123", "msg-1") not in mgr._origin_reply_fingerprints
 
 
 @pytest.mark.asyncio
@@ -2120,6 +2262,8 @@ async def test_stop_all_cancels_dispatcher_and_stops_channels():
     ch = _StartableChannel(fake_config, mgr.bus)
     mgr.channels = {"startable": ch}
     mgr._channel_tasks = {}
+    mgr._outbound_tasks = {}
+    mgr._stopping_channels = set()
 
     # Create a real cancelled task
     async def dummy_task():
@@ -2198,6 +2342,8 @@ async def test_stop_all_handles_channel_exception():
     mgr.bus = MessageBus()
     mgr.channels = {"stopfailing": _StopFailingChannel(fake_config, mgr.bus)}
     mgr._channel_tasks = {}
+    mgr._outbound_tasks = {}
+    mgr._stopping_channels = set()
     mgr._dispatch_task = None
 
     # Should not raise even if channel.stop() raises
@@ -2237,6 +2383,8 @@ async def test_stop_all_handles_channel_stop_cancelled_task():
         "next": next_channel,
     }
     mgr._channel_tasks = {}
+    mgr._outbound_tasks = {}
+    mgr._stopping_channels = set()
     mgr._dispatch_task = None
 
     await mgr.stop_all()

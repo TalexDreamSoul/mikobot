@@ -1,17 +1,8 @@
 {
-  "description": "Gunakan Mikobot dari percakapan WeChat.",
-  "requirements": "Setup channel WeChat dan gateway",
   "setup": {
     "primaryAction": "Hubungkan WeChat",
     "docsLabel": "Buka panduan WeChat",
     "officialLabel": "Buka WeChat",
-    "tryIt": "Setelah login QR, kirim DM ke akun yang terhubung.",
-    "summary": "WeChat login dengan kode QR dan menyimpan status akun secara lokal.",
-    "steps": [
-      "Klik Hubungkan dan pindai QR dengan WeChat.",
-      "Biarkan gateway lokal berjalan saat WeChat menerima pesan.",
-      "Kirim pesan langsung uji untuk memastikan akun terhubung."
-    ],
     "fields": {
       "allowFrom": {
         "label": "Pengguna yang diizinkan",
@@ -25,7 +16,7 @@
         "label": "Kirim progres"
       },
       "sendToolHints": {
-        "label": "Kirim petunjuk alat"
+        "label": "Kirim ringkasan aktivitas alat"
       },
       "streaming": {
         "label": "Gunakan API streaming"
@@ -37,13 +28,13 @@
         "label": "Batas progres terstruktur"
       },
       "contextMessageBudget": {
-        "label": "Anggaran pesan konteks"
+        "label": "Jumlah maksimum pesan konteks"
       },
       "blockStreaming": {
         "label": "Kirim respons per blok"
       },
       "blockStreamingMinChars": {
-        "label": "Ukuran blok minimum"
+        "label": "Jumlah minimum karakter per blok"
       },
       "blockStreamingMaxMessages": {
         "label": "Batas pesan blok"
@@ -61,15 +52,14 @@
         "label": "Direktori status"
       },
       "pollTimeout": {
-        "label": "Batas waktu polling"
+        "label": "Batas waktu polling (detik)"
       }
     }
   },
   "custom": {
     "qrAlt": "Kode QR login WeChat",
     "scanTitle": "Pindai dengan WeChat",
-    "scanDescription": "Pindai dengan WeChat di ponsel. Mikobot menyimpan status akun secara lokal setelah login.",
-    "waiting": "Menunggu pemindaian WeChat...",
+    "waiting": "Menunggu Anda memindai kode dengan WeChat…",
     "connected": "WeChat sudah terhubung.",
     "stopped": "Login WeChat dihentikan.",
     "connecting": "Menghubungkan...",
@@ -79,6 +69,18 @@
     "expired": "Login WeChat telah kedaluwarsa. Pindai lagi untuk menghubungkan kembali.",
     "failed": "Tidak dapat menghubungkan WeChat. Coba lagi.",
     "verifyPlaceholder": "Kode",
-    "verifySubmit": "Verifikasi"
+    "verifySubmit": "Verifikasi",
+    "deleteInstance": "Hapus instans",
+    "deleteInstanceTitle": "Hapus instans WeChat ini?",
+    "deleteInstanceWarning": "Akun lokal dan instans dihapus, serta penetapan proyek, penyediaan, dan kode pemasangan aktifnya dicabut. Riwayat percakapan tetap disimpan.",
+    "deleteInstanceConfirm": "Hapus instans",
+    "rescan": "Pindai ulang",
+    "rescanTitle": "Ganti login WeChat?",
+    "rescanWarning": "Pindai kode QR baru untuk instans yang sama. Kredensial tersimpan tidak berubah jika Anda membatalkan atau login gagal; kredensial hanya diganti setelah login berhasil.",
+    "rescanConfirm": "Pindai kode QR baru",
+    "rePair": "Pasangkan ulang",
+    "rePairTitle": "Putuskan tautan dan pasangkan ulang instans ini?",
+    "rePairWarning": "Penetapan proyek saat ini dilepas dan kode lama dinonaktifkan. Akun tetap masuk, tetapi pengiriman normal ditangguhkan hingga kode pemasangan baru diverifikasi dan digunakan.",
+    "rePairConfirm": "Putuskan tautan dan buat kode"
   }
 }

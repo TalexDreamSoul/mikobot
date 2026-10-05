@@ -1801,3 +1801,116 @@ async def test_project_app_approval_rejects_a_stale_revision_and_foreign_project
     assert (await handler.dispatch_webui_mutation(
         member, "collaboration.project.app.join", {"project_id": project_id, "name": "studio"}
     )).status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", [
+    "webui-thread/trace-detail?turn_id=private-turn",
+    "subagents",
+    "subagents/private-task/webui-thread",
+])
+async def test_foreign_session_new_read_surfaces_deny_before_history_access(
+    tmp_path, suffix,
+):
+    handler = await _handler(tmp_path)
+    alice = _proxy_connection("new-routes-owner")
+    bob = _proxy_connection("new-routes-other")
+    identity = await _identity(handler, alice)
+    _save_webui_session(
+        handler.session_manager, "websocket:private-routes",
+        owner_id=identity["user"]["id"], project_id=identity["active_project_id"],
+        title="Private route history",
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Foreign session history was accessed")
+
+    handler._handle_webui_trace_detail_get = forbidden
+    handler._handle_subagent_thread_get = forbidden
+    handler._handle_subagents_get = forbidden
+    request = _request(f"/api/sessions/websocket%3Aprivate-routes/{suffix}", bob.request.headers)
+    response = await handler.dispatch(_connection(request), request)
+    assert response.status_code == 404
+    assert response.body.decode() == "session not found"
+
+
+@pytest.mark.asyncio
+async def test_foreign_session_subagent_cancel_does_not_cancel_work(tmp_path):
+    handler = await _handler(tmp_path)
+    alice = _proxy_connection("cancel-owner")
+    bob = _proxy_connection("cancel-other")
+    identity = await _identity(handler, alice)
+    _save_webui_session(
+        handler.session_manager, "websocket:private-cancel",
+        owner_id=identity["user"]["id"], project_id=identity["active_project_id"],
+        title="Private task",
+    )
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("Foreign work was cancelled")
+
+    handler.subagent_manager = SimpleNamespace(cancel=forbidden)
+    response = await handler.dispatch_webui_mutation(bob, "subagent.cancel", {
+        "session_key": "websocket:private-cancel", "task_id": "private-task",
+    })
+    assert response.status_code == 404
+    assert response.body.decode() == "task unavailable"
+
+
+@pytest.mark.asyncio
+async def test_foreign_automation_result_denies_before_run_file_access(tmp_path, monkeypatch):
+    handler = await _handler(tmp_path)
+    alice = _proxy_connection("result-owner")
+    bob = _proxy_connection("result-other")
+    identity = await _identity(handler, alice)
+    _save_webui_session(
+        handler.session_manager, "websocket:private-result",
+        owner_id=identity["user"]["id"], project_id=identity["active_project_id"],
+        title="Private result",
+    )
+    from nanobot.cron.types import CronRunRecord
+
+    job = CronJob(
+        id="private-result", name="Private result",
+        schedule=CronSchedule(kind="every", every_ms=60000),
+        payload=CronPayload(session_key="websocket:private-result"),
+    )
+    job.state.run_history = [CronRunRecord(run_at_ms=123, status="ok")]
+    handler.cron_service = SimpleNamespace(
+        get_job=lambda job_id: job if job_id == job.id else None,
+        store_path=tmp_path / "cron" / "jobs.json",
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Foreign automation run file was read")
+
+    monkeypatch.setattr("nanobot.webui.ws_http.cron_run_response", forbidden)
+    request = _request(
+        "/api/webui/automations/result?id=private-result&kind=cron&run_at_ms=123",
+        bob.request.headers,
+    )
+    response = await handler.dispatch(_connection(request), request)
+    assert response.status_code == 404
+    assert response.body.decode() == "automation not found"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth", ["trusted_proxy", "oidc"])
+async def test_loopback_member_cannot_access_host_ssh(tmp_path, auth):
+    handler = await _handler(tmp_path)
+    if auth == "trusted_proxy":
+        connection = _proxy_connection("ssh-member", "/api/remote-instances")
+    else:
+        handler.oidc = SimpleNamespace(
+            enabled=True, session=lambda _headers: SimpleNamespace(principal="oidc:ssh-member"),
+        )
+        handler.tokens.api_token_principal = lambda _request: "oidc:ssh-member"
+        connection = _connection(_request("/api/remote-instances", {}))
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("Member accessed host SSH controls")
+
+    handler.remote_instances = SimpleNamespace(health=forbidden, action=forbidden)
+    response = await handler.dispatch(connection, connection.request)
+    assert response.status_code == 403
+    assert response.body.decode() == "remote_connections_local_only"

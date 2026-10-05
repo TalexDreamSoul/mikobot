@@ -83,16 +83,106 @@ def _pair(
     instance_id: str = "release",
     sender_id: str = "owner-sender",
     assignee_user_id: str | None = None,
+    replace_assignment: bool = False,
 ):
     """Run one full Pair Code round trip and return the consumed challenge."""
     challenge, code = store.create_pairing_challenge(
         actor_id, project_id=project_id, channel_type=channel_type,
         instance_id=instance_id, assignee_user_id=assignee_user_id,
+        replace_assignment=replace_assignment,
     )
     store.verify_pairing_challenge(
         code, channel_type=channel_type, instance_id=instance_id, sender_id=sender_id
     )
     return store.consume_pairing_challenge(actor_id, challenge.id)
+
+
+def test_repair_requires_confirmation_and_revokes_superseded_codes(tmp_path: Path) -> None:
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    store.update_user_admin(owner.id, True)
+    store.record_channel_provision(owner.id, channel_type="weixin", instance_id="release")
+    _pair(store, owner.id, project_id=project.id)
+    before = store.path.read_bytes()
+    with pytest.raises(CollaborationConflictError, match="confirm replacement"):
+        store.create_pairing_challenge(
+            owner.id, project_id=project.id, channel_type="weixin", instance_id="release",
+        )
+    assert store.path.read_bytes() == before
+    first, first_code = store.create_pairing_challenge(
+        owner.id, project_id=project.id, channel_type="weixin", instance_id="release",
+        replace_assignment=True,
+    )
+    assert store.resolve_channel_assignment("weixin", "release") is None
+    second, second_code = store.create_pairing_challenge(
+        owner.id, project_id=project.id, channel_type="weixin", instance_id="release",
+        replace_assignment=True,
+    )
+    assert store.get_pairing_challenge(owner.id, first.id) is None
+    with pytest.raises(CollaborationNotFoundError):
+        store.verify_pairing_challenge(
+            first_code, channel_type="weixin", instance_id="release", sender_id="owner-sender",
+        )
+    store.verify_pairing_challenge(
+        second_code, channel_type="weixin", instance_id="release", sender_id="owner-sender",
+    )
+    store.consume_pairing_challenge(owner.id, second.id)
+    assignment = store.resolve_channel_assignment("weixin", "release")
+    assert assignment is not None and assignment.project_id == project.id
+
+
+@pytest.mark.parametrize("rejection", ["unauthorized", "capacity", "missing_project"])
+def test_repair_rejection_preserves_live_assignment(tmp_path: Path, rejection: str) -> None:
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    store.update_user_admin(owner.id, True)
+    _pair(store, owner.id, project_id=project.id)
+    actor_id = owner.id
+    project_id = project.id
+    error = CollaborationConflictError
+    if rejection == "unauthorized":
+        stranger = store.create_user("stranger")
+        store.add_member(project.id, owner.id, stranger.id)
+        actor_id = stranger.id
+        error = CollaborationPermissionError
+    elif rejection == "capacity":
+        for index in range(32):
+            store.create_pairing_challenge(
+                owner.id, project_id=project.id, channel_type="weixin", instance_id=f"busy-{index}",
+            )
+    else:
+        project_id = "missing"
+        error = CollaborationNotFoundError
+    before = store.path.read_bytes()
+    with pytest.raises(error):
+        store.create_pairing_challenge(
+            actor_id, project_id=project_id, channel_type="weixin", instance_id="release",
+            replace_assignment=True,
+        )
+    assert store.path.read_bytes() == before
+    assignment = store.resolve_channel_assignment("weixin", "release")
+    assert assignment is not None and assignment.project_id == project.id
+
+
+def test_instance_revocation_is_exact_and_preserves_other_codes(tmp_path: Path) -> None:
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, project = _user_and_project(store, tmp_path, "owner")
+    store.update_user_admin(owner.id, True)
+    for instance in ("release", "sibling"):
+        store.record_channel_provision(owner.id, channel_type="weixin", instance_id=instance)
+    _pair(store, owner.id, project_id=project.id, instance_id="release")
+    pending, code = store.create_pairing_challenge(
+        owner.id, project_id=project.id, channel_type="weixin", instance_id="sibling",
+    )
+    assert store.revoke_channel_instance(owner.id, channel_type="weixin", instance_id="release")
+    assert store.resolve_channel_assignment("weixin", "release") is None
+    assert store.resolve_identity("weixin.release", "owner-sender").id == owner.id
+    store.verify_pairing_challenge(
+        code, channel_type="weixin", instance_id="sibling", sender_id="sibling-sender",
+    )
+    store.consume_pairing_challenge(owner.id, pending.id)
+    sibling = store.resolve_channel_assignment("weixin", "sibling")
+    assert sibling is not None and sibling.project_id == project.id
 
 
 @pytest_asyncio.fixture
@@ -211,6 +301,8 @@ def _scope_loop(
     """Build the real scope logic without starting unrelated subagent machinery."""
     with patch("nanobot.agent.loop.SubagentManager") as subagents:
         subagents.return_value.cancel_by_session = AsyncMock(return_value=0)
+        if isinstance(provider, MagicMock):
+            provider.chat_stream_with_retry = provider.chat_with_retry
         return AgentLoop(
             bus=MessageBus(),
             provider=provider,
@@ -416,6 +508,7 @@ async def test_queued_message_with_other_authorization_is_redispatched_fresh(
         return LLMResponse(content="ok", tool_calls=[], usage=None)
 
     provider.chat_with_retry = AsyncMock(side_effect=chat_with_retry)
+    provider.chat_stream_with_retry = provider.chat_with_retry
     loop = _scope_loop(workspace, repository, provider)
     registry = ToolRegistry()
     definition = SimpleNamespace(name="query", description="query", inputSchema={"type": "object"})
@@ -444,19 +537,6 @@ async def test_queued_message_with_other_authorization_is_redispatched_fresh(
             "telegram", "bob", "shared-chat", "bob request", metadata={"direct": True}
         )
     )
-    dispatched: list[InboundMessage] = []
-    fresh_tasks: list[asyncio.Task[None]] = []
-
-    async def fresh_dispatch(message: InboundMessage) -> None:
-        dispatched.append(message)
-        await loop._process_message(message)
-
-    def schedule_and_capture(coro: object) -> None:
-        assert asyncio.iscoroutine(coro)
-        fresh_tasks.append(asyncio.create_task(coro))
-
-    loop._dispatch = fresh_dispatch  # type: ignore[method-assign]
-    loop.schedule_background = schedule_and_capture  # type: ignore[method-assign]
 
     await loop._run_agent_loop(
         TranscriptInput(history=[{"role": "user", "content": active.content}], current_message=None),
@@ -466,12 +546,13 @@ async def test_queued_message_with_other_authorization_is_redispatched_fresh(
         tools=active_tools,
     )
 
-    assert len(fresh_tasks) == 1
-    await fresh_tasks[0]
+    assert queued.qsize() == 1
+    pending = queued.get_nowait()
+    assert pending.sender_id == "bob"
+    assert pending.metadata["pending_reauthorization_dispatch"] is True
+    await loop._process_message(pending)
 
     assert len(calls) == 2
-    assert len(dispatched) == 1
-    assert dispatched[0].sender_id == "bob"
 
     def tool_names(call: dict[str, object]) -> set[str]:
         definitions = call["tools"]
@@ -1330,10 +1411,11 @@ def test_members_may_pair_only_instances_they_connected_for_themselves(tmp_path:
     _pair(
         store, owner.id, project_id=project.id, instance_id="wechat-a1b2c3",
         sender_id="colleague-sender", assignee_user_id=colleague.id,
+        replace_assignment=True,
     )
     reassigned = store.resolve_channel_assignment("weixin", "wechat-a1b2c3")
     assert reassigned is not None and reassigned.assignee_user_id == colleague.id
-    with pytest.raises(CollaborationConflictError, match="another project"):
+    with pytest.raises(CollaborationConflictError, match="confirm replacement"):
         other_project = store.create_project(owner.id, "Other", tmp_path / "other")
         _pair(store, owner.id, project_id=other_project.id, instance_id="wechat-a1b2c3", sender_id="x")
 
@@ -1797,6 +1879,7 @@ def _turn_provider() -> MagicMock:
     provider.chat_with_retry = AsyncMock(
         return_value=LLMResponse(content="safe response", tool_calls=[], usage=None)
     )
+    provider.chat_stream_with_retry = provider.chat_with_retry
     return provider
 
 
@@ -2136,6 +2219,7 @@ async def test_member_revocation_before_tool_execution_prevents_side_effect(
         return LLMResponse(content="access revoked", tool_calls=[], usage=None)
 
     provider.chat_with_retry = AsyncMock(side_effect=chat_with_retry)
+    provider.chat_stream_with_retry = provider.chat_with_retry
     loop = _scope_loop(workspace, repository, provider)
     tools = ToolRegistry()
     tools.register(MutatingTool())

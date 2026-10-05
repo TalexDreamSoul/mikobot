@@ -1,17 +1,8 @@
 {
-  "description": "Use Mikobot from WeChat conversations.",
-  "requirements": "WeChat channel setup and gateway",
   "setup": {
     "primaryAction": "Connect WeChat",
     "docsLabel": "Open WeChat setup",
     "officialLabel": "Open WeChat",
-    "tryIt": "After the QR login finishes, send a WeChat DM to the connected account.",
-    "summary": "WeChat signs in with a QR code and saves the account state locally.",
-    "steps": [
-      "Click Connect and scan the QR code with WeChat on your phone.",
-      "Keep the local gateway running while WeChat receives messages.",
-      "Send a direct test message to confirm the account is connected."
-    ],
     "fields": {
       "allowFrom": {
         "label": "Allowed users",
@@ -25,7 +16,7 @@
         "label": "Send progress"
       },
       "sendToolHints": {
-        "label": "Send tool hints"
+        "label": "Send tool activity summaries"
       },
       "streaming": {
         "label": "Use streaming API"
@@ -37,7 +28,7 @@
         "label": "Structured progress limit"
       },
       "contextMessageBudget": {
-        "label": "Context message budget"
+        "label": "Context message limit"
       },
       "blockStreaming": {
         "label": "Send response blocks"
@@ -61,15 +52,14 @@
         "label": "State directory"
       },
       "pollTimeout": {
-        "label": "Poll timeout"
+        "label": "Poll timeout (seconds)"
       }
     }
   },
   "custom": {
     "qrAlt": "WeChat login QR code",
     "scanTitle": "Scan with WeChat",
-    "scanDescription": "Use WeChat on your phone to scan this code. Mikobot saves the account state locally after login.",
-    "waiting": "Waiting for WeChat scan...",
+    "waiting": "Waiting for you to scan with WeChat…",
     "connected": "WeChat is connected.",
     "stopped": "WeChat login stopped.",
     "connecting": "Connecting...",
@@ -81,6 +71,18 @@
     "verifyPlaceholder": "Code",
     "verifySubmit": "Verify",
     "pairingOnly": "Awaiting Pair Code",
-    "addBot": "Add another WeChat bot"
+    "addBot": "Add another WeChat bot",
+    "deleteInstance": "Delete instance",
+    "deleteInstanceTitle": "Delete this WeChat instance?",
+    "deleteInstanceWarning": "This removes the local account and instance and revokes its project assignment, provisioning and active pairing codes. Conversation history is kept.",
+    "deleteInstanceConfirm": "Delete instance",
+    "rescan": "Scan again",
+    "rescanTitle": "Replace the WeChat login?",
+    "rescanWarning": "Scan a new QR code for this same instance. The current saved credentials remain unchanged if you cancel or the login fails; they are replaced only after successful login.",
+    "rescanConfirm": "Scan new QR code",
+    "rePair": "Pair again",
+    "rePairTitle": "Unlink and pair this instance again?",
+    "rePairWarning": "This unlinks the current project assignment and invalidates old pairing codes. The account stays logged in, but normal delivery is suspended until the new pairing code is verified and consumed.",
+    "rePairConfirm": "Unlink and create code"
   }
 }

@@ -71,6 +71,38 @@ afterEach(() => {
 });
 
 describe("NanobotClient", () => {
+  it("bounds regular replay tails but retains temporary events until discard", async () => {
+    const client = new NanobotClient({
+      url: "ws://test", reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    const socket = lastSocket();
+    socket.fakeOpen();
+    const created = client.newTemporaryChat();
+    socket.fakeMessage({ event: "attached", chat_id: "temporary", temporary: true });
+    await created;
+    for (let index = 0; index < 2_010; index++) {
+      for (const chatId of ["regular", "temporary"]) {
+        socket.fakeMessage({ event: "delta", chat_id: chatId, text: String(index) });
+      }
+    }
+    const regular = vi.fn();
+    const temporary = vi.fn();
+    client.onChat("regular", regular);
+    const unsubscribe = client.onChat("temporary", temporary);
+    expect(regular).toHaveBeenCalledTimes(2_000);
+    expect(regular.mock.calls[0][0].text).toBe("10");
+    expect(temporary.mock.calls.filter(([event]) => event.event === "delta")).toHaveLength(2_010);
+    unsubscribe();
+    socket.fakeMessage({ event: "delta", chat_id: "temporary", text: "discard me" });
+    client.discardTemporaryChat("temporary");
+    const discarded = vi.fn();
+    client.onChat("temporary", discarded);
+    expect(discarded).not.toHaveBeenCalled();
+    client.close();
+  });
+
   it("reconciles simultaneous client submissions to the gateway-owned turn", () => {
     const client = new NanobotClient({
       url: "ws://test",
@@ -1587,6 +1619,18 @@ describe("NanobotClient", () => {
 
     expect(chatHandler).toHaveBeenCalledTimes(deliveredBeforeLateFrames);
     expect(client.getRunStartedAt("chat-canonical")).toBeNull();
+    const otherChat = vi.fn();
+    client.onChat("other-chat", otherChat);
+    const taskUpdate = {
+      event: "subagent_task", chat_id: "chat-canonical",
+      task: { task_id: "child", origin_turn_id: "turn-canonical", state: "done", revision: 4 },
+    };
+    lastSocket().fakeMessage(taskUpdate);
+    expect(chatHandler).toHaveBeenLastCalledWith(taskUpdate);
+    expect(chatHandler).toHaveBeenCalledTimes(deliveredBeforeLateFrames + 1);
+    expect(otherChat).not.toHaveBeenCalled();
+    expect(client.hasUnsettledRun("chat-canonical")).toBe(false);
+    expect(client.getRunStartedAt("chat-canonical")).toBeNull();
   });
 
   it("notifies run status subscribers and replays running chats", () => {
@@ -1725,6 +1769,7 @@ describe("NanobotClient", () => {
       model_name: "deepseek/deepseek-chat",
       model_preset: "Deep Research",
       fallback: true,
+      reauth_provider: "openai_codex",
     });
 
     expect(chatHandler).toHaveBeenCalledWith({
@@ -1733,6 +1778,7 @@ describe("NanobotClient", () => {
       model_name: "deepseek/deepseek-chat",
       model_preset: "Deep Research",
       fallback: true,
+      reauth_provider: "openai_codex",
     });
   });
 
@@ -1972,6 +2018,30 @@ describe("NanobotClient", () => {
       quoted_context: "selected answer excerpt",
       webui: true,
     });
+  });
+
+  it("sends automation intent separately from the user's text", () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    lastSocket().fakeOpen();
+
+    client.sendMessage("chat-x", "每天八点提醒我喝水", undefined, {
+      intent: "create_automation",
+    });
+    expect(JSON.parse(lastSocket().sent.at(-1) as string)).toEqual({
+      type: "message",
+      chat_id: "chat-x",
+      content: "每天八点提醒我喝水",
+      intent: "create_automation",
+      webui: true,
+    });
+
+    client.sendMessage("chat-x", "Thanks");
+    expect(JSON.parse(lastSocket().sent.at(-1) as string)).not.toHaveProperty("intent");
   });
 
   it("includes CLI app attachments in outbound messages", () => {

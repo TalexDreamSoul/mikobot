@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Preserving migrations, exact-instance authority, file locks and atomic state writes"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Full Python and channel quality gates; no formatting churn or weakening boundary contracts"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Keep channel lifecycle, WebSocket mutation, project pairing and UI DTO contracts aligned"}
+{"file":".trellis/tasks/10-05-upstream-sync-gg-release/research/integration-inventory.json","reason":"Canonical upstream identity, conflict ownership and credential-safe GG release baseline"}
+{"file":".trellis/tasks/10-05-upstream-sync-gg-release/research/weixin-lifecycle.json","reason":"Observed reconnect short-circuit and account credential preservation boundary"}

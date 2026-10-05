@@ -167,6 +167,7 @@ def _system_operations(
         mcp_presets_action=unused,
         reload_mcp=unused,
         mcp_runtime_status=None,
+        update_runtime_config=unused,
         check_for_update=unused,
         channel_pairing_action=channel_pairing_action,
     )

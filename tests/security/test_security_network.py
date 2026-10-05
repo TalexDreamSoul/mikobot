@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from unittest.mock import patch
+from urllib.request import proxy_bypass_environment
 
 import pytest
 
@@ -42,6 +43,8 @@ def test_is_loopback_host_rejects_network_targets(host: str) -> None:
 def _clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (*_PROXY_ENV_VARS, "NO_PROXY", "no_proxy"):
         monkeypatch.delenv(name, raising=False)
+    # Keep proxy bypass independent of macOS/Windows system proxy settings.
+    monkeypatch.setattr("nanobot.security.network.proxy_bypass", proxy_bypass_environment)
 
 
 def _fake_resolve(host: str, results: list[str]):

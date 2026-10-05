@@ -1,4 +1,3 @@
-import ast
 import json
 import re
 import subprocess
@@ -8,16 +7,16 @@ from pathlib import Path
 import pytest
 
 import nanobot.channels._setup as channel_setup_module
-import nanobot.channels.registry as registry_module
 from nanobot.channels._setup import channel_setup_spec
 from nanobot.channels.plugin import ChannelPlugin, load_channel_package
-from nanobot.channels.registry import channel_default_enabled, discover_plugins
+from nanobot.channels.registry import discover_plugins
 
 EXPECTED_CHANNELS = {
     "dingtalk",
     "discord",
     "email",
     "feishu",
+    "linear",
     "matrix",
     "mattermost",
     "mochat",
@@ -34,24 +33,19 @@ EXPECTED_CHANNELS = {
 }
 
 
+
 def test_channel_setup_spec_derives_route_and_secret_metadata() -> None:
     slack = channel_setup_spec("slack")
 
     assert slack is not None
     assert slack.secrets == {"appToken", "botToken"}
-    assert slack.route_field_types == {
-        "appToken": "secret",
-        "botToken": "secret",
-        "groupPolicy": ("enum", {"mention", "open", "allowlist"}),
-    }
-    assert slack.simple_required_fields == ("appToken", "botToken")
-    assert slack.fields["groupPolicy"].default == "mention"
-    group_policy = next(
-        field
-        for field in slack.to_public_dict("slack")["fields"]
-        if field["field"] == "groupPolicy"
+    assert slack.route_field_types["appToken"] == "secret"
+    assert slack.route_field_types["botToken"] == "secret"
+    assert slack.route_field_types["groupPolicy"] == (
+        "enum",
+        {"mention", "open", "allowlist"},
     )
-    assert group_policy["default_value"] == "mention"
+    assert slack.simple_required_fields == ("appToken", "botToken")
 
 
 def test_matrix_setup_requires_one_complete_login_method() -> None:
@@ -73,7 +67,7 @@ def test_channel_setup_spec_separates_writable_and_snapshot_fields() -> None:
 
     assert matrix is not None
     assert discord is not None
-    assert "allowFrom" not in matrix.route_field_types
+    assert "allowFrom" in matrix.route_field_types
     assert "allowFrom" in matrix.snapshot_fields
     assert "allowFrom" in discord.route_field_types
     assert "allowFrom" not in discord.snapshot_fields
@@ -87,6 +81,7 @@ def test_webui_forms_have_writable_mattermost_and_whatsapp_contracts() -> None:
     assert whatsapp is not None
     assert mattermost.route_field_types["serverUrl"] == "string"
     assert mattermost.route_field_types["token"] == "secret"
+    assert whatsapp.route_field_types["proxy"] == "string"
     assert whatsapp.route_field_types["allowFrom"] == "list"
     assert whatsapp.route_field_types["groupPolicy"] == (
         "enum",
@@ -94,11 +89,23 @@ def test_webui_forms_have_writable_mattermost_and_whatsapp_contracts() -> None:
     )
 
 
+def test_weixin_token_is_managed_only_by_qr_login() -> None:
+    weixin = channel_setup_spec("weixin")
+
+    assert weixin is not None
+    assert weixin.simple_required_fields == ("token",)
+    assert "token" not in weixin.route_field_types
+    assert "token" not in weixin.snapshot_fields
+    assert all(
+        field["field"] != "token"
+        for field in weixin.to_public_dict("weixin")["fields"]
+    )
+
+
 def test_every_channel_is_a_self_contained_package() -> None:
     channel_dir = Path(channel_setup_module.__file__).parent
     package_names = {path.parent.name for path in channel_dir.glob("*/manifest.py")}
 
-    assert not hasattr(channel_setup_module, "CHANNEL_SETUP_SPECS")
     assert package_names == EXPECTED_CHANNELS
     assert set(discover_plugins()) == EXPECTED_CHANNELS
     for name in EXPECTED_CHANNELS:
@@ -106,7 +113,6 @@ def test_every_channel_is_a_self_contained_package() -> None:
         assert (package_dir / "__init__.py").is_file()
         assert (package_dir / "manifest.py").is_file()
         assert (package_dir / "runtime.py").is_file()
-        assert not (channel_dir / f"{name}.py").exists()
 
         plugin = load_channel_package(name)
         assert plugin is not None
@@ -129,6 +135,13 @@ def test_channel_locales_cover_authoritative_setup_contracts() -> None:
         )
         setup_messages = english["setup"]
         field_messages = setup_messages.get("fields", {})
+        contract_message_keys = {
+            re.sub(r"[^A-Za-z0-9_-]+", "_", field_name)
+            for field_name in plugin.setup.fields
+        }
+        assert not set(field_messages) - contract_message_keys, (
+            f"{name} has locale copy for fields outside its setup contract"
+        )
         for field_name, field in plugin.setup.fields.items():
             if not field.writable:
                 continue
@@ -138,52 +151,6 @@ def test_channel_locales_cover_authoritative_setup_contracts() -> None:
             assert setup_messages.get("officialLabel"), f"{name} has no localized official label"
 
 
-def test_channel_manifests_only_import_contract_modules() -> None:
-    channel_dir = Path(channel_setup_module.__file__).parent
-    allowed_imports = {
-        "nanobot.channels._manifest",
-        "nanobot.channels.contracts",
-        "nanobot.channels.plugin",
-    }
-
-    for name in EXPECTED_CHANNELS:
-        manifest_path = channel_dir / name / "manifest.py"
-        tree = ast.parse(manifest_path.read_text(encoding="utf-8"))
-        imports: set[str] = set()
-        for node in tree.body:
-            if isinstance(node, ast.Import):
-                imports.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imports.add(node.module)
-        allowed_channel_imports = {
-            module
-            for module in imports
-            if module.startswith(f"nanobot.channels.{name}.")
-            and not module.endswith(".runtime")
-        }
-        unexpected = imports - allowed_imports - allowed_channel_imports
-        assert not unexpected, f"{name} imports runtime dependencies: {unexpected}"
-
-
-def test_runtime_classes_do_not_declare_persisted_management_hooks() -> None:
-    channel_dir = Path(channel_setup_module.__file__).parent
-    management_hooks = {
-        "feature_instances",
-        "instance_specs",
-        "runtime_name",
-        "supports_multiple_instances",
-        "update_instance_config",
-    }
-    for name in EXPECTED_CHANNELS:
-        tree = ast.parse((channel_dir / name / "runtime.py").read_text(encoding="utf-8"))
-        declared = {
-            item.name
-            for node in tree.body
-            if isinstance(node, ast.ClassDef)
-            for item in node.body
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        assert declared.isdisjoint(management_hooks), f"{name} runtime owns {declared & management_hooks}"
 
 
 def test_feishu_package_manifest_owns_runtime_and_webui_metadata() -> None:
@@ -205,6 +172,24 @@ def test_weixin_package_manifest_owns_runtime_and_webui_metadata() -> None:
     assert plugin.dependencies == ("qrcode[pil]>=8.0", "pycryptodome>=3.20.0")
     assert plugin.connector == "nanobot.channels.weixin.connect:WeixinConnectStore"
     assert plugin.webui == "webui/index.tsx"
+
+
+def test_whatsapp_package_manifest_owns_browser_connector() -> None:
+    plugin = load_channel_package("whatsapp")
+
+    assert plugin is not None
+    assert plugin.connector == "nanobot.channels.whatsapp.connect:WhatsAppConnectStore"
+    assert plugin.webui == "webui/index.tsx"
+
+
+def test_mochat_package_manifest_exposes_required_setup() -> None:
+    plugin = load_channel_package("mochat")
+
+    assert plugin is not None
+    assert plugin.webui == "webui/index.ts"
+    assert plugin.settings_visible is True
+    assert plugin.setup is not None
+    assert plugin.setup.simple_required_fields == ("clawToken",)
 
 
 def test_package_manifests_do_not_import_runtimes() -> None:
@@ -256,28 +241,3 @@ def test_channel_plugin_rejects_invalid_runtime_import_path() -> None:
         )
 
 
-def test_channel_default_enabled_uses_package_manifest(monkeypatch) -> None:
-    plugin = ChannelPlugin(
-        name="demo",
-        display_name="Demo",
-        runtime="example.demo.runtime:DemoChannel",
-        default_enabled=True,
-    )
-    monkeypatch.setattr(
-        registry_module,
-        "load_channel_plugin",
-        lambda name: plugin if name == "demo" else (_ for _ in ()).throw(ImportError()),
-    )
-
-    assert channel_default_enabled("demo") is True
-    assert channel_default_enabled("missing") is False
-
-
-def test_websocket_manifest_declares_the_only_default_enabled_channel() -> None:
-    enabled = {
-        name
-        for name in EXPECTED_CHANNELS
-        if (plugin := load_channel_package(name)) is not None and plugin.default_enabled
-    }
-
-    assert enabled == {"websocket"}

@@ -5,7 +5,6 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
 import { fetchLoginSecurity, updateLoginSecurity } from "@/lib/api";
 import type { LoginSecuritySettings } from "@/lib/types";
 import { useClient } from "@/providers/ClientProvider";
@@ -136,7 +135,7 @@ export function LoginSecuritySettingsPanel() {
           />
         </Field>
         <Field label={t("settings.loginSecurity.authMethod")}>
-          <Select
+          <select
             value={form.token_endpoint_auth_method}
             onChange={(event) => update(
               "token_endpoint_auth_method",
@@ -147,7 +146,7 @@ export function LoginSecuritySettingsPanel() {
             <option value="none">none (PKCE public client)</option>
             <option value="client_secret_basic">client_secret_basic</option>
             <option value="client_secret_post">client_secret_post</option>
-          </Select>
+          </select>
         </Field>
         <Field label={t("settings.loginSecurity.scopes")}>
           <Input

@@ -44,6 +44,7 @@ export function useCollaborationProjects() {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const detailRequestRef = useRef(0);
+  const pairingCreateInFlight = useRef(false);
 
   const loadSummary = useCallback(async (preferredProjectId?: string | null) => {
     const next = await fetchCollaboration(getToken());
@@ -245,19 +246,33 @@ export function useCollaborationProjects() {
     instanceId: string;
     assigneeUserId?: string | null;
     projectId?: string;
+    replaceAssignment?: boolean;
   }) => {
     const id = values.projectId ?? requireProject();
+    if (pairingCreateInFlight.current) throw new Error("Pair Code creation is already in progress.");
+    pairingCreateInFlight.current = true;
     setBusyKey("pairing:create");
     setError(null);
     try {
-      return await createCollaborationPairingChallenge(client, { ...values, projectId: id });
+      const result = await createCollaborationPairingChallenge(client, { ...values, projectId: id });
+      if (values.replaceAssignment) {
+        try {
+          await loadSummary(id);
+          await loadDetail(id);
+        } catch (reason) {
+          // The one-time code has already been issued; preserve it and expose the stale projection.
+          setError(errorMessage(reason));
+        }
+      }
+      return result;
     } catch (reason) {
       setError(errorMessage(reason));
       throw reason;
     } finally {
       setBusyKey(null);
+      pairingCreateInFlight.current = false;
     }
-  }, [client, requireProject]);
+  }, [client, loadDetail, loadSummary, requireProject]);
 
   const finishPairing = useCallback(async (challengeId: string) => {
     setBusyKey("pairing:consume");

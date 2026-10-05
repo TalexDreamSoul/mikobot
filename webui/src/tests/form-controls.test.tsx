@@ -1,70 +1,46 @@
+import { useState } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-describe("form control focus styles", () => {
-  it.each([
-    ["input", <Input aria-label="input" />],
-    ["textarea", <Textarea aria-label="textarea" />],
-    ["select", <Select aria-label="select" />],
-  ])("uses a subdued inset focus ring for the %s", (label, control) => {
-    render(control);
-
-    const element = screen.getByLabelText(label);
-    expect(element).toHaveClass(
-      "focus-visible:ring-2",
-      "focus-visible:ring-inset",
-      "focus-visible:ring-ring/50",
-    );
-    expect(element).not.toHaveClass(
-      "ring-offset-background",
-      "focus-visible:ring-ring",
-      "focus-visible:ring-offset-2",
-    );
-  });
-});
+function EnvironmentPicker() {
+  const [value, setValue] = useState("staging");
+  return <Select value={value} onValueChange={setValue}>
+    <SelectTrigger aria-label="Environment"><SelectValue /></SelectTrigger>
+    <SelectContent>
+      <SelectItem value="staging">Staging</SelectItem>
+      <SelectItem value="production">Production</SelectItem>
+    </SelectContent>
+  </Select>;
+}
 
 describe("shared form controls", () => {
-  it("keeps the select native so it reports a value and change events", () => {
-    const onChange = vi.fn();
-    render(
-      <Select aria-label="Environment" value="staging" onChange={onChange}>
-        <option value="staging">Staging</option>
-        <option value="production">Production</option>
-      </Select>,
-    );
-
-    const select = screen.getByRole("combobox", { name: "Environment" });
-    expect(select.tagName).toBe("SELECT");
-    expect(select).toHaveValue("staging");
-
-    fireEvent.change(select, { target: { value: "production" } });
-    expect(onChange).toHaveBeenCalled();
+  it("selects an environment by keyboard and restores focus with the selected value", async () => {
+    const user = userEvent.setup();
+    render(<EnvironmentPicker />);
+    const trigger = screen.getByRole("combobox", { name: "Environment" });
+    trigger.focus();
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{End}{Enter}");
+    expect(trigger).toHaveTextContent("Production");
+    expect(trigger).toHaveFocus();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
   it("keeps the checkbox native, labelled, and disableable", () => {
     const onChange = vi.fn();
-    render(
-      <label>
-        <Checkbox checked onChange={onChange} />
-        Ship it
-      </label>,
-    );
-
+    render(<label><Checkbox checked onChange={onChange} />Ship it</label>);
     const checkbox = screen.getByRole("checkbox", { name: "Ship it" });
     expect(checkbox).toBeChecked();
-
     fireEvent.click(checkbox);
     expect(onChange).toHaveBeenCalled();
   });
 
   it("disables the checkbox input rather than only dimming its box", () => {
     render(<Checkbox aria-label="locked" checked={false} disabled readOnly />);
-
     expect(screen.getByRole("checkbox", { name: "locked" })).toBeDisabled();
   });
 });

@@ -24,7 +24,7 @@ from nanobot.webui.workspaces import WebUIWorkspaceController
 _TEMPORARY_CHAT_DISABLED_TOOLS = frozenset({
     "create_goal",
     "update_goal",
-    "spawn",
+    "subagent",
     "cron",
 })
 _TEMPORARY_CHAT_COMMANDS = frozenset({"/model", "/stop"})

@@ -16,7 +16,7 @@ import {
   renderSettingsView,
   settingsPayload,
 } from "@/tests/settings-test-utils";
-import type { ExtensionInventoryPayload } from "@/lib/types";
+import type { ExtensionInventoryPayload, SettingsPayload } from "@/lib/types";
 
 const requestMutation = vi.fn();
 const onOpenSection = vi.fn();
@@ -455,10 +455,23 @@ describe("Settings navigation", () => {
 
   // The whole Settings page is mounted here, so every sibling read has to answer too.
   function stubSettingsPage() {
+    const usage: NonNullable<SettingsPayload["usage"]> = {
+      days: [],
+      total_tokens: 0,
+      total_tokens_30d: 0,
+      total_tokens_365d: 0,
+      peak_day_tokens: 0,
+      current_streak_days: 0,
+      longest_streak_days: 0,
+      active_days_30d: 0,
+      requests_30d: 0,
+      updated_at: null,
+    };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/settings/extensions") return jsonResponse(extensionInventory());
       if (url === "/api/settings") return jsonResponse(settingsPayload());
+      if (url === "/api/settings/usage") return jsonResponse(usage);
       return jsonResponse({});
     }));
   }
@@ -496,7 +509,7 @@ describe("Settings navigation", () => {
 
     expect(await screen.findByRole("status")).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Settings sections" });
-    expect(within(nav).getByRole("button", { name: "Settings: Appearance" })).toBeInTheDocument();
+    expect(within(nav).getByRole("button", { name: "Appearance", exact: true })).toHaveAttribute("aria-current", "page");
     expect(within(nav).queryByRole("button", { name: /Extensions/ })).not.toBeInTheDocument();
     expect(screen.getByText("Theme")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();

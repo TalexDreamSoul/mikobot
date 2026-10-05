@@ -1,17 +1,8 @@
 {
-  "description": "WeChat 대화에서 nanobot을 사용합니다.",
-  "requirements": "WeChat 채널 설정 및 게이트웨이",
   "setup": {
     "primaryAction": "WeChat 연결",
     "docsLabel": "WeChat 설정 가이드 열기",
     "officialLabel": "WeChat 열기",
-    "tryIt": "QR 로그인 후 연결된 계정으로 WeChat DM을 보내세요.",
-    "summary": "WeChat은 QR 코드로 로그인하고 계정 상태를 로컬에 저장합니다.",
-    "steps": [
-      "연결을 클릭하고 휴대폰 WeChat으로 QR 코드를 스캔하세요.",
-      "WeChat이 메시지를 받는 동안 로컬 게이트웨이를 실행해 두세요.",
-      "DM으로 테스트해 계정 연결을 확인하세요."
-    ],
     "fields": {
       "allowFrom": {
         "label": "허용된 사용자",
@@ -25,7 +16,7 @@
         "label": "진행 상황 보내기"
       },
       "sendToolHints": {
-        "label": "도구 힌트 보내기"
+        "label": "도구 실행 요약 보내기"
       },
       "streaming": {
         "label": "스트리밍 API 사용"
@@ -37,13 +28,13 @@
         "label": "구조화된 진행 메시지 한도"
       },
       "contextMessageBudget": {
-        "label": "컨텍스트 메시지 예산"
+        "label": "컨텍스트에 포함할 최대 메시지 수"
       },
       "blockStreaming": {
         "label": "응답을 블록으로 보내기"
       },
       "blockStreamingMinChars": {
-        "label": "최소 블록 크기"
+        "label": "블록당 최소 글자 수"
       },
       "blockStreamingMaxMessages": {
         "label": "블록 메시지 한도"
@@ -61,15 +52,14 @@
         "label": "상태 디렉터리"
       },
       "pollTimeout": {
-        "label": "폴링 제한 시간"
+        "label": "폴링 제한 시간(초)"
       }
     }
   },
   "custom": {
     "qrAlt": "WeChat 로그인 QR 코드",
     "scanTitle": "WeChat으로 스캔",
-    "scanDescription": "휴대폰 WeChat으로 스캔하세요. 로그인 후 nanobot이 계정 상태를 로컬에 저장합니다.",
-    "waiting": "WeChat 스캔을 기다리는 중...",
+    "waiting": "WeChat으로 QR 코드를 스캔해 주세요…",
     "connected": "WeChat이 연결되었습니다.",
     "stopped": "WeChat 로그인이 중지되었습니다.",
     "connecting": "연결 중...",
@@ -79,6 +69,18 @@
     "expired": "WeChat 로그인이 만료되었습니다. 다시 연결하려면 다시 스캔하세요.",
     "failed": "WeChat에 연결할 수 없습니다. 다시 시도하세요.",
     "verifyPlaceholder": "코드",
-    "verifySubmit": "인증"
+    "verifySubmit": "인증",
+    "deleteInstance": "인스턴스 삭제",
+    "deleteInstanceTitle": "이 WeChat 인스턴스를 삭제할까요?",
+    "deleteInstanceWarning": "로컬 계정과 인스턴스를 삭제하고 해당 인스턴스의 프로젝트 할당, 사전 설정 및 활성 페어링 코드를 취소합니다. 대화 기록은 유지됩니다.",
+    "deleteInstanceConfirm": "인스턴스 삭제",
+    "rescan": "다시 스캔",
+    "rescanTitle": "WeChat 로그인을 교체할까요?",
+    "rescanWarning": "동일한 인스턴스의 새 QR 코드를 스캔합니다. 취소하거나 로그인에 실패하면 저장된 인증 정보는 유지되며, 로그인에 성공한 후에만 교체됩니다.",
+    "rescanConfirm": "새 QR 코드 스캔",
+    "rePair": "다시 페어링",
+    "rePairTitle": "이 인스턴스의 연결을 해제하고 다시 페어링할까요?",
+    "rePairWarning": "현재 프로젝트 할당을 해제하고 기존 코드를 무효화합니다. 계정은 로그인 상태를 유지하지만 새 코드가 확인되고 사용될 때까지 일반 메시지 전달이 중단됩니다.",
+    "rePairConfirm": "연결 해제 및 코드 생성"
   }
 }

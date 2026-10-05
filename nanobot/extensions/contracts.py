@@ -165,6 +165,7 @@ class ExtensionAction(StrEnum):
     RECONNECT = "reconnect"
     INSTALL = "install"
     UNINSTALL = "uninstall"
+    DELETE_INSTANCE = "delete_instance"
     RESTART_REQUIRED = "restart_required"
 
 

@@ -56,7 +56,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
 import type { CollaborationProjectsController } from "@/hooks/useCollaborationProjects";
 import type { ChatSummary, CollaborationProject } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -423,7 +422,7 @@ export function ProjectsView({
             <div className="mt-2 flex gap-2 lg:hidden">
               <div className="min-w-0 flex-1">
                 <label htmlFor="mobile-project-switcher" className="sr-only">{t("projects.currentProject")}</label>
-                <Select
+                <select
                   id="mobile-project-switcher"
                   value={projects.projectId ?? ""}
                   onChange={(event) => projects.selectProject(event.target.value)}
@@ -434,7 +433,7 @@ export function ProjectsView({
                   {allProjects.map((project) => (
                     <option key={project.id} value={project.id}>{project.name}</option>
                   ))}
-                </Select>
+                </select>
               </div>
               <Button
                 type="button"

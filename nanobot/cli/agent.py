@@ -124,7 +124,6 @@ def agent(
         StreamDeltaEvent,
         StreamedResponseEvent,
         StreamEndEvent,
-        outbound_event_from_message,
     )
     from nanobot.bus.queue import MessageBus
     from nanobot.cli import terminal as cli_terminal
@@ -326,7 +325,7 @@ def agent(
                 while True:
                     try:
                         msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-                        event = outbound_event_from_message(msg)
+                        event = msg.event
 
                         if isinstance(event, StreamDeltaEvent):
                             if renderer:

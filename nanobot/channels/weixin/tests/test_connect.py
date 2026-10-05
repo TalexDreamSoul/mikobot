@@ -124,7 +124,7 @@ async def test_weixin_connect_sessions_are_bounded_and_replacing_one_closes_its_
         def connect_load_state(self) -> bool:
             return False
 
-        def connect_open_client(self) -> None:
+        def connect_open_client(self, *, require_existing: bool = False) -> None:
             return None
 
         async def connect_fetch_qr_code(self, *, force: bool) -> tuple[str, str]:
@@ -165,7 +165,7 @@ async def test_weixin_connect_session_rejects_other_actor_poll_and_cancel(
         def connect_load_state(self) -> bool:
             return False
 
-        def connect_open_client(self) -> None:
+        def connect_open_client(self, *, require_existing: bool = False) -> None:
             return None
 
         async def connect_fetch_qr_code(self, *, force: bool) -> tuple[str, str]:
@@ -268,10 +268,12 @@ async def test_weixin_connect_persists_credentials_without_channels_config(
     assert weixin_cfg.get("baseUrl") == "https://weixin.example"
 
 
+@pytest.mark.parametrize("poll_failure", [False, True], ids=["expired-qr", "failed-poll"])
 @pytest.mark.asyncio
 async def test_weixin_reconnect_keeps_existing_account_until_scan_succeeds(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    poll_failure: bool,
 ) -> None:
     state_dir = tmp_path / "weixin-state"
     state_dir.mkdir()
@@ -284,7 +286,7 @@ async def test_weixin_reconnect_keeps_existing_account_until_scan_succeeds(
     state_file.write_text(json.dumps(existing), encoding="utf-8")
     config_path = tmp_path / "config.json"
     save_config(
-        Config.model_validate({"channels": {"weixin": {"stateDir": str(state_dir)}}}),
+        Config.model_validate({"channels": {"weixin": {"instances": [{"id": "default", "enabled": True, "stateDir": str(state_dir), "token": existing["token"], "baseUrl": existing["base_url"]}]}}}),
         config_path,
     )
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
@@ -303,20 +305,23 @@ async def test_weixin_reconnect_keeps_existing_account_until_scan_succeeds(
         self: WeixinChannel,
         **_kwargs: Any,
     ) -> dict[str, str]:
+        if poll_failure:
+            raise ValueError("unrecoverable QR response")
         return {"status": "expired"}
 
     monkeypatch.setattr(WeixinChannel, "_fetch_qr_code", fake_fetch_qr_code)
     monkeypatch.setattr(WeixinChannel, "_api_get_with_base", fake_api_get_with_base)
 
     store = WeixinConnectStore()
-    started = await store.start(force=True)
+    started = await store.handle("start", {"mode": ["replace"], "force": ["true"]})
     refreshed = await store.poll(started["session_id"])
 
-    assert refreshed["status"] == "pending"
-    assert observed_force == [True, True]
+    assert refreshed["status"] == ("failed" if poll_failure else "pending")
+    assert observed_force == ([True] if poll_failure else [True, True])
     assert json.loads(state_file.read_text(encoding="utf-8")) == existing
-    cancelled = await store.cancel(started["session_id"])
-    assert cancelled["status"] == "cancelled"
+    if not poll_failure:
+        cancelled = await store.cancel(started["session_id"])
+        assert cancelled["status"] == "cancelled"
     assert json.loads(state_file.read_text(encoding="utf-8")) == existing
 
 
@@ -326,9 +331,14 @@ async def test_weixin_cancel_wins_over_inflight_confirmation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state_dir = tmp_path / "weixin-state"
+    state_dir.mkdir()
+    state_file = state_dir / "account.json"
+    existing = {"token": "working-token", "base_url": "https://working.weixin.example",
+                "context_tokens": {"existing-user": "existing-context"}}
+    state_file.write_text(json.dumps(existing), encoding="utf-8")
     config_path = tmp_path / "config.json"
     save_config(
-        Config.model_validate({"channels": {"weixin": {"stateDir": str(state_dir)}}}),
+        Config.model_validate({"channels": {"weixin": {"instances": [{"id": "default", "enabled": True, "stateDir": str(state_dir), "token": existing["token"], "baseUrl": existing["base_url"]}]}}}),
         config_path,
     )
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
@@ -357,7 +367,7 @@ async def test_weixin_cancel_wins_over_inflight_confirmation(
     monkeypatch.setattr(WeixinChannel, "_api_get_with_base", fake_api_get_with_base)
 
     store = WeixinConnectStore()
-    started = await store.handle("start", {})
+    started = await store.handle("start", {"mode": ["replace"], "force": ["true"]})
     query = {"session_id": [started["session_id"]]}
     poll_task = asyncio.create_task(store.handle("poll", query))
     await asyncio.wait_for(poll_started.wait(), timeout=5)
@@ -368,7 +378,7 @@ async def test_weixin_cancel_wins_over_inflight_confirmation(
 
     assert cancelled["status"] == "cancelled"
     assert completed["status"] == "cancelled"
-    assert not (state_dir / "account.json").exists()
+    assert json.loads(state_file.read_text(encoding="utf-8")) == existing
 
 
 @pytest.mark.asyncio
@@ -525,7 +535,7 @@ async def test_weixin_connect_start_redacts_upstream_error(
         def connect_load_state(self) -> bool:
             return False
 
-        def connect_open_client(self) -> None:
+        def connect_open_client(self, *, require_existing: bool = False) -> None:
             return None
 
         async def connect_fetch_qr_code(self, *, force: bool) -> tuple[str, str]:
@@ -588,7 +598,7 @@ async def test_weixin_connect_poll_error_is_safe_and_preserves_retry_contract(
         def connect_load_state(self) -> bool:
             return False
 
-        def connect_open_client(self) -> None:
+        def connect_open_client(self, *, require_existing: bool = False) -> None:
             return None
 
         async def connect_fetch_qr_code(self, *, force: bool) -> tuple[str, str]:
@@ -649,7 +659,7 @@ async def test_weixin_connect_qr_refresh_redacts_upstream_error(
         def connect_load_state(self) -> bool:
             return False
 
-        def connect_open_client(self) -> None:
+        def connect_open_client(self, *, require_existing: bool = False) -> None:
             return None
 
         async def connect_fetch_qr_code(self, *, force: bool) -> tuple[str, str]:

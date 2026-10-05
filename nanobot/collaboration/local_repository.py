@@ -207,14 +207,24 @@ class AsyncLocalCollaborationRepository:
             channel_type=channel_type, instance_id=instance_id,
         )
 
+    async def revoke_channel_instance(
+        self, actor_user_id: str, *, channel_type: str, instance_id: str
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._store.revoke_channel_instance, actor_user_id,
+            channel_type=channel_type, instance_id=instance_id,
+        )
+
     async def create_pairing_challenge(
         self, actor_user_id: str, *, project_id: str, channel_type: str, instance_id: str,
         assignee_user_id: str | None = None, ttl_seconds: int = 600,
+        replace_assignment: bool = False,
     ) -> tuple[PairingChallenge, str]:
         return await asyncio.to_thread(
             self._store.create_pairing_challenge, actor_user_id, project_id=project_id,
             channel_type=channel_type, instance_id=instance_id,
             assignee_user_id=assignee_user_id, ttl_seconds=ttl_seconds,
+            replace_assignment=replace_assignment,
         )
 
     async def get_pairing_challenge(

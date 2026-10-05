@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  useEffect,
   useId,
   useMemo,
   useState,
@@ -48,6 +49,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Textarea } from "@/components/ui/textarea";
+import { SettingsTextEditor } from "@/components/settings/shared/SettingsTextEditor";
 import { useLogoFallback } from "@/hooks/useLogoFallback";
 import { isGenericRepositoryLogoUrl, logoFallbackUrls } from "@/lib/provider-brand";
 import type {
@@ -93,6 +95,8 @@ export const DEFAULT_CUSTOM_MCP_FORM: CustomMcpForm = {
 };
 
 export function AppsCatalogSettings({
+  setupName,
+  onSetupOpened,
   cliApps,
   mcpPresets,
   cliAppsLoading,
@@ -136,6 +140,8 @@ export function AppsCatalogSettings({
   onRestart,
   isRestarting,
 }: {
+  setupName?: string | null;
+  onSetupOpened?: () => void;
   cliApps: CliAppsPayload | null;
   mcpPresets: McpPresetsPayload | null;
   cliAppsLoading: boolean;
@@ -243,7 +249,7 @@ export function AppsCatalogSettings({
     )
     : "";
   return (
-    <div className="space-y-7">
+    <div className="settings-stack">
       <div role="status" className="sr-only">{oauthStatusAnnouncement}</div>
       <p className="max-w-2xl text-[12.5px] leading-5 text-muted-foreground">
         {tx(
@@ -294,20 +300,20 @@ export function AppsCatalogSettings({
       ) : null}
 
       <section className="rounded-panel bg-settings-surface px-3 py-3 sm:px-4">
-        <div className="flex items-center justify-between border-b border-border/45 pb-3">
+        <div className="settings-section-heading border-b border-border/45 pb-2">
           <SettingsSectionTitle>
             {filter === "mcp"
               ? tx("settings.apps.mcpTools", "MCP tools")
               : tx("settings.apps.featured", "Tools")}
           </SettingsSectionTitle>
-          <span className="rounded-full bg-muted px-2.5 py-1 text-[12px] font-medium text-muted-foreground">
+          <span className="text-[12px] tabular-nums text-muted-foreground">
             {items.length}
           </span>
         </div>
         {loading ? (
           <div className="flex h-36 items-center justify-center text-sm text-muted-foreground">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-            {tx("settings.apps.loading", "Loading Apps...")}
+            {tx("settings.apps.loading", "Loading apps…")}
           </div>
         ) : items.length ? (
           <div className="grid grid-cols-1 gap-x-10 gap-y-1 py-3 xl:grid-cols-2">
@@ -324,6 +330,8 @@ export function AppsCatalogSettings({
                 <McpAppsCatalogRow
                   key={item.id}
                   preset={item.preset}
+                  openConnection={setupName === item.preset.name}
+                  onConnectionOpened={onSetupOpened}
                   values={mcpFieldValues[item.preset.name] ?? {}}
                   actionKey={mcpActionKey}
                   oauthFlow={mcpOAuthFlow?.name === item.preset.name ? mcpOAuthFlow : null}
@@ -416,7 +424,7 @@ function CliAppsCatalogRow({
   const description = app.description || app.requires || app.entry_point || app.name;
 
   return (
-    <article className="apps-catalog-row group flex min-w-0 items-center gap-3 rounded-control px-3 py-3 transition-colors hover:bg-muted/45">
+    <article className="apps-catalog-row group flex min-w-0 items-center gap-3 rounded-control px-3 py-3 transition-colors settings-hover">
       <CliAppLogo app={app} showBrandLogos={showBrandLogos} />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-baseline gap-2">
@@ -487,6 +495,8 @@ function CliAppsCatalogRow({
 }
 
 function McpAppsCatalogRow({
+  openConnection = false,
+  onConnectionOpened,
   preset,
   values,
   actionKey,
@@ -506,6 +516,8 @@ function McpAppsCatalogRow({
   onOAuthComplete,
   onToolsChange,
 }: {
+  openConnection?: boolean;
+  onConnectionOpened?: () => void;
   preset: McpPresetInfo;
   values: Record<string, string>;
   actionKey: string | null;
@@ -529,6 +541,12 @@ function McpAppsCatalogRow({
   const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
   const [managementOpen, setManagementOpen] = useState(false);
   const [managementTab, setManagementTab] = useState<McpManagementTab>("overview");
+  useEffect(() => {
+    if (!openConnection) return;
+    setManagementTab("connection");
+    setManagementOpen(true);
+    onConnectionOpened?.();
+  }, [openConnection, onConnectionOpened]);
   const enableBusy = actionKey === `enable:${preset.name}`;
   const disableBusy = actionKey === `disable:${preset.name}`;
   const removeBusy = actionKey === `remove:${preset.name}`;
@@ -544,21 +562,15 @@ function McpAppsCatalogRow({
   const hasFields = preset.required_fields.length > 0;
   const needsSetupInput = missingFields.length > 0;
   const configuredInstalled = preset.installed && preset.configured;
-  const runtimeConnected = preset.runtime_status === "connected";
-  const runtimeConnecting = preset.runtime_status === "connecting";
-  const runtimeFailed = preset.runtime_status === "failed";
-  const readyInstalled = toggleable
-    ? preset.enabled === true && (preset.runtime_status === undefined || runtimeConnected)
-    : configuredInstalled && runtimeConnected;
-  const statusLabel = runtimeFailed
-    ? tx("settings.mcp.connectionFailed", "Connection failed")
-    : runtimeConnecting
-      ? tx("settings.mcp.connectingLabel", "Connecting…")
-      : runtimeConnected
-        ? tx("connection.open", "Connected")
-        : toggleable && preset.enabled
-          ? tx("settings.nanobotFeatures.enabled", "Enabled")
-          : mcpPresetStatusLabel(preset.status, tx);
+  const readyInstalled = preset.enabled ?? configuredInstalled;
+  const runtimeConnected = !toggleable && preset.runtime_status === "connected";
+  const runtimeConnecting = !toggleable && preset.runtime_status === "connecting";
+  const runtimeFailed = !toggleable && preset.installed && preset.runtime_status === "failed";
+  const statusLabel = toggleable
+    ? tx("settings.nanobotFeatures.enabled", "Enabled")
+    : runtimeConnected
+      ? tx("connection.open", "Connected")
+      : mcpPresetStatusLabel(preset.status, tx);
   const failureLabel = tx("settings.mcp.connectionFailed", "Connection failed.");
   const failureStatusLabel = failureLabel.replace(/[.!。！]+$/u, "");
   const description = tx(
@@ -596,7 +608,7 @@ function McpAppsCatalogRow({
   };
 
   return (
-    <article className="min-w-0 rounded-control transition-colors hover:bg-muted/45">
+    <article className="min-w-0 rounded-control transition-colors settings-hover">
       <div className="group flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 px-3 py-3">
         <McpPresetLogo preset={preset} showBrandLogos={showBrandLogos} />
         <div className="min-w-[8rem] flex-[1_1_8rem]">
@@ -865,7 +877,7 @@ function McpAppsCatalogRow({
           preset={preset}
           values={values}
           actionKey={actionKey}
-          statusLabel={runtimeFailed && configuredInstalled ? failureStatusLabel : statusLabel}
+          statusLabel={runtimeFailed ? failureStatusLabel : statusLabel}
           statusTone={runtimeFailed ? "warning" : configuredInstalled ? "success" : "neutral"}
           tab={managementTab}
           icon={<McpPresetLogo preset={preset} showBrandLogos={showBrandLogos} compact />}
@@ -901,7 +913,7 @@ type AppsActionButtonProps = Omit<
   children?: ReactNode;
 };
 
-export const AppsActionButton = forwardRef<HTMLButtonElement, AppsActionButtonProps>(
+const AppsActionButton = forwardRef<HTMLButtonElement, AppsActionButtonProps>(
   function AppsActionButton({
     ariaLabel,
     visibleLabel,
@@ -927,9 +939,9 @@ export const AppsActionButton = forwardRef<HTMLButtonElement, AppsActionButtonPr
           visibleLabel
             ? "h-8 w-auto gap-1.5 px-3 text-[12px] font-semibold"
             : "h-9 w-9",
-          tone === "installed" && "bg-transparent hover:bg-muted/70 hover:text-foreground",
+          tone === "installed" && "bg-transparent settings-hover hover:text-foreground",
           tone === "danger" && "bg-transparent hover:bg-destructive/10 hover:text-destructive",
-          tone === "default" && "bg-muted/70 hover:bg-muted hover:text-foreground",
+          tone === "default" && "bg-muted/70 settings-hover hover:text-foreground",
           className,
         )}
       >
@@ -1159,16 +1171,12 @@ function McpCustomServerPanel({
                 htmlFor={headersInputId}
                 className="mb-1 block text-[11.5px] font-medium text-muted-foreground"
               >
-                {tx("settings.mcp.headers", "Headers JSON")}
+                {tx("settings.mcp.headers", "Headers (JSON)")}
               </label>
-              <Textarea
-                id={headersInputId}
-                aria-describedby={headersHelpId}
-                value={form.headers}
-                onChange={(event) => update("headers", event.target.value)}
-                placeholder={'{"Authorization":"Bearer ..."}'}
-                className="min-h-[68px] resize-y bg-background/80 font-mono text-[12px]"
-              />
+              <SettingsTextEditor id={headersInputId} title={tx("settings.mcp.headers", "Headers (JSON)")}
+                  value={form.headers} onSave={(value) => update("headers", value)}
+                  placeholder={'{"Authorization":"Bearer ..."}'}
+                />
               <p
                 id={headersHelpId}
                 className="mt-1 text-[11.5px] leading-5 text-muted-foreground"
@@ -1193,7 +1201,7 @@ function McpCustomServerPanel({
               aria-hidden
             />
             {advancedOpen
-              ? tx("settings.mcp.hideAdvanced", "Hide advanced")
+              ? tx("settings.mcp.hideAdvanced", "Hide advanced options")
               : tx("settings.mcp.advancedOptions", "Advanced options")}
           </Button>
 
@@ -1209,30 +1217,26 @@ function McpCustomServerPanel({
               {!remote ? (
                 <label className="min-w-0">
                   <span className="mb-1 block text-[11.5px] font-medium text-muted-foreground">
-                    {tx("settings.mcp.args", "Args JSON")}
+                    {tx("settings.mcp.args", "Arguments (JSON)")}
                   </span>
-                  <Textarea
-                    value={form.args}
-                    onChange={(event) => update("args", event.target.value)}
-                    placeholder={'["-y", "docs-mcp"]'}
-                    className="min-h-[68px] resize-y bg-background/80 font-mono text-[12px]"
-                  />
+                  <SettingsTextEditor title={tx("settings.mcp.args", "Arguments (JSON)")}
+                  value={form.args} onSave={(value) => update("args", value)}
+                  placeholder={'["-y", "docs-mcp"]'}
+                />
                 </label>
               ) : null}
               <label className="min-w-0">
                 <span className="mb-1 block text-[11.5px] font-medium text-muted-foreground">
-                  {tx("settings.mcp.env", "Env JSON")}
+                  {tx("settings.mcp.env", "Environment variables (JSON)")}
                 </span>
-                <Textarea
-                  value={form.env}
-                  onChange={(event) => update("env", event.target.value)}
+                <SettingsTextEditor title={tx("settings.mcp.env", "Environment variables (JSON)")}
+                  value={form.env} onSave={(value) => update("env", value)}
                   placeholder={'{"API_KEY":"..."}'}
-                  className="min-h-[68px] resize-y bg-background/80 font-mono text-[12px]"
                 />
               </label>
               <label className="min-w-0">
                 <span className="mb-1 block text-[11.5px] font-medium text-muted-foreground">
-                  {tx("settings.mcp.timeout", "Tool timeout")}
+                  {tx("settings.mcp.timeout", "Tool timeout (seconds)")}
                 </span>
                 <Input
                   value={form.toolTimeout}
@@ -1253,7 +1257,7 @@ function McpCustomServerPanel({
               className="h-9 w-full rounded-full px-4 text-[12.5px] font-semibold sm:w-auto"
             >
               {customBusy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden /> : <Check className="mr-1.5 h-3.5 w-3.5" aria-hidden />}
-              {tx("settings.mcp.saveCustom", "Save MCP")}
+              {tx("settings.mcp.saveCustom", "Save MCP server")}
             </Button>
           </div>
         </div>
@@ -1266,11 +1270,9 @@ function McpCustomServerPanel({
               <span className="mb-1.5 block text-[11.5px] font-medium text-muted-foreground">
                 {tx("settings.mcp.configImport", "Import mcp.json")}
               </span>
-              <Textarea
-                value={configImport}
-                onChange={(event) => onConfigImportChange(event.target.value)}
+              <SettingsTextEditor title={tx("settings.mcp.configImport", "Import mcp.json")}
+                value={configImport} onSave={onConfigImportChange}
                 placeholder={'{"mcpServers":{"docs":{"command":"npx","args":["-y","docs-mcp"]}}}'}
-                className="min-h-[84px] resize-y bg-background/80 font-mono text-[12px]"
               />
             </label>
             <Button
@@ -1308,7 +1310,7 @@ function mcpOAuthStatusText(
       }
       return popupBlocked
         ? tx("settings.mcp.openSignInToContinue", "Open the sign-in page to continue.")
-        : tx("settings.mcp.finishSignInInBrowser", "Finish signing in in the browser window.");
+        : tx("settings.mcp.finishSignInInBrowser", "Complete sign-in in the browser window.");
     case "connecting":
       return tx("settings.mcp.finishingConnection", "Finishing connection...");
     case "authorized":
@@ -1364,8 +1366,8 @@ function McpPresetLogo({
     return (
       <span
         className={cn(
-          "grid shrink-0 place-items-center border border-border/45 bg-background",
-          compact ? "h-10 w-10 rounded-control" : "h-11 w-11 rounded-compact",
+          "grid shrink-0 place-items-center overflow-hidden",
+          compact ? "h-10 w-10 rounded-control" : "h-9 w-9 rounded-[10px]",
         )}
       >
         <img
@@ -1373,7 +1375,7 @@ function McpPresetLogo({
           alt=""
           decoding="async"
           loading="lazy"
-          className={cn("object-contain", compact ? "h-[22px] w-[22px]" : "h-6 w-6")}
+          className="h-full w-full object-contain"
           onLoad={onLogoLoad}
           onError={onLogoError}
         />
@@ -1386,7 +1388,7 @@ function McpPresetLogo({
         "grid shrink-0 place-items-center font-semibold text-white",
         compact
           ? "h-10 w-10 rounded-control text-[12px]"
-          : "h-11 w-11 rounded-compact text-[13px]",
+          : "h-9 w-9 rounded-[10px] text-[12px]",
       )}
       style={{ backgroundColor: bg }}
     >
@@ -1446,7 +1448,7 @@ function CliAppReadyPanel({
             size="sm"
             variant="ghost"
             onClick={copyPrompt}
-            className="h-8 rounded-full px-3 text-[12px] font-medium text-muted-foreground hover:bg-muted/65 hover:text-foreground"
+            className="h-8 rounded-full px-3 text-[12px] font-medium text-muted-foreground settings-hover hover:text-foreground"
           >
             {copied ? <Check className="mr-1.5 h-3.5 w-3.5" aria-hidden /> : null}
             {copied
@@ -1485,7 +1487,10 @@ function CliAppLogo({ app, showBrandLogos }: { app: CliAppInfo; showBrandLogos: 
 
   return (
     <span
-      className="relative grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-compact border border-border/45 bg-muted text-[13px] font-semibold"
+      className={cn(
+        "relative grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-[10px] text-[12px] font-semibold",
+        showRemoteLogo && logoLoaded ? "bg-transparent" : "bg-muted",
+      )}
       style={{ color: app.brand_color || "hsl(var(--muted-foreground))" }}
     >
       <span
@@ -1506,7 +1511,7 @@ function CliAppLogo({ app, showBrandLogos }: { app: CliAppInfo; showBrandLogos: 
           referrerPolicy="no-referrer"
           draggable={false}
           className={cn(
-            "absolute h-6 w-6 object-contain transition-opacity duration-150 motion-reduce:transition-none",
+            "absolute h-full w-full object-contain transition-opacity duration-150 motion-reduce:transition-none",
             logoLoaded ? "opacity-100" : "opacity-0",
           )}
           onLoad={onLogoLoad}

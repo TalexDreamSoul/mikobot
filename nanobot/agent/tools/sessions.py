@@ -13,6 +13,7 @@ from urllib.parse import quote
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import ToolContext, current_request_session_key
 from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
+from nanobot.session.history import SessionHistoryReader
 from nanobot.session.manager import SessionManager
 from nanobot.session.privacy import (
     session_access_allowed,
@@ -22,7 +23,6 @@ from nanobot.session.session_handles import (
     SessionHandleResolver,
     normalize_session_handle,
 )
-from nanobot.webui.session_access import WebuiSessionAccess
 
 _SEARCH_LIMIT = 5
 _READ_LIMIT = 8
@@ -58,13 +58,15 @@ def _session_ref(session_key: str) -> str:
 class _SessionTool(Tool):
     def __init__(self, sessions: SessionManager) -> None:
         self._sessions = sessions
-        self._access = WebuiSessionAccess(sessions)
+        self._access = SessionHistoryReader(sessions)
 
     def _allowed(self, source_key: str | None, target_key: str) -> bool:
         # Metadata only: `peek` would parse the target's whole JSONL document,
         # pulling a foreign transcript into memory to decide whether it may be read.
         source_meta = self._sessions.cached_metadata(source_key) if source_key else None
         target_meta = self._sessions.cached_metadata(target_key)
+        if source_key is None:
+            return False
         return session_access_allowed(
             source_meta,
             source_key,
@@ -219,10 +221,8 @@ class ReadSessionTool(_SessionTool):
             session_key = handle.session_key
         current_key = current_request_session_key()
         if current_key is None:
-            target = self._sessions.peek(session_key)
-            if session_access_scope(
-                target.metadata if target is not None else None, session_key
-            ) is not None:
+            target_metadata = self._sessions.cached_metadata(session_key)
+            if session_access_scope(target_metadata, session_key) is not None:
                 return ToolResult.error("Error: scoped session access requires a request context")
         elif not self._allowed(current_key, session_key):
             return ToolResult.error("Error: cross-project session access is not authorized")
@@ -238,6 +238,7 @@ class ReadSessionTool(_SessionTool):
             query=query_text,
             limit=_READ_LIMIT,
             exclude_session_key=current_request_session_key(),
+            can_access=(lambda key: self._allowed(current_key, key)) if current_key else None,
         )
         if match is None:
             return ToolResult.error(

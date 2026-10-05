@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import socket
 from unittest.mock import MagicMock, patch
+from urllib.request import proxy_bypass_environment
 
 import httpx
 import pytest
@@ -21,6 +22,8 @@ _PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "http
 def _clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (*_PROXY_ENV_VARS, "NO_PROXY", "no_proxy"):
         monkeypatch.delenv(name, raising=False)
+    # Keep proxy bypass independent of macOS/Windows system proxy settings.
+    monkeypatch.setattr("nanobot.security.network.proxy_bypass", proxy_bypass_environment)
 
 
 # ---------------------------------------------------------------------------

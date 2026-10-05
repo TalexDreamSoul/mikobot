@@ -94,7 +94,7 @@ chmod 600 ~/.nanobot/config.json
 
 The `exec` tool can execute shell commands. While dangerous command patterns are blocked, you should:
 
-- ✅ **Enable the bwrap sandbox** (`"tools.exec.sandbox": "bwrap"`) for kernel-level isolation (Linux only)
+- ✅ **Enable the exec sandbox** (`"tools.exec.sandbox": "bwrap"` on Linux, `"seatbelt"` on macOS) for kernel-level isolation
 - ✅ Review all tool usage in agent logs
 - ✅ Understand what commands the agent is running
 - ✅ Use a dedicated user account with limited privileges
@@ -102,26 +102,18 @@ The `exec` tool can execute shell commands. While dangerous command patterns are
 - ❌ Don't disable security checks
 - ❌ Don't run on systems with sensitive data without careful review
 
-**Exec sandbox (bwrap):**
+**Exec sandbox (bwrap on Linux, seatbelt on macOS):**
 
-On Linux, set `"tools.exec.sandbox": "bwrap"` to wrap every shell command in a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. This uses Linux kernel namespaces to restrict what the process can see:
+Set `"tools.exec.sandbox"` to wrap every shell command in an OS sandbox. Both backends restrict filesystem access:
 
-- Every Bubblewrap mode isolates the process and IPC namespaces, preventing host
-  process inspection through `/proc` from bypassing the filesystem boundary.
-- The host's configured mode retains explicitly allowed extra binds and networking.
-- Member shell calls require a supported Linux Bubblewrap backend automatically.
-  They bind only the shared project read-write and exact authorized attachments
-  read-only, clear inherited credentials, and isolate networking. Configured host
-  extra binds and ambient sandbox hints cannot widen a member sandbox.
-- Member calls cannot select a host shell executable or login startup script before
-  sandbox entry. Host-managed CLI Apps cannot bypass this boundary.
-- Unsupported platforms, unavailable backends, or sandbox startup failures are errors;
-  there is no silent unsandboxed fallback. On macOS/Windows, use a Linux sandbox-capable
-  deployment for member code execution; ordinary scoped file tools remain available.
+- Owner commands expose the workspace read-write, inherited media read-only, and required system code read-only. Unlisted paths such as `~/.ssh` are denied unless the operator explicitly exposes them.
+- Owner backends are `bwrap` on Linux (requires Bubblewrap) and `seatbelt` on macOS (uses `sandbox-exec`). Bubblewrap masks the workspace parent and re-exposes authorized binds; Seatbelt denies it and permits traversal metadata. Keep credentials outside the workspace and extra binds.
+- Seatbelt uses workspace-local `HOME`/`TMPDIR`, not shared host temporary directories. Use an explicit scratch template such as `mktemp "$TMPDIR/job.XXXXXX"`. Narrow read-only binds revoke writes below them; explicitly authorized read-write binds retain operator precedence.
+- Every Bubblewrap mode isolates process and IPC namespaces. Member shell calls additionally isolate networking, clear inherited credentials, and expose only their project and exact authorized attachments.
+- Member calls always require supported Linux Bubblewrap and cannot select an outer shell/login script or inherit host extra binds. On macOS/Windows use a Linux sandbox-capable deployment for member code execution; scoped file tools remain available.
+- A configured backend that is unsupported, unavailable or cannot start returns an error; there is no silent unsandboxed fallback. Owner commands without a configured backend retain their native-shell policy. Owner sandbox networking is not isolated.
 
-Requires `bwrap` and permitted Linux namespace creation. It is preinstalled in the
-repository Docker image; see [Deployment](docs/deployment.md#docker-compose) for
-the explicitly privileged nested-sandbox override and its trade-offs.
+Bubblewrap requires permitted Linux namespace creation. It is preinstalled in the repository Docker image; see [Deployment](docs/deployment.md#docker-compose) for the explicitly privileged nested-sandbox override and its trade-offs.
 
 Enabling the sandbox also automatically activates `restrictToWorkspace` for file tools.
 

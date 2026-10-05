@@ -5,13 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypeAlias, cast, runtime_checkable
-
-from nanobot.agent.tools.context import current_request_context
-from nanobot.security.member_access import current_member_scope
+from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 
 if TYPE_CHECKING:
-    from nanobot.agent.subagent import SubagentManager, SubagentStatus
     from nanobot.agent.tools.shell import ExecToolConfig
     from nanobot.agent.tools.web import WebToolsConfig
     from nanobot.config.schema import ModelPresetConfig
@@ -34,8 +30,6 @@ RUNTIME_SNAPSHOT_KEYS = frozenset({
     "tool_names",
     "web_config",
     "exec_config",
-    "subagents",
-    "channels",
 })
 
 RUNTIME_COMMAND_KEYS = frozenset({
@@ -64,8 +58,6 @@ class RuntimeSnapshot:
     tool_names: list[str]
     web_config: dict[str, object]
     exec_config: dict[str, object]
-    subagent_statuses: dict[str, dict[str, object]]
-    channels: dict[str, dict[str, object]]
     scratchpad: dict[str, JsonValue]
 
     def as_mapping(self) -> Mapping[str, object]:
@@ -82,8 +74,6 @@ class RuntimeSnapshot:
             "tool_names": self.tool_names,
             "web_config": self.web_config,
             "exec_config": self.exec_config,
-            "subagents": {"_task_statuses": self.subagent_statuses},
-            "channels": self.channels,
         }
         assert values.keys() == RUNTIME_SNAPSHOT_KEYS
         return values
@@ -94,6 +84,8 @@ class RuntimeControl(Protocol):
     """The complete runtime capability exposed to ``MyTool``."""
 
     def snapshot(self) -> RuntimeSnapshot: ...
+
+    def channel_status(self, channel: str | None) -> dict[str, dict[str, JsonScalar]]: ...
 
     def set_model(self, model: str) -> LLMRuntime: ...
 
@@ -125,7 +117,6 @@ class _RuntimeControlTarget(Protocol):
     max_tool_result_chars: int
     web_config: WebToolsConfig
     exec_config: ExecToolConfig
-    subagents: SubagentManager
 
     @property
     def model(self) -> str: ...
@@ -151,6 +142,8 @@ class _RuntimeControlTarget(Protocol):
     def set_runtime_model(self, model: str) -> LLMRuntime: ...
 
     def set_runtime_context_window(self, context_window_tokens: int) -> LLMRuntime: ...
+
+    def set_runtime_max_iterations(self, value: int) -> None: ...
 
     def set_model_preset(self, name: str | None) -> LLMRuntime: ...
 
@@ -183,10 +176,24 @@ class AgentRuntimeControl:
             tool_names=list(target.tool_names),
             web_config=_snapshot_web_config(target.web_config),
             exec_config=_snapshot_exec_config(target.exec_config),
-            subagent_statuses=_snapshot_subagent_statuses(target.subagents),
-            channels=_snapshot_channels(target.channel_status),
             scratchpad=_snapshot_json_mapping(self.__scratchpad),
         )
+
+    def channel_status(self, channel: str | None) -> dict[str, dict[str, JsonScalar]]:
+        """Detach safe health fields for an exact member instance or host inventory."""
+        statuses = self.__target.channel_status
+        selected = statuses.items() if channel is None else (
+            ((channel, statuses[channel]),) if channel in statuses else ()
+        )
+        result: dict[str, dict[str, JsonScalar]] = {}
+        for name, status in selected:
+            public: dict[str, JsonScalar] = {}
+            for field in ("enabled", "running", "state", "instance_id"):
+                value = status.get(field)
+                if isinstance(value, (bool, str)):
+                    public[field] = value
+            result[name] = public
+        return result
 
     def set_model(self, model: str) -> LLMRuntime:
         return self.__target.set_runtime_model(model)
@@ -202,8 +209,7 @@ class AgentRuntimeControl:
         return self.__target.set_model_preset(name)
 
     def set_max_iterations(self, value: int) -> None:
-        self.__target.max_iterations = value
-        self.__target.subagents.max_iterations = value
+        self.__target.set_runtime_max_iterations(value)
 
     def set_context_window_tokens(self, value: int) -> LLMRuntime:
         return self.__target.set_runtime_context_window(value)
@@ -271,81 +277,6 @@ def _snapshot_exec_config(config: ExecToolConfig) -> dict[str, object]:
         "allow_patterns": list(config.allow_patterns),
         "deny_patterns": list(config.deny_patterns),
     }
-
-
-def _snapshot_subagent_statuses(
-    manager: SubagentManager,
-) -> dict[str, dict[str, object]]:
-    return {
-        task_id: _snapshot_subagent_status(status)
-        for task_id, status in manager.runtime_statuses().items()
-    }
-
-
-def _snapshot_subagent_status(status: SubagentStatus) -> dict[str, object]:
-    return {
-        "task_id": status.task_id,
-        "label": status.label,
-        "task_description": status.task_description,
-        "started_at": status.started_at,
-        "phase": status.phase,
-        "iteration": status.iteration,
-        "tool_events": [dict(event) for event in status.tool_events],
-        "usage": status.usage.to_dict() if status.usage is not None else None,
-        "stop_reason": status.stop_reason,
-        "error": status.error,
-    }
-
-
-# Per-instance channel status exposed to self-inspection. The source mapping also
-# carries owners and failure details; only these four primitive fields cross the
-# boundary, and they are projected field-by-field rather than copied.
-_CHANNEL_STATUS_FIELDS: dict[str, type[object]] = {
-    "enabled": bool,
-    "running": bool,
-    "state": str,
-    "instance_id": str,
-}
-
-
-def _snapshot_channels(status: object) -> dict[str, dict[str, object]]:
-    """Project channel runtime status, fail-closed for a member-scoped caller.
-
-    A member turn sees exactly one entry — the instance serving the current
-    request — and sees nothing when its own instance is absent from the map.
-    """
-    if not isinstance(status, Mapping):
-        return {}
-    entries: dict[str, object] = {
-        name: entry
-        for name, entry in cast(Mapping[object, object], status).items()
-        if isinstance(name, str)
-    }
-    if current_member_scope() is not None:
-        request = current_request_context()
-        own = request.channel if request is not None else None
-        if not isinstance(own, str) or own not in entries:
-            return {}
-        entries = {own: entries[own]}
-    channels: dict[str, dict[str, object]] = {}
-    for name, entry in entries.items():
-        instance = _snapshot_channel_instance(entry)
-        if instance is None:
-            continue
-        channels[name] = instance
-    return channels
-
-
-def _snapshot_channel_instance(entry: object) -> dict[str, object] | None:
-    if not isinstance(entry, Mapping):
-        return None
-    spec = cast(Mapping[object, object], entry)
-    values: dict[str, object] = {}
-    for field, expected in _CHANNEL_STATUS_FIELDS.items():
-        value = spec.get(field)
-        if type(value) is expected:
-            values[field] = value
-    return values
 
 
 def _snapshot_json_mapping(values: Mapping[str, JsonValue]) -> dict[str, JsonValue]:

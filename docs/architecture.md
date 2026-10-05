@@ -257,6 +257,12 @@ allow Markdown image paths to stage arbitrary host files.
 
 Session history is the near-term conversation replay. Memory is the longer-term workspace state.
 
+`nanobot/session/history.py` reads full persisted session records for
+`search_sessions` and `read_session`, including messages before summary
+checkpoints. Tool results contain public user and assistant text with indexes
+into the original session messages. WebUI transcript events and replay pagination
+are owned by the display adapter and do not supply tool history.
+
 | Store | File area |
 |---|---|
 | Session JSONL files | `<config-dir>/sessions/<workspace-id>/` |

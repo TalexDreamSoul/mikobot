@@ -167,11 +167,12 @@ describe("App OIDC authentication", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("main", { name: "Sign in to Mikobot" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: /Connect to / })).toBeInTheDocument();
     const continueWithSso = screen.getByRole("link", { name: "Continue with SSO" });
     expect(continueWithSso).toHaveAttribute("href", "/auth/login?return_to=%2Fsettings");
-    expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("WebUI password")).not.toBeInTheDocument();
 
+    await user.tab();
     await user.tab();
     expect(continueWithSso).toHaveFocus();
   });
@@ -199,7 +200,7 @@ describe("App OIDC authentication", () => {
       "/auth/login",
     );
     expect(screen.getByText("or use a password")).toBeInTheDocument();
-    expect(screen.getByLabelText("Password")).toBeEnabled();
+    expect(screen.getByLabelText("WebUI password")).toBeEnabled();
     expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
   });
 
@@ -299,7 +300,7 @@ describe("App OIDC authentication", () => {
     await screen.findByRole("navigation", { name: "Settings sections" });
     await user.click(screen.getByRole("button", { name: "Sign out" }));
 
-    expect(await screen.findByRole("heading", { level: 1, name: "Password" })).toBeInTheDocument();
+    expect(await screen.findByLabelText("WebUI password")).toBeEnabled();
     expect(closeSpy).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls.some(([input]) => (
       String(input) === "/auth/logout?return_to=%2F"

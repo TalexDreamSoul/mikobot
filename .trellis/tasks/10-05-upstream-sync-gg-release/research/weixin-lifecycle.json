@@ -1,0 +1,20 @@
+{
+  "probe": "WeixinConnectStore.start with a loaded-account dummy; no production account or network login exercised",
+  "results": [
+    {
+      "force": false,
+      "status": "succeeded",
+      "qrRequested": false,
+      "hasLoginSession": false
+    },
+    {
+      "force": true,
+      "status": "pending",
+      "qrRequested": true,
+      "hasLoginSession": true
+    }
+  ],
+  "missingDeleteControl": "WeixinPanel.tsx:403-453",
+  "replacementCredentialBoundary": "runtime.py:950-953 clears only in-memory credentials; connect.py:219 commits only after confirmation",
+  "productDecisionPending": "QR account replacement versus project Pair Code renewal versus distinct controls for both"
+}

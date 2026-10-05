@@ -5,7 +5,7 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -20,7 +20,6 @@ from nanobot.agent.tools.image_generation import ImageGenerationError, ImageGene
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.search import GrepTool
 from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.apps.cli.service import CliAppManager, CliAppsRuntimeConfig
 from nanobot.bus.queue import MessageBus
 from nanobot.collaboration import (
@@ -574,6 +573,37 @@ async def test_exec_tool_uses_scope_project_as_default_cwd(
 
 
 @pytest.mark.asyncio
+async def test_exec_tool_resolves_relative_working_dir_from_scope_project(
+    tmp_path: Path,
+    cmd_python: str,
+) -> None:
+    project = tmp_path / "project"
+    subdir = project / "subdir"
+    subdir.mkdir(parents=True)
+
+    tool = ExecTool(working_dir=str(tmp_path), restrict_to_workspace=False, timeout=5)
+    scope = validate_workspace_scope_payload(
+        {"project_path": str(project), "access_mode": "full"},
+        default_workspace=tmp_path,
+        default_restrict_to_workspace=False,
+    )
+    token = bind_workspace_scope(scope)
+    try:
+        result = await tool.execute(
+            command=(
+                f'{cmd_python} -c "from pathlib import Path; '
+                "print(Path.cwd())\""
+            ),
+            working_dir="subdir",
+        )
+    finally:
+        reset_workspace_scope(token)
+
+    assert "Exit code: 0" in result
+    assert str(subdir.resolve()) in result
+
+
+@pytest.mark.asyncio
 async def test_exec_full_scope_allows_explicit_cwd_outside_project(
     tmp_path: Path,
     cmd_python: str,
@@ -759,41 +789,3 @@ async def test_cli_app_scope_controls_working_dir(
     assert seen["cwd"] == str(outside.resolve())
 
 
-@pytest.mark.asyncio
-async def test_spawn_tool_forwards_current_workspace_scope(tmp_path: Path) -> None:
-    project = tmp_path / "project"
-    project.mkdir()
-    scope = validate_workspace_scope_payload(
-        {"project_path": str(project), "access_mode": "restricted"},
-        default_workspace=tmp_path,
-        default_restrict_to_workspace=False,
-    )
-
-    class Manager:
-        max_concurrent_subagents = 4
-
-        def __init__(self) -> None:
-            self.seen = None
-
-        def get_running_count(self) -> int:
-            return 0
-
-        async def spawn(self, **kwargs):
-            self.seen = kwargs
-            return "spawned"
-
-    manager = Manager()
-    tool = SpawnTool(manager)  # type: ignore[arg-type]
-    token = bind_workspace_scope(scope)
-    try:
-        with request_context(RequestContext(
-            channel="test",
-            chat_id="chat",
-            runtime=MagicMock(),
-        )):
-            result = await tool.execute(task="inspect")
-    finally:
-        reset_workspace_scope(token)
-
-    assert result == "spawned"
-    assert manager.seen["workspace_scope"] == scope

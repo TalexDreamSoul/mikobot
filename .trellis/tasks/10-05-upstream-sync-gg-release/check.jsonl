@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Require full declared gates and runtime/UI evidence after integration"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify schema migration, exact-instance cleanup and unchanged production history"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Review inherited authorization and frontend/backend lifecycle contract consistency"}
+{"file":".trellis/tasks/10-05-upstream-sync-gg-release/research/integration-inventory.json","reason":"Check exact upstream/release provenance and scope preservation"}
+{"file":".trellis/tasks/10-05-upstream-sync-gg-release/research/weixin-lifecycle.json","reason":"Defend existing-credential rescan and cancellation behavior"}

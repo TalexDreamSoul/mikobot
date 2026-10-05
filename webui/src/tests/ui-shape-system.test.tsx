@@ -24,7 +24,19 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 describe("UI shape system", () => {
-  it("gives standard controls one shared radius", () => {
+  it.each(["center", "bottom"] as const)("keeps an oversized %s dialog scrollable from its start", (placement) => {
+    render(<Dialog open><DialogContent placement={placement}>
+      <DialogTitle>Long dialog</DialogTitle>
+      <DialogDescription>Content that can outgrow a keyboard-fitted frame.</DialogDescription>
+    </DialogContent></Dialog>);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.parentElement).toHaveClass("items-start", "overflow-y-auto");
+    // The scroll owner stays inside Radix's overlay/scroll-lock boundary.
+    expect(dialog.parentElement?.parentElement).toHaveClass("backdrop-blur-[8px]", "duration-200");
+    expect(dialog).toHaveClass(placement === "bottom" ? "mt-auto" : "my-auto");
+  });
+
+  it("uses pill-shaped inputs and the shared radius for other controls", () => {
     render(
       <>
         <Button>Continue</Button>
@@ -34,7 +46,7 @@ describe("UI shape system", () => {
     );
 
     expect(screen.getByRole("button", { name: "Continue" })).toHaveClass("rounded-control");
-    expect(screen.getByRole("textbox", { name: "Name" })).toHaveClass("rounded-control");
+    expect(screen.getByRole("textbox", { name: "Name" })).toHaveClass("rounded-full");
     expect(screen.getByRole("textbox", { name: "Description" })).toHaveClass(
       "rounded-control",
     );

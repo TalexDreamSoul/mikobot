@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { Loader2, RotateCcw } from "lucide-react";
+import { useClient } from "@/providers/ClientProvider";
+import type { NanobotFeaturesPayload } from "@/lib/types";
 import { useTranslation } from "react-i18next";
 
 import {
   channelTranslator,
-  type ChannelTranslator,
 } from "@/channel-plugins/i18n";
 import type { ChannelPluginPanelProps } from "@/channel-plugins/types";
 import { ChannelInstancesPanel } from "@/components/settings/channels/ChannelInstancesPanel";
@@ -14,17 +15,13 @@ import { enableNanobotFeature } from "@/lib/api";
 import type {
   NanobotChannelInstanceInfo,
   NanobotFeatureInfo,
-  NanobotFeaturesPayload,
 } from "@/lib/types";
-import { useClient } from "@/providers/ClientProvider";
-
 import { FeishuConnectFlow } from "./FeishuConnectFlow";
 
 export function FeishuAssistantsPanel({
   token,
   feature,
   showBrandLogos,
-  chatAppsDocsUrl,
   onFeaturesUpdate,
 }: ChannelPluginPanelProps) {
   const { t } = useTranslation();
@@ -37,11 +34,9 @@ export function FeishuAssistantsPanel({
     <ChannelInstancesPanel
       feature={feature}
       showBrandLogos={showBrandLogos}
-      chatAppsDocsUrl={chatAppsDocsUrl}
       instances={instances}
       onFeaturesUpdate={onFeaturesUpdate}
       customization={{
-        countLabel: (count) => feishuAssistantCountLabel(count, tx),
         toggleAriaLabel: (instance) => tx("custom.toggleAssistant", "{{name}} assistant", {
           name: instanceDisplayName(instance),
         }),
@@ -192,7 +187,6 @@ function FeishuInstanceAction({
     </>
   );
 }
-
 function defaultFeishuInstance(feature: NanobotFeatureInfo): NanobotChannelInstanceInfo {
   return {
     id: "default",
@@ -208,21 +202,11 @@ function defaultFeishuInstance(feature: NanobotFeatureInfo): NanobotChannelInsta
   };
 }
 
-function feishuAssistantCountLabel(
-  count: number,
-  tx: ChannelTranslator,
-): string {
-  if (count === 0) return tx("custom.countNone", "No assistant connected");
-  if (count === 1) return tx("custom.countOne", "1 assistant connected");
-  return tx("custom.countMany", "{{count}} assistants connected", { count });
-}
-
 function instanceDisplayName(instance: NanobotChannelInstanceInfo): string {
   return instance.display_name?.trim() || instance.name.trim() || instance.id;
 }
 
-function maskFeishuAppId(appId: string | undefined): string {
-  if (!appId) return "";
-  if (appId.length <= 10) return appId;
-  return `${appId.slice(0, 7)}...${appId.slice(-4)}`;
+function maskFeishuAppId(value?: string): string {
+  if (!value) return "";
+  return value.length > 8 ? `${value.slice(0, 4)}…${value.slice(-4)}` : value;
 }

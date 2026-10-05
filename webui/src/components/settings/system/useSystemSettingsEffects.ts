@@ -88,7 +88,7 @@ export function useSystemSettingsEffects({
     if (
       !enabled
       || !pageVisible
-      || !["channels", "models", "browser", "runtime"].includes(activeSection)
+      || !["channels", "models", "browser", "image", "voice", "memory", "capabilities", "runtime"].includes(activeSection)
     ) {
       return;
     }

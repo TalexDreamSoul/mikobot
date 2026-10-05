@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
@@ -13,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, TypeGuard, cast
 if TYPE_CHECKING:
     from nanobot.channels.plugin import ChannelPlugin
 
-FieldKind = Literal["string", "secret", "list", "bool", "int", "enum"]
+FieldKind = Literal["string", "secret", "list", "bool", "int", "float", "json", "enum"]
 RouteFieldType = str | tuple[str, set[str]]
 
 
@@ -143,6 +144,8 @@ class ChannelFieldSpec:
     default: Any = None
     writable: bool = True
     snapshot: bool = True
+    # An omitted/null override inherits host policy instead of materializing a default.
+    inheritable: bool = False
 
     @property
     def route_type(self) -> RouteFieldType:
@@ -188,6 +191,7 @@ class ChannelSetupSpec:
     required: tuple[SetupRequirement, ...] = ()
     official_url: str | None = None
     validator: SetupValidator | None = None
+    verifies_connection: bool = False
 
     @property
     def secrets(self) -> frozenset[str]:
@@ -234,12 +238,25 @@ class ChannelSetupSpec:
             }
             if field.default is not None:
                 public_field["default_value"] = stringify_channel_value(field.default)
+            if field.inheritable:
+                public_field["inheritable"] = True
             fields.append(public_field)
         payload: dict[str, Any] = {
             "fields": fields,
+            "requirements": [
+                {
+                    "alternatives": [
+                        [f"channels.{channel_name}.{name}" for name in alternative]
+                        for alternative in requirement.alternatives
+                    ]
+                }
+                for requirement in self.required
+            ],
         }
         if self.official_url:
             payload["official_url"] = self.official_url
+        if self.verifies_connection:
+            payload["verifies_connection"] = True
         return payload
 
 
@@ -296,6 +313,8 @@ def channel_default_config(plugin: ChannelPlugin) -> dict[str, Any]:
     defaults: dict[str, Any] = {"enabled": plugin.default_enabled}
     if plugin.setup is not None:
         for name, field in plugin.setup.fields.items():
+            if field.inheritable:
+                continue
             value: Any = field.default
             if value is None:
                 fallback_defaults: dict[str, Any] = {
@@ -476,7 +495,10 @@ def channel_configure_instance(
         field = setup.fields.get(field_name)
         if field is None or not field.writable:
             raise ValueError(f"'{raw_key}' cannot be configured from WebUI")
-        save, value = channel_coerce_config_value(raw_key, raw_value, field.route_type)
+        if field.inheritable and raw_value in (None, ""):
+            save, value = True, None
+        else:
+            save, value = channel_coerce_config_value(raw_key, raw_value, field.route_type)
         if save:
             pending.append((raw_key, field_name, value))
 
@@ -485,7 +507,10 @@ def channel_configure_instance(
             channel_instance_config(plugin, section, instance_id=instance_id)
         )
         for _, field_name, value in pending:
-            channel_assign_config_value(channel_config, field_name, value)
+            channel_assign_config_value(
+                channel_config, field_name, value,
+                inheritable=setup.fields[field_name].inheritable,
+            )
         channel_config[CHANNEL_INSTANCE_REVISION_FIELD] = new_channel_instance_revision()
         updated = channel_update_instance_config(
             plugin,
@@ -508,6 +533,9 @@ def channel_coerce_config_value(
     else:
         kind = value_type
         allowed = None
+
+    if kind == "secret" and raw_value is None:
+        return True, ""
 
     if kind in {"string", "secret"}:
         value = raw_value.strip() if isinstance(raw_value, str) else str(raw_value)
@@ -536,6 +564,28 @@ def channel_coerce_config_value(
         except ValueError as exc:
             raise ValueError(f"'{raw_key}' must be a number") from exc
 
+    if kind == "float":
+        if raw_value in (None, ""):
+            return False, _SKIP_CHANNEL_CONFIG_FIELD
+        if not isinstance(raw_value, (str, int, float)):
+            raise ValueError(f"'{raw_key}' must be a number")
+        try:
+            return True, float(raw_value)
+        except ValueError as exc:
+            raise ValueError(f"'{raw_key}' must be a number") from exc
+
+    if kind == "json":
+        if raw_value in (None, ""):
+            return False, _SKIP_CHANNEL_CONFIG_FIELD
+        try:
+            value = json.loads(raw_value) if isinstance(raw_value, str) else raw_value
+        except ValueError as exc:
+            raise ValueError(f"'{raw_key}' must be valid JSON") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"'{raw_key}' must be a JSON object")
+        # The owning settings boundary supplies decoded JSON objects (string keys).
+        return True, cast(dict[str, Any], value)
+
     if kind == "bool":
         if isinstance(raw_value, bool):
             return True, raw_value
@@ -562,8 +612,26 @@ def channel_assign_config_value(
     channel_config: dict[str, Any],
     field: str,
     value: Any,
+    *,
+    inheritable: bool = False,
 ) -> None:
-    _assign_channel_field(channel_config, field, value)
+    if not inheritable:
+        _assign_channel_field(channel_config, field, value)
+        return
+    target = channel_config
+    parts = field.split(".")
+    for part in parts[:-1]:
+        current = target.get(part)
+        if not isinstance(current, dict):
+            current = {}
+            target[part] = current
+        target = cast(dict[str, Any], current)
+    key = parts[-1]
+    target.pop(_camel_to_snake(key), None)
+    if value is None:
+        target.pop(key, None)
+    else:
+        target[key] = value
 
 
 def channel_update_instance_config(
@@ -723,6 +791,8 @@ def stringify_channel_value(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, list):
         return ", ".join(str(item) for item in cast(list[Any], value))
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, indent=2)
     return str(value)
 
 

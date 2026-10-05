@@ -66,6 +66,11 @@ def _connection_loop_channel(endpoint: WebUIGatewayEndpoint) -> WebSocketChannel
         can_access_webui_session=AsyncMock(return_value=True),
     )
     channel._subs = {}
+    from weakref import WeakSet
+
+    channel._retired_connections = WeakSet()
+    channel._connection_outbound = {}
+    channel._outbound_retire_tasks = set()
     channel._conn_chats = {}
     channel._conn_default = {}
     channel._hydrate_after_subscribe = AsyncMock()

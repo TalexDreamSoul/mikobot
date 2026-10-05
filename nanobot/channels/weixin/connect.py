@@ -7,6 +7,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from weakref import WeakSet
 
 from loguru import logger
 
@@ -19,6 +20,13 @@ if TYPE_CHECKING:
 
 _MAX_CONNECT_SESSIONS = 32
 _MAX_CONNECT_SESSIONS_PER_ACTOR = 4
+_CONNECT_STORES: WeakSet[WeixinConnectStore] = WeakSet()
+
+
+async def cancel_weixin_instance_sessions(instance_id: str) -> None:
+    """Cancel pending QR flows in every local settings surface for one instance."""
+    for store in tuple(_CONNECT_STORES):
+        await store.cancel_instance(instance_id)
 
 @dataclass(slots=True)
 class WeixinConnectSession:
@@ -41,6 +49,7 @@ class WeixinConnectStore:
     def __init__(self) -> None:
         self._sessions: dict[str, WeixinConnectSession] = {}
         self._start_lock = asyncio.Lock()
+        _CONNECT_STORES.add(self)
 
     async def handle(self, action: str, query: QueryParams) -> dict[str, Any]:
         """Handle one instance-aware settings connection action."""
@@ -59,6 +68,8 @@ class WeixinConnectStore:
                 mode = "replace"
             if mode not in {"create", "replace"}:
                 raise ChannelConnectError("invalid WeChat connect mode", status=400)
+            if query_first(query, "mode") == "replace":
+                force = True
             raw_instance_id = (
                 query_first(query, "instance_id") or DEFAULT_INSTANCE_ID
             ).strip()
@@ -72,6 +83,7 @@ class WeixinConnectStore:
                 instance_id=instance_id,
                 force=force,
                 actor_user_id=actor_user_id,
+                require_existing=mode == "replace" and query_first(query, "mode") is not None,
             )
 
         session_id = (query_first(query, "session_id") or "").strip()
@@ -93,6 +105,7 @@ class WeixinConnectStore:
         instance_id: str = "default",
         force: bool = False,
         actor_user_id: str | None = None,
+        require_existing: bool = False,
     ) -> dict[str, Any]:
         async with self._start_lock:
             await self._cleanup()
@@ -129,7 +142,7 @@ class WeixinConnectStore:
                         "interval_ms": 2000,
                     }
 
-                channel.connect_open_client()
+                channel.connect_open_client(require_existing=require_existing)
                 qrcode_id, qr_url = await channel.connect_fetch_qr_code(force=force)
             except Exception:
                 logger.exception("Failed to start WeChat QR login")
@@ -368,6 +381,24 @@ class WeixinConnectStore:
             "status": "cancelled",
             "message": "WeChat login cancelled.",
         }
+
+    async def cancel_instance(self, instance_id: str) -> None:
+        async with self._start_lock:
+            sessions = [
+                session for session in self._sessions.values()
+                if session.instance_id == instance_id
+            ]
+            for session in sessions:
+                self._sessions.pop(session.id, None)
+            for session in sessions:
+                await self._close_channel(session.channel)
+
+    async def close(self) -> None:
+        async with self._start_lock:
+            sessions = tuple(self._sessions.values())
+            self._sessions.clear()
+            for session in sessions:
+                await self._close_channel(session.channel)
 
     async def _cleanup(self) -> None:
         now = time.monotonic()
