@@ -109,12 +109,14 @@ class AsyncLocalCollaborationRepository:
         allowed_mcp_servers: Sequence[str] | None | object = ...,
         app_grants: Sequence[ProjectAppGrant] | object = ...,
         description: str | object = ...,
+        is_main: bool | None = None,
     ) -> Project:
         return await asyncio.to_thread(
             self._store.update_project, project_id, actor_user_id, name=name,
             workspace_path=workspace_path, allowed_skills=allowed_skills,
             allowed_mcp_servers=allowed_mcp_servers, app_grants=app_grants,
             description=description,
+            is_main=is_main,
         )
 
     async def delete_project(self, project_id: str, actor_user_id: str) -> bool:

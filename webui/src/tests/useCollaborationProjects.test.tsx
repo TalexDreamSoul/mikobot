@@ -31,6 +31,7 @@ function project(id: string, name: string): CollaborationProject {
     allowed_mcp_servers: null,
     created_at_ms: timestamp,
     updated_at_ms: timestamp,
+    is_main: false,
   };
 }
 

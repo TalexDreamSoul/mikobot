@@ -74,6 +74,10 @@ class Project:
     belongs to nobody else — the host's own conversations, their tasks, and their
     heartbeat and Dream resources — lives there, so it cannot be deleted.
 
+    ``is_main`` names the unique project where the authenticated local owner
+    retains host-level access across project workspaces. It grants no authority
+    to other members and is independent of the built-in home and user defaults.
+
     ``app_grants`` records the apps the project approved: for each one, the exact
     package revision at approval time and the capabilities it granted. The host
     revokes those capabilities when the installed revision differs from the
@@ -93,6 +97,7 @@ class Project:
     is_builtin: bool = False
     app_grants: tuple[ProjectAppGrant, ...] = ()
     description: str = ""
+    is_main: bool = False
 
     def app_grant(self, name: str) -> ProjectAppGrant | None:
         """Return the project's approval of one app, if it has one."""

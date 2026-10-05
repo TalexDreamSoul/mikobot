@@ -327,6 +327,15 @@ export function useCollaborationProjects() {
     }
   }, [client, loadSummary]);
 
+  const setMainProject = useCallback(async (nextProjectId: string) => {
+    await run(
+      "project:main",
+      () => updateCollaborationProject(client, nextProjectId, { is_main: true }),
+      nextProjectId,
+    );
+    await loadSummary(nextProjectId);
+  }, [client, loadSummary, run]);
+
   return {
     summary,
     loaded: summary !== null,
@@ -340,6 +349,7 @@ export function useCollaborationProjects() {
     setError,
     selectProject,
     setActiveProject,
+    setMainProject,
     reload: loadSummary,
     refreshDetail,
     createProject,

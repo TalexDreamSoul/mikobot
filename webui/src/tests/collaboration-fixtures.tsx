@@ -22,6 +22,7 @@ export const project: CollaborationProject = {
   created_at_ms: timestamp,
   updated_at_ms: timestamp,
   is_builtin: false,
+  is_main: false,
 };
 
 export const secondProject: CollaborationProject = {
@@ -148,6 +149,7 @@ export function controller(
     setError: vi.fn(),
     selectProject: vi.fn(),
     setActiveProject: vi.fn(),
+    setMainProject: vi.fn(),
     reload: vi.fn(),
     refreshDetail: vi.fn(),
     createProject: vi.fn(),

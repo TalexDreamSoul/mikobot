@@ -78,14 +78,26 @@ bindings in one JSON document under the runtime `collaboration/` directory.
 | Project description | Shared introduction and context stored with the project and injected into scoped prompts as reference text, never as a replacement for system or security instructions. |
 | Project materials | Read-only relative files from the shared project workspace. Dotfiles, profile files, raw history, symlinks, and absolute paths are excluded. |
 | Project knowledge | The shared project's `memory/MEMORY.md`, maintained by project Dream. Member-private profile, memory, and raw history are never part of this projection. |
+| Built-in home | The permanent instance home for unclassified work; independent of the main project and each user's active project. |
+| Main project (King) | Exactly one administrator-designated project where only the authenticated local owner may use host-level, cross-project tools. Ordinary members and OIDC administrators remain project-restricted. |
 
 Only the gateway composition root (`nanobot/cli/gateway_runtime.py`) wires a
 `CollaborationRepository` into `AgentLoop` and `ChannelManager`. The CLI, the
 Python SDK, and the API server pass nothing and run single-user. Inside the
-loop, the host owner's own CLI and token-authenticated WebUI turns never touch
-the repository; only chat-channel senders and OIDC or proxy principals are
-resolved to a project scope, which sets their workspace, session namespace,
-and allowed capabilities.
+loop, the host owner's CLI keeps its single-user scope. Token-authenticated WebUI
+turns resolve registered project workspaces and persist their project provenance;
+chat-channel senders and OIDC or proxy principals also resolve to a project scope,
+which sets their workspace, session namespace, and allowed capabilities.
+
+The store switches `Project.is_main` atomically under its file lock without moving
+the built-in home, changing user defaults, or adding memberships. The v13-to-v14
+migration selects the canonical built-in home as the initial main project while
+preserving existing data. A main project must be replaced before it can be cleared
+or deleted. The local owner can use a designated main project even without a
+membership; that exception does not apply to another administrator or member.
+Every turn reloads the live project policy, and an admitted owner tool call is
+rejected if its main-project authority changes mid-turn. Explicit restricted
+workspace requests, including temporary chats, stay restricted on unscoped paths.
 
 Internal cron, trigger, continuation, recovery, and subagent turns inherit the
 persisted user, project, route, assignment requirement, and binding of their source

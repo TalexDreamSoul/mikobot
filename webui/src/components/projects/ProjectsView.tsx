@@ -5,6 +5,7 @@ import {
   Cable,
   Blocks,
   Check,
+  Crown,
   CalendarClock,
   FolderKanban,
   FolderOpen,
@@ -46,6 +47,14 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import type { CollaborationProjectsController } from "@/hooks/useCollaborationProjects";
@@ -132,6 +141,9 @@ function ProjectList({
           >
             <FolderKanban className="h-4 w-4 shrink-0" aria-hidden />
             <span className="min-w-0 flex-1 truncate">{project.name}</span>
+            {project.is_main ? (
+              <Crown className="h-4 w-4 shrink-0" aria-label={t("projects.mainProject")} />
+            ) : null}
           </button>
         );
       })}
@@ -139,17 +151,25 @@ function ProjectList({
   );
 }
 
-function NewProjectForm({
+function NewProjectDialog({
+  open,
   busy,
+  error,
   onCancel,
   onCreate,
 }: {
+  open: boolean;
   busy: boolean;
+  error: string | null;
   onCancel: () => void;
   onCreate: (name: string) => Promise<unknown>;
 }) {
   const { t } = useTranslation();
   const [name, setName] = useState("");
+
+  useEffect(() => {
+    if (open) setName("");
+  }, [open]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -157,39 +177,45 @@ function NewProjectForm({
     if (!value || busy) return;
     try {
       await onCreate(value);
-      setName("");
       onCancel();
     } catch {
-      // The shared project error region reports mutation failures.
+      // Keep the entered name and show the mutation error in the dialog.
     }
   };
 
   return (
-    <form onSubmit={(event) => void submit(event)} className="rounded-panel bg-settings-surface p-4">
-      <div className="flex items-center justify-between gap-3">
-        <label htmlFor="new-project-name" className="text-sm font-semibold">{t("projects.newProject")}</label>
-        <Button type="button" variant="ghost" size="icon" onClick={onCancel} disabled={busy} className="h-9 w-9">
-          <X className="h-4 w-4" aria-hidden />
-          <span className="sr-only">{t("projects.cancelNewProject")}</span>
-        </Button>
-      </div>
-      <p className="mt-1 text-xs leading-5 text-muted-foreground">{t("projects.createDescription")}</p>
-      <div className="mt-3 flex gap-2">
-        <Input
-          id="new-project-name"
-          value={name}
-          maxLength={512}
-          autoFocus
-          onChange={(event) => setName(event.target.value)}
-          placeholder={t("projects.projectNamePlaceholder")}
-          disabled={busy}
-          className="min-w-0 flex-1 bg-background"
-        />
-        <Button type="submit" disabled={!name.trim() || busy} className="shrink-0">
-          {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : t("common.create")}
-        </Button>
-      </div>
-    </form>
+    <Dialog open={open} onOpenChange={(next) => {
+      if (!next && !busy) onCancel();
+    }}>
+      <DialogContent className="relative max-w-sm" showCloseButton={!busy}>
+        <form onSubmit={(event) => void submit(event)} className="grid gap-4">
+          <DialogHeader className="text-left">
+            <DialogTitle>{t("projects.newProject")}</DialogTitle>
+            <DialogDescription>{t("projects.createDescription")}</DialogDescription>
+          </DialogHeader>
+          <label htmlFor="new-project-name" className="sr-only">{t("projects.projectNamePlaceholder")}</label>
+          <Input
+            id="new-project-name"
+            value={name}
+            maxLength={512}
+            autoFocus
+            onChange={(event) => setName(event.target.value)}
+            placeholder={t("projects.projectNamePlaceholder")}
+            disabled={busy}
+          />
+          {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
+              {t("common.cancel")}
+            </Button>
+            <Button type="submit" disabled={!name.trim() || busy}>
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
+              {t("common.create")}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -231,6 +257,11 @@ export function ProjectsView({
   const isActiveProject = selectedProject !== null && activeProjectId === selectedProject.id;
   const currentUserId = projects.summary?.user.id ?? "";
   const refreshDetail = projects.refreshDetail;
+
+  const openNewProject = () => {
+    projects.setError(null);
+    setShowNewProject(true);
+  };
 
   // Which apps this host offers, and at which revision, changes from Settings and
   // from the host's own installs — outside this page. Read it again when the
@@ -283,7 +314,7 @@ export function ProjectsView({
           <Button
             type="button"
             variant="ghost"
-            onClick={() => setShowNewProject(true)}
+            onClick={openNewProject}
             className="mt-2 h-10 w-full justify-start px-3 text-muted-foreground"
           >
             <Plus className="mr-2 h-4 w-4" aria-hidden />
@@ -347,7 +378,7 @@ export function ProjectsView({
                       >
                         <Pencil className="h-4 w-4" aria-hidden />
                       </Button>
-                      {selectedProject.is_builtin ? null : (
+                      {selectedProject.is_builtin || selectedProject.is_main ? null : (
                         <Button
                           type="button"
                           variant="ghost"
@@ -365,6 +396,29 @@ export function ProjectsView({
                 </div>
               </div>
             </div>
+
+            {selectedProject ? (
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                {selectedProject.is_main ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1 font-medium">
+                    <Crown className="h-3.5 w-3.5" aria-hidden />
+                    {t("projects.mainProject")}
+                  </span>
+                ) : projects.isAdmin ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void projects.setMainProject(selectedProject.id).catch(() => undefined)}
+                    disabled={Boolean(projects.busyKey)}
+                    className="h-8 shrink-0 px-2.5 text-xs"
+                  >
+                    <Crown className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                    {t("projects.makeMain")}
+                  </Button>
+                ) : null}
+                <p className="min-w-0 text-muted-foreground">{t("projects.mainProjectHint")}</p>
+              </div>
+            ) : null}
 
             <div className="mt-2 flex gap-2 lg:hidden">
               <div className="min-w-0 flex-1">
@@ -385,7 +439,7 @@ export function ProjectsView({
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setShowNewProject((open) => !open)}
+                onClick={openNewProject}
                 aria-label={t("projects.newProject")}
                 className="h-11 w-11 shrink-0 px-0 sm:w-auto sm:px-3"
               >
@@ -448,13 +502,6 @@ export function ProjectsView({
                 </div>
               ) : null}
 
-              {showNewProject ? (
-                <NewProjectForm
-                  busy={projects.busyKey === "project:create"}
-                  onCancel={() => setShowNewProject(false)}
-                  onCreate={projects.createProject}
-                />
-              ) : null}
 
               {projects.loading && !projects.summary ? (
                 <LoadingSurface />
@@ -466,7 +513,7 @@ export function ProjectsView({
                     {t("projects.noProjectsDescription")}
                   </p>
                   {!showNewProject ? (
-                    <Button type="button" onClick={() => setShowNewProject(true)} className="mt-5">
+                    <Button type="button" onClick={openNewProject} className="mt-5">
                       <Plus className="mr-2 h-4 w-4" aria-hidden />
                       {t("projects.newProject")}
                     </Button>
@@ -543,6 +590,14 @@ export function ProjectsView({
           </div>
         </div>
       </div>
+
+      <NewProjectDialog
+        open={showNewProject}
+        busy={projects.busyKey === "project:create"}
+        error={projects.error}
+        onCancel={() => setShowNewProject(false)}
+        onCreate={projects.createProject}
+      />
 
       <RenameChatDialog
         open={renaming}

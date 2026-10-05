@@ -994,7 +994,9 @@ class GatewayHTTPHandler:
         if scope is None or scope.workspace_path is None:
             return False
         workspace_metadata = build_workspace_scope(
-            scope.workspace_path, "restricted", source_channel="websocket"
+            scope.workspace_path,
+            "full" if scope.is_local_owner and scope.project is not None and scope.project.is_main else "restricted",
+            source_channel="websocket",
         ).metadata()
         if metadata.get(WORKSPACE_SCOPE_METADATA_KEY) != workspace_metadata:
             # Older WebUI clients saved the host's working-directory projection.
@@ -2009,6 +2011,12 @@ class GatewayHTTPHandler:
     ) -> Response:
         project_id = required_string(payload, "project_id")
         name = optional_string(payload, "name")
+        is_main: bool | None = None
+        if "is_main" in payload:
+            raw_main = payload["is_main"]
+            if not isinstance(raw_main, bool):
+                raise ValueError("is_main must be a boolean")
+            is_main = raw_main
         description: str | object = ...
         if "description" in payload:
             description = optional_description(payload)
@@ -2025,6 +2033,7 @@ class GatewayHTTPHandler:
             user.id,
             name=name,
             description=description,
+            is_main=is_main,
             allowed_skills=allowlists.get("allowed_skills", ...),
             allowed_mcp_servers=allowlists.get("allowed_mcp_servers", ...),
         )
@@ -2880,15 +2889,20 @@ class GatewayHTTPHandler:
                     "can_pick_folder": False,
                 },
             })
-        return _http_json_response(
-            self.workspaces.payload(
-                controls_available=self.workspace_controls_available(connection),
-                folder_picker_available=self.workspace_folder_picker_available(
-                    connection,
-                    request,
-                ),
-            )
+        payload = self.workspaces.payload(
+            controls_available=self.workspace_controls_available(connection),
+            folder_picker_available=self.workspace_folder_picker_available(connection, request),
         )
+        project = (
+            await self.collaboration.get_project(user.id, user.default_project_id)
+            if user.default_project_id else None
+        )
+        if project is not None:
+            payload["default_scope"] = build_workspace_scope(
+                project.workspace_path, "full" if project.is_main else "restricted",
+                source_channel="websocket",
+            ).payload()
+        return _http_json_response(payload)
 
     async def _handle_workspace_folder_picker(
         self,

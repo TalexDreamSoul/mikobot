@@ -148,6 +148,7 @@ def project_payload(project: Project) -> dict[str, object]:
         "created_at_ms": project.created_at_ms,
         "updated_at_ms": project.updated_at_ms,
         "is_builtin": project.is_builtin,
+        "is_main": project.is_main,
     }
 
 

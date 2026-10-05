@@ -87,6 +87,7 @@ class CollaborationRepository(Protocol):
         allowed_mcp_servers: Sequence[str] | None | object = ...,
         app_grants: Sequence[ProjectAppGrant] | object = ...,
         description: str | object = ...,
+        is_main: bool | None = None,
     ) -> Project: ...
 
     async def delete_project(self, project_id: str, actor_user_id: str) -> bool: ...

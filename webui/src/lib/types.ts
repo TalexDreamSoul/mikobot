@@ -476,6 +476,8 @@ export interface CollaborationProject {
   updated_at_ms: number;
   /** The instance's default project. It cannot be deleted. */
   is_builtin: boolean;
+  /** The unique host-owner project with cross-project authority. */
+  is_main: boolean;
   /** Optional for compatibility with pre-description gateways. */
   description?: string;
 }

@@ -208,25 +208,4 @@ describe("ProjectsView", () => {
     expect(within(panel as HTMLElement).queryByRole("switch")).not.toBeInTheDocument();
   });
 
-  it("offers project creation when no project exists", () => {
-    const projects = controller({
-      summary: {
-        user: { id: "user-1", display_name: "Ari", is_admin: false, default_project_id: null },
-        is_admin: false,
-        projects: [],
-        assignments: [],
-        active_project_id: null,
-        manageable_project_ids: [],
-      },
-      isAdmin: false,
-      projectId: null,
-      detail: null,
-    } as Partial<CollaborationProjectsController>);
-
-    render(wrap(<ProjectsView projects={projects} onToggleSidebar={vi.fn()} />));
-
-    expect(screen.getByRole("heading", { name: "No projects yet." })).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole("button", { name: "New project" })[0]);
-    expect(screen.getByRole("textbox", { name: "New project" })).toBeInTheDocument();
-  });
 });

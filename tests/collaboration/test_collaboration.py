@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -225,16 +227,16 @@ def _provider() -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_leaves_local_owner_alone_and_gives_proxy_sender_private_scope(
+async def test_agent_loop_keeps_cli_unscoped_and_isolates_proxy_identity(
     tmp_path: Path,
     local_collaboration_repository: tuple[CollaborationStore, AsyncLocalCollaborationRepository],
 ) -> None:
-    """The host owner's own turns bypass collaboration; proxy identities get a private scope."""
+    """CLI turns stay unscoped; proxy identities get private scopes without binding the browser."""
     workspace = tmp_path / "agent"
     workspace.mkdir()
     store, repository = local_collaboration_repository
     loop = _scope_loop(workspace, repository, _provider())
-    local = await loop._conversation_scope_for_message(
+    await loop._conversation_scope_for_message(
         InboundMessage("websocket", "browser", "local-chat", "hello")
     )
     cli = await loop._conversation_scope_for_message(
@@ -244,7 +246,6 @@ async def test_agent_loop_leaves_local_owner_alone_and_gives_proxy_sender_privat
         InboundMessage("websocket", "proxy:remote-user", "remote-chat", "hello")
     )
 
-    assert local is None
     assert cli is None
     assert external is not None
     assert external.kind is ConversationScopeKind.DIRECT
@@ -831,7 +832,7 @@ def test_legacy_multi_tenant_store_collapses_to_projects_and_assignments(tmp_pat
     assert project.name == "Roadmap"
     with pytest.raises(CollaborationBuiltinProjectError):
         store.delete_project("proj", "owner")
-    assert persisted["schemaVersion"] == 13
+    assert persisted["schemaVersion"] == 14
     assert set(persisted) == {
         "schemaVersion", "localOwnerId", "users", "identities", "projects", "memberships",
         "channelProvisions", "channelAssignments", "pairingChallenges", "conversationBindings",
@@ -839,6 +840,177 @@ def test_legacy_multi_tenant_store_collapses_to_projects_and_assignments(tmp_pat
     }
     assert (root / "collaboration.v8.bak.json").exists()
     assert json.loads((root / "collaboration.v8.bak.json").read_text())["schemaVersion"] == 8
+
+
+def test_administrator_can_designate_foreign_project_without_gaining_membership(
+    tmp_path: Path,
+) -> None:
+    """Global admin designation does not silently transfer ownership or new-chat preferences."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    local_owner, _home = store.ensure_local_owner(tmp_path / "home")
+    owner, project = _user_and_project(store, tmp_path, "project-owner")
+    admin, admin_project = _user_and_project(store, tmp_path, "oidc-admin")
+    store.update_user_admin(admin.id, True)
+    members = store.list_members(project.id, owner.id)
+
+    store.update_project(project.id, admin.id, is_main=True)
+
+    assert {item.id for item in store.list_all_projects(local_owner.id) if item.is_main} == {project.id}
+    assert store.list_members(project.id, owner.id) == members
+    assert store.get_user(owner.id).default_project_id == project.id
+    assert store.get_user(admin.id).default_project_id == admin_project.id
+    assert store.resolve_session_scope(
+        admin.id, project.id, channel="websocket", chat_id="admin-chat",
+    ) is None
+
+
+@pytest.mark.parametrize("duplicate_builtin", [False, True], ids=["single-home", "legacy-two-homes"])
+def test_v13_main_migration_preserves_existing_project_and_user_data(
+    tmp_path: Path, duplicate_builtin: bool,
+) -> None:
+    """Migration designates the canonical home, not the owner's selected new-chat project."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, home = store.ensure_local_owner(tmp_path / "home")
+    selected = store.create_project(owner.id, "Release train", tmp_path / "release")
+    member = store.create_user("Colleague")
+    for project in (home, selected):
+        store.update_project(
+            project.id, owner.id,
+            description=f"Keep {project.name}: 项目上下文",
+            app_grants=[ProjectAppGrant("notes", "approved-revision", ("write_file",), ("files",))],
+            allowed_skills=["research"], allowed_mcp_servers=["docs"],
+        )
+        store.add_member(project.id, owner.id, member.id)
+    store.update_user_default_project(owner.id, selected.id)
+    store.update_user_default_project(member.id, selected.id)
+    task = store.create_task(selected.id, member.id, "Do not lose this card", detail="release notes")
+    store.bind_identity("telegram", "colleague", member.id)
+    store.bind_conversation("telegram", "team", selected.id, owner.id)
+    document = json.loads(store.path.read_text(encoding="utf-8"))
+    document["schemaVersion"] = 13
+    for record in document["projects"].values():
+        record.pop("isMain", None)
+    document["projects"][home.id].update(createdAtMs=1, updatedAtMs=1)
+    document["projects"][selected.id].update(
+        createdAtMs=2, updatedAtMs=2, isBuiltin=duplicate_builtin,
+    )
+    original = json.dumps(document, ensure_ascii=False)
+    store.path.write_text(original, encoding="utf-8")
+
+    migrated = CollaborationStore(store_path=store.path)
+    projects = migrated.list_all_projects(owner.id)
+    assert {project.id for project in projects if project.is_main} == {home.id}
+    assert migrated.get_user(owner.id).default_project_id == selected.id
+    assert migrated.get_user(member.id).default_project_id == selected.id
+    assert migrated.get_project(member.id, selected.id).description == "Keep Release train: 项目上下文"
+    assert [card.id for card in migrated.list_tasks(selected.id, member.id)] == [task.id]
+    persisted = json.loads(store.path.read_text(encoding="utf-8"))
+    assert persisted.pop("schemaVersion") == 14
+    for record in persisted["projects"].values():
+        record.pop("isMain")
+    assert persisted == {key: value for key, value in document.items() if key != "schemaVersion"}
+    assert store.path.with_name("collaboration.v13.bak.json").read_text(encoding="utf-8") == original
+
+
+def test_main_designation_survives_startup_without_rehoming_selected_project(
+    tmp_path: Path,
+) -> None:
+    """Main, immutable home identity, and each user's new-chat choice remain independent."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, home = store.ensure_local_owner(tmp_path / "first-home")
+    main = store.create_project(owner.id, "Main release", tmp_path / "release")
+    selected = store.create_project(owner.id, "New chat destination", tmp_path / "selected")
+    grant = ProjectAppGrant("notes", "rev-locked", ("write_file",), ("files",))
+    store.update_project(main.id, owner.id, description="Retain release context", app_grants=[grant])
+    store.update_user_default_project(owner.id, selected.id)
+    store.update_project(main.id, owner.id, is_main=True)
+
+    restarted = CollaborationStore(store_path=store.path)
+    restarted_owner, restarted_home = restarted.ensure_local_owner(tmp_path / "second-home")
+    restarted.ensure_local_owner(tmp_path / "second-home")
+    projects = {project.id: project for project in restarted.list_all_projects(owner.id)}
+    assert {project.id for project in projects.values() if project.is_main} == {main.id}
+    assert {project.id for project in projects.values() if project.is_builtin} == {home.id}
+    assert restarted_home.id == home.id
+    assert restarted_home.workspace_path == str((tmp_path / "second-home").resolve())
+    assert restarted_owner.default_project_id == selected.id
+    assert projects[main.id].workspace_path == main.workspace_path
+    assert projects[selected.id].workspace_path == selected.workspace_path
+    assert projects[main.id].description == "Retain release context"
+    assert projects[main.id].app_grants == (grant,)
+
+
+@pytest.mark.parametrize("actor_role", ["owner", "member"])
+def test_non_admin_cannot_designate_main_even_when_they_own_the_project(
+    tmp_path: Path, actor_role: str,
+) -> None:
+    """Project management does not confer the global privilege to designate main."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    admin, home = store.ensure_local_owner(tmp_path / "home")
+    owner = store.create_user("Project owner")
+    project = store.create_project(owner.id, "Owned project", tmp_path / "project")
+    member = store.create_user("Project member")
+    store.add_member(project.id, owner.id, member.id)
+    actor = owner if actor_role == "owner" else member
+    before = store.path.read_bytes()
+
+    with pytest.raises(CollaborationPermissionError):
+        store.update_project(project.id, actor.id, is_main=True, name="Unauthorized rename")
+
+    assert store.path.read_bytes() == before
+    assert {item.id for item in store.list_all_projects(admin.id) if item.is_main} == {home.id}
+
+
+def test_main_must_be_redesignated_before_clear_or_delete(tmp_path: Path) -> None:
+    """Reject destructive main operations atomically; redesignation makes an ordinary project deletable."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, home = store.ensure_local_owner(tmp_path / "home")
+    project = store.create_project(owner.id, "Release", tmp_path / "release")
+    task = store.create_task(project.id, owner.id, "Keep until redesignated")
+    store.update_project(project.id, owner.id, is_main=True)
+    before = store.path.read_bytes()
+
+    with pytest.raises(CollaborationConflictError):
+        store.update_project(project.id, owner.id, is_main=False, name="Partial mutation")
+    with pytest.raises(CollaborationConflictError):
+        store.delete_project(project.id, owner.id)
+
+    assert store.path.read_bytes() == before
+    assert [item.id for item in store.list_tasks(project.id, owner.id)] == [task.id]
+    store.update_project(home.id, owner.id, is_main=True)
+    assert store.delete_project(project.id, owner.id) is True
+    assert store.get_project(owner.id, project.id) is None
+    assert {item.id for item in store.list_all_projects(owner.id) if item.is_main} == {home.id}
+
+
+def test_independent_writers_keep_one_main_without_losing_project_updates(tmp_path: Path) -> None:
+    """Competing store instances serialize designation and preserve every committed edit."""
+    store = CollaborationStore(tmp_path / "collaboration")
+    owner, _home = store.ensure_local_owner(tmp_path / "home")
+    projects = [
+        store.create_project(owner.id, f"Release {index}", tmp_path / f"release-{index}")
+        for index in range(4)
+    ]
+    writers = [CollaborationStore(store_path=store.path) for _ in projects]
+    start = Barrier(len(writers))
+
+    def designate(index: int) -> None:
+        start.wait(timeout=10)
+        writers[index].update_project(
+            projects[index].id, owner.id, is_main=True, description=f"Committed edit {index}",
+        )
+
+    with ThreadPoolExecutor(max_workers=len(writers)) as executor:
+        list(executor.map(designate, range(len(writers))))
+
+    for reader in writers:
+        persisted = {project.id: project for project in reader.list_all_projects(owner.id)}
+        mains = {project.id for project in persisted.values() if project.is_main}
+        assert len(mains) == 1
+        assert mains <= {project.id for project in projects}
+        assert {
+            project.id: persisted[project.id].description for project in projects
+        } == {project.id: f"Committed edit {index}" for index, project in enumerate(projects)}
 
 
 def test_bootstrap_creates_the_builtin_project_and_refuses_to_delete_it(
@@ -1323,10 +1495,11 @@ def test_project_deletion_removes_its_tasks(tmp_path: Path) -> None:
 
 
 def test_task_board_migrates_from_the_previous_store_schema(tmp_path: Path) -> None:
-    """A store written before tasks existed gains an empty board instead of failing."""
+    """An upgraded v10 project retains membership and accepts durable shared task transitions."""
     store = CollaborationStore(tmp_path / "collaboration")
     owner, project = _user_and_project(store, tmp_path, "owner")
-    store.create_task(project.id, owner.id, "Keep me")
+    member = store.create_user("Colleague")
+    store.add_member(project.id, owner.id, member.id)
     document = json.loads(store.path.read_text(encoding="utf-8"))
     document["schemaVersion"] = 10
     document.pop("tasks")
@@ -1335,13 +1508,16 @@ def test_task_board_migrates_from_the_previous_store_schema(tmp_path: Path) -> N
     store.path.write_text(json.dumps(document), encoding="utf-8")
 
     migrated = CollaborationStore(store_path=store.path)
-    assert migrated.list_tasks(project.id, owner.id) == []
-    assert migrated.get_project(owner.id, project.id).app_grants == ()
-    assert json.loads(store.path.read_text(encoding="utf-8"))["schemaVersion"] == 13
+    card = migrated.create_task(project.id, member.id, "Release after upgrade", detail="retain context")
+    migrated.update_task(card.id, owner.id, status=TaskStatus.DONE)
+    assert [(task.title, task.detail, task.status) for task in migrated.list_tasks(project.id, member.id)] == [
+        ("Release after upgrade", "retain context", TaskStatus.DONE),
+    ]
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schemaVersion"] == 14
 
 
-def test_project_description_migrates_empty_and_round_trips(tmp_path: Path) -> None:
-    """A v12 store gains an empty description, and a saved introduction survives later updates."""
+def test_project_description_survives_updates_after_v12_migration(tmp_path: Path) -> None:
+    """After upgrading v12, a saved introduction survives rename and store reload."""
     store = CollaborationStore(tmp_path / "collaboration")
     owner, project = _user_and_project(store, tmp_path, "owner")
     store.update_project(project.id, owner.id, description="Ship the release train on Friday.")
@@ -1352,10 +1528,6 @@ def test_project_description_migrates_empty_and_round_trips(tmp_path: Path) -> N
     store.path.write_text(json.dumps(document), encoding="utf-8")
 
     migrated = CollaborationStore(store_path=store.path)
-
-    assert migrated.get_project(owner.id, project.id).description == ""
-    assert json.loads(store.path.read_text(encoding="utf-8"))["schemaVersion"] == 13
-
     migrated.update_project(project.id, owner.id, description="Shared roadmap context.")
     renamed = migrated.update_project(project.id, owner.id, name="Renamed train")
 

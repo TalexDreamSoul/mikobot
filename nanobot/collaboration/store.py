@@ -41,7 +41,7 @@ from nanobot.collaboration.pairing import (
 )
 from nanobot.config.paths import get_runtime_subdir
 
-_SCHEMA = 13
+_SCHEMA = 14
 # Documents at this version already use the single-admin shape. Older ones also
 # carry the dropped multi-tenant collections and migrate through _migrate_legacy.
 _MULTI_TENANT_SCHEMA = 9
@@ -161,6 +161,14 @@ class CollaborationStore:
                 if project.is_builtin and project.id != builtin.id:
                     demoted = _replace_project(project, is_builtin=False, updated_at_ms=now)
                     state["projects"][demoted.id] = _encode_project(demoted)
+            current_projects = [_project(value) for value in state["projects"].values()]
+            mains = [project for project in current_projects if project.is_main]
+            main = min(mains, key=lambda item: (item.created_at_ms, item.id)) if mains else builtin
+            for project in current_projects:
+                if project.is_main != (project.id == main.id):
+                    state["projects"][project.id] = _encode_project(_replace_project(
+                        project, is_main=project.id == main.id, updated_at_ms=now,
+                    ))
             default_project_id = owner.default_project_id
             if default_project_id is None or default_project_id not in state["projects"]:
                 owner = _replace_user(
@@ -222,7 +230,9 @@ class CollaborationStore:
             user = self._require_user(state, user_id)
             if project_id is not None:
                 project_id = _id(project_id, "project_id")
-                self._require_member(state, project_id, user_id)
+                project = self._require_project(state, project_id)
+                if not (state["localOwnerId"] == user_id and project.is_main):
+                    self._require_member(state, project_id, user_id)
             updated = _replace_user(user, default_project_id=project_id, updated_at_ms=_now())
             state["users"][user.id] = _encode_user(updated)
             self._save(state)
@@ -401,11 +411,12 @@ class CollaborationStore:
         allowed_mcp_servers: _Allowlist | object = ...,
         app_grants: _AppGrants | object = ...,
         description: str | object = ...,
+        is_main: bool | None = None,
     ) -> Project:
         if (
             name is None and workspace_path is None
             and allowed_skills is ... and allowed_mcp_servers is ...
-            and app_grants is ... and description is ...
+            and app_grants is ... and description is ... and is_main is None
         ):
             raise ValueError("provide at least one project field")
         project_id = _id(project_id, "project_id")
@@ -413,6 +424,12 @@ class CollaborationStore:
         with self._state() as state:
             self._require_manager(state, project_id, actor_user_id)
             project = self._require_project(state, project_id)
+            if is_main is not None:
+                self._require_admin(state, actor_user_id)
+                if type(is_main) is not bool:
+                    raise ValueError("is_main must be a boolean")
+                if not is_main and project.is_main:
+                    raise CollaborationConflictError("select another main project before clearing it")
             updated = Project(
                 project.id,
                 _string(name, "name") if name is not None else project.name,
@@ -437,7 +454,15 @@ class CollaborationStore:
                     _long_text(description, "description", limit=_MAX_DESCRIPTION)
                     if description is not ... else project.description
                 ),
+                project.is_main if is_main is None else is_main,
             )
+            if is_main:
+                for value in state["projects"].values():
+                    previous = _project(value)
+                    if previous.is_main and previous.id != project_id:
+                        state["projects"][previous.id] = _encode_project(_replace_project(
+                            previous, is_main=False, updated_at_ms=updated.updated_at_ms,
+                        ))
             state["projects"][project_id] = _encode_project(updated)
             self._save(state)
             return updated
@@ -452,6 +477,8 @@ class CollaborationStore:
                 raise CollaborationBuiltinProjectError(
                     "the built-in project cannot be deleted"
                 )
+            if project.is_main:
+                raise CollaborationConflictError("select another main project before deleting it")
             del state["projects"][project_id]
             for collection in (
                 "memberships", "conversationBindings", "channelAssignments", "pairingChallenges",
@@ -1036,7 +1063,9 @@ class CollaborationStore:
             project_value = state["projects"].get(project_id)
             if user_value is None or project_value is None:
                 return None
-            if not self._is_member(state, project_id, user_id):
+            if not self._is_member(state, project_id, user_id) and not (
+                state["localOwnerId"] == user_id and _project(project_value).is_main
+            ):
                 return None
             assignment = self._assignment_for_channel(state, channel)
             if assignment_required:
@@ -1131,7 +1160,12 @@ class CollaborationStore:
                 if (
                     user.default_project_id is not None
                     and user.default_project_id in state["projects"]
-                    and self._is_member(state, user.default_project_id, user.id)
+                    and (
+                        self._is_member(state, user.default_project_id, user.id)
+                        or (state["localOwnerId"] == user.id and _project(
+                            state["projects"][user.default_project_id]
+                        ).is_main)
+                    )
                 ):
                     return self._project_scope(
                         ConversationScopeKind.DIRECT, user,
@@ -1543,7 +1577,7 @@ def _migrate_to_current_shape(root: Mapping[str, object]) -> dict[str, object]:
     release that generated it, and only such a generated name is replaced, so a
     project someone renamed keeps their choice.
     """
-    migrated = {**root, "schemaVersion": _SCHEMA}
+    migrated = {**root, "schemaVersion": 13}
     migrated.setdefault("tasks", {})
     owner_id = migrated.get("localOwnerId")
     projects = _record_index(migrated.get("projects"))
@@ -1566,6 +1600,8 @@ def _migrate_to_current_shape(root: Mapping[str, object]) -> dict[str, object]:
     owner = users.get(owner_id)
     if owner is None:
         return migrated
+    if any(record.get("isBuiltin") is True for record in projects.values()):
+        return migrated
     default_project_id = owner.get("defaultProjectId")
     record = projects.get(default_project_id) if isinstance(default_project_id, str) else None
     if record is None or record.get("isBuiltin") is True:
@@ -1582,6 +1618,25 @@ def _migrate_to_current_shape(root: Mapping[str, object]) -> dict[str, object]:
     return migrated
 
 
+def _migrate_v13(root: Mapping[str, object]) -> dict[str, object]:
+    """Add one main project without changing the home or anyone's default."""
+    records = _record_index(root.get("projects"))
+    if records is None:
+        raise CollaborationStoreFormatError("invalid projects")
+    projects = [_project({**record, "isMain": False}) for record in records.values()]
+    builtin = _canonical_builtin(projects)
+    return {
+        **root,
+        "schemaVersion": _SCHEMA,
+        "projects": {
+            project.id: _encode_project(_replace_project(
+                project, is_main=builtin is not None and project.id == builtin.id,
+            ))
+            for project in projects
+        },
+    }
+
+
 def _normalize(data: object) -> _StoreState:
     root = _mapping(data, "unsupported collaboration store schema")
     version = root.get("schemaVersion")
@@ -1589,6 +1644,7 @@ def _normalize(data: object) -> _StoreState:
         if version < _MULTI_TENANT_SCHEMA:
             root = _migrate_legacy(root, version)
         root = _migrate_to_current_shape(root)
+        root = _migrate_v13(root)
     if set(root) != set(_empty()) or root.get("schemaVersion") != _SCHEMA:
         raise CollaborationStoreFormatError("unsupported collaboration store schema")
     result = _empty()
@@ -1663,8 +1719,14 @@ def _references(state: _StoreState) -> None:
         raise CollaborationStoreFormatError("a project must retain an owner")
     for value in users.values():
         user = _user(value)
-        if user.default_project_id is not None and _member_key(
-                user.default_project_id, user.id) not in memberships:
+        # Defaults are preferences, not authority. The owner can retain a former
+        # King preference; admission still rechecks current main or membership.
+        if user.default_project_id is not None and (
+            user.default_project_id not in projects
+            or (user.id != state["localOwnerId"] and _member_key(
+                user.default_project_id, user.id
+            ) not in memberships)
+        ):
             raise CollaborationStoreFormatError("invalid default project")
     for value in state["channelProvisions"].values():
         if _channel_provision(value).created_by_user_id not in users:
@@ -1779,11 +1841,14 @@ def _project(data: Mapping[str, object]) -> Project:
     _shape(data, {
         "id", "name", "workspacePath", "createdByUserId", "allowedSkills",
         "allowedMcpServers", "createdAtMs", "updatedAtMs", "isBuiltin", "appGrants",
-        "description",
+        "description", "isMain",
     })
     builtin = data.get("isBuiltin", False)
     if not isinstance(builtin, bool):
         raise CollaborationStoreFormatError("invalid project isBuiltin")
+    main = data["isMain"]
+    if not isinstance(main, bool):
+        raise CollaborationStoreFormatError("invalid project isMain")
     return Project(
         _id(data["id"], "id"), _string(data["name"], "name"),
         _workspace(data["workspacePath"]), _id(data["createdByUserId"], "createdByUserId"),
@@ -1793,6 +1858,7 @@ def _project(data: Mapping[str, object]) -> Project:
         builtin,
         _app_grants(data["appGrants"]),
         _long_text(data["description"], "description", limit=_MAX_DESCRIPTION),
+        main,
     )
 
 
@@ -1806,6 +1872,7 @@ def _encode_project(x: Project) -> _Record:
         ),
         "createdAtMs": x.created_at_ms, "updatedAtMs": x.updated_at_ms,
         "isBuiltin": x.is_builtin,
+        "isMain": x.is_main,
         "appGrants": {
             grant.name: {
                 "revision": grant.revision,
@@ -1821,6 +1888,7 @@ def _encode_project(x: Project) -> _Record:
 def _replace_project(
     project: Project, *, workspace_path: str | None = None, updated_at_ms: int | None = None,
     is_builtin: bool | None = None,
+    is_main: bool | None = None,
 ) -> Project:
     return Project(
         project.id, project.name,
@@ -1831,6 +1899,7 @@ def _replace_project(
         is_builtin if is_builtin is not None else project.is_builtin,
         project.app_grants,
         project.description,
+        is_main if is_main is not None else project.is_main,
     )
 
 

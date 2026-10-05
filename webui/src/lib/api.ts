@@ -672,6 +672,7 @@ export async function updateCollaborationProject(
   values: {
     name?: string;
     description?: string;
+    is_main?: boolean;
     capabilities?: CollaborationCapabilities;
   },
 ): Promise<{ project: CollaborationProject }> {
@@ -682,6 +683,7 @@ export async function updateCollaborationProject(
       project_id: projectId,
       ...(values.name !== undefined ? { name: values.name } : {}),
       ...(values.description !== undefined ? { description: values.description } : {}),
+      ...(values.is_main !== undefined ? { is_main: values.is_main } : {}),
       ...(values.capabilities !== undefined ? { capabilities: values.capabilities } : {}),
     },
   );

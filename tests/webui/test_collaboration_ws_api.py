@@ -305,6 +305,127 @@ async def test_local_owner_is_administrator_and_sees_every_project(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("actor_kind", ["unauthenticated", "project-owner", "member"])
+@pytest.mark.parametrize("designation", [True, False], ids=["designate", "clear"])
+async def test_main_project_mutation_uses_authenticated_admin_not_payload_authority(
+    tmp_path: Path, actor_kind: str, designation: bool,
+) -> None:
+    """Even a project owner cannot spoof the local administrator to change main."""
+    handler = await _handler(tmp_path)
+    local = await _identity(handler, _local_connection("/api/collaboration"))
+    admin_id = local["user"]["id"]
+    owner_connection = _proxy_connection("main-project-owner")
+    member_connection = _proxy_connection("main-project-member")
+    owner_id = (await _identity(handler, owner_connection))["user"]["id"]
+    member_id = (await _identity(handler, member_connection))["user"]["id"]
+    project = await handler.collaboration.create_project(owner_id, "Owned release", tmp_path / "release")
+    await handler.collaboration.add_member(project.id, owner_id, member_id)
+    connection = {
+        "unauthenticated": _connection(_request("/", {})),
+        "project-owner": owner_connection,
+        "member": member_connection,
+    }[actor_kind]
+
+    response = await handler.dispatch_webui_mutation(
+        connection, "collaboration.project.update",
+        {
+            "project_id": project.id, "is_main": designation, "name": "Spoofed rename",
+            "user_id": admin_id, "actor_user_id": admin_id, "is_admin": True, "local_owner": True,
+        },
+    )
+
+    assert response.status_code == (401 if actor_kind == "unauthenticated" else 404)
+    assert await handler.collaboration.get_project(owner_id, project.id) == project
+    after = await _identity(handler, _local_connection("/api/collaboration"))
+    assert {item["id"] for item in after["projects"] if item["is_main"]} == {
+        item["id"] for item in local["projects"] if item["is_main"]
+    }
+    await handler.collaboration.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [None, 0, 1, "true", [], {}], ids=["null", "zero", "one", "string", "array", "object"])
+async def test_main_project_api_rejects_non_boolean_without_partial_update(
+    tmp_path: Path, invalid: object,
+) -> None:
+    """Malformed designation cannot be coerced into authority or commit a companion rename."""
+    handler = await _handler(tmp_path)
+    connection = _local_connection("/api/collaboration")
+    index = await _identity(handler, connection)
+    owner_id = index["user"]["id"]
+    project = await handler.collaboration.create_project(owner_id, "Release", tmp_path / "release")
+
+    response = await handler.dispatch_webui_mutation(
+        connection, "collaboration.project.update",
+        {"project_id": project.id, "is_main": invalid, "name": "Partial rename"},
+    )
+
+    assert response.status_code == 400
+    assert await handler.collaboration.get_project(owner_id, project.id) == project
+    after = await _identity(handler, connection)
+    assert {item["id"] for item in after["projects"] if item["is_main"]} == {
+        item["id"] for item in index["projects"] if item["is_main"]
+    }
+    await handler.collaboration.aclose()
+
+
+@pytest.mark.asyncio
+async def test_main_project_api_switches_unique_public_main_and_requires_redesignation(
+    tmp_path: Path,
+) -> None:
+    """Admin designation is public and unique, preserves new-chat choice, and protects deletion."""
+    handler = await _handler(tmp_path)
+    connection = _local_connection("/api/collaboration")
+    index = await _identity(handler, connection)
+    owner_id = index["user"]["id"]
+    first = await handler.collaboration.create_project(owner_id, "Release", tmp_path / "release")
+    second = await handler.collaboration.create_project(owner_id, "Support", tmp_path / "support")
+    await handler.collaboration.update_user_default_project(owner_id, first.id)
+
+    for target in (first, second):
+        response = await handler.dispatch_webui_mutation(
+            connection, "collaboration.project.update", {"project_id": target.id, "is_main": True},
+        )
+        assert response.status_code == 200, response.body
+        assert _json(response)["project"]["is_main"] is True
+        summary = await _identity(handler, connection)
+        assert {item["id"] for item in summary["projects"] if item["is_main"]} == {target.id}
+        assert summary["user"]["default_project_id"] == first.id
+        request = _request(f"/api/collaboration/projects/{target.id}", connection.request.headers)
+        detail = await handler.dispatch(_connection(request), request)
+        assert detail is not None and detail.status_code == 200
+        assert _json(detail)["project"]["is_main"] is True
+
+    for action, payload in (
+        ("collaboration.project.update", {"project_id": second.id, "is_main": False, "name": "Partial rename"}),
+        ("collaboration.project.delete", {"project_id": second.id}),
+    ):
+        blocked = await handler.dispatch_webui_mutation(connection, action, payload)
+        assert blocked.status_code == 409, blocked.body
+    retained = await handler.collaboration.get_project(owner_id, second.id)
+    assert retained.name == "Support"
+    assert retained.is_main is True
+    renamed = await handler.dispatch_webui_mutation(
+        connection, "collaboration.project.update", {"project_id": second.id, "name": "Support renamed"},
+    )
+    assert renamed.status_code == 200
+    assert _json(renamed)["project"]["is_main"] is True
+    switched = await handler.dispatch_webui_mutation(
+        connection, "collaboration.project.update", {"project_id": first.id, "is_main": True},
+    )
+    assert switched.status_code == 200
+    deleted = await handler.dispatch_webui_mutation(
+        connection, "collaboration.project.delete", {"project_id": second.id},
+    )
+    assert deleted.status_code == 200
+    assert _json(deleted)["deleted"] is True
+    summary = await _identity(handler, connection)
+    assert second.id not in {item["id"] for item in summary["projects"]}
+    assert {item["id"] for item in summary["projects"] if item["is_main"]} == {first.id}
+    await handler.collaboration.aclose()
+
+
+@pytest.mark.asyncio
 async def test_proxy_user_cannot_read_or_mutate_foreign_collaboration_resources(tmp_path) -> None:
     """Authenticated proxy identity, not payload IDs, scopes every collaboration resource."""
     handler = await _handler(tmp_path)

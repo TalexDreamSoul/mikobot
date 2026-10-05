@@ -16,7 +16,7 @@ from nanobot.bus.events import (
     InboundMessage,
 )
 from nanobot.bus.queue import MessageBus
-from nanobot.collaboration import ConversationScope, ConversationScopeKind
+from nanobot.collaboration import ConversationScope, ConversationScopeKind, Project
 from nanobot.providers.base import GenerationSettings, LLMResponse
 from nanobot.session.keys import UNIFIED_SESSION_KEY
 from nanobot.session.manager import Session
@@ -190,7 +190,15 @@ def _owner_scope(*, project_id: str, workspace: Path) -> ConversationScope:
         user_id="owner",
         project_id=project_id,
         user=None,
-        project=None,
+        project=Project(
+            id=project_id,
+            name=project_id,
+            workspace_path=str(workspace),
+            created_by_user_id="owner",
+            created_at_ms=0,
+            updated_at_ms=0,
+            is_main=False,
+        ),
         binding=None,
         assignment=None,
         workspace_path=str(workspace),
@@ -236,6 +244,12 @@ class _FixedScopes:
     ) -> tuple[None, None]:
         return (None, None)
 
+    async def get_project(self, user_id: str, project_id: str) -> Project | None:
+        for scope in self._scopes.values():
+            if scope.user_id == user_id and scope.project_id == project_id:
+                return scope.project
+        return None
+
     async def resolve_scope(
         self,
         channel: str,
@@ -279,8 +293,8 @@ def _persisted_session(loop: AgentLoop, key: str) -> Session:
 
 
 @pytest.mark.asyncio
-async def test_owner_turn_records_access_scope_without_member_provenance(tmp_path) -> None:
-    """The host owner's channel turn records its project for access decisions only."""
+async def test_owner_turn_persists_project_authority_for_session_access(tmp_path) -> None:
+    """The host owner's persisted project authority permits access to its own session."""
     workspace = tmp_path / "projects" / "qingqi"
     workspace.mkdir(parents=True)
     loop = _scoped_loop(
@@ -294,7 +308,6 @@ async def test_owner_turn_records_access_scope_without_member_provenance(tmp_pat
     assert session.metadata[SESSION_ACCESS_KIND_METADATA_KEY] == "direct"
     assert session.metadata[SESSION_ACCESS_USER_METADATA_KEY] == "owner"
     assert session.metadata[SESSION_ACCESS_PROJECT_METADATA_KEY] == "qingqi"
-    assert not any(key.startswith("collaboration_") for key in session.metadata)
     assert session_access_scope(session.metadata, "feishu:owner-chat") == SessionAccessScope(
         "owner", "qingqi"
     )
@@ -359,7 +372,6 @@ async def test_owner_channel_turns_cannot_reach_another_project_through_session_
         assert session.metadata[SESSION_ACCESS_KIND_METADATA_KEY] == "direct"
         assert session.metadata[SESSION_ACCESS_USER_METADATA_KEY] == "owner"
         assert session.metadata[SESSION_ACCESS_PROJECT_METADATA_KEY] == project_id
-        assert not any(name.startswith("collaboration_") for name in session.metadata)
 
     peer_handle = SessionHandleResolver(loop.sessions).handle_for_session("feishu:peer-chat")
     assert peer_handle is not None

@@ -89,6 +89,26 @@ This path avoids hand-editing `config.json` for normal setup. Use the reference 
 | Projects | Manage shared server-side workspaces: the task board, the project's conversations, approved apps, members, channel assignments, built-in automations, and Skill/MCP limits |
 | Settings | Adjust models, providers, image generation, voice, web tools, runtime, and safety options |
 
+## Projects
+
+**New project** opens a focused dialog on desktop and mobile. Enter a name and
+choose **Create**; success closes the dialog and selects the new project. A failed
+request keeps the name and displays its error inside the dialog.
+
+Project controls have three separate meanings:
+
+- Selecting a project in the list only inspects it.
+- **Set as active project** chooses where your new project-less conversations run.
+  Existing conversations keep their project and workspace.
+- **Set as main project** is administrator-only and moves the unique **King**
+  designation. Only the authenticated local owner receives host-level access
+  across projects there; members remain isolated, including main-project members.
+
+Designating a main project does not change the active project, memberships, or the
+permanent built-in home. Switch the designation elsewhere before deleting the main
+project. Replacing it also revokes the previous project's cross-project tool
+authority; an affected running turn must start again with the current policy.
+
 ## Topic Workspace
 
 The sidebar is the topic switcher. Each topic keeps its own history, title,

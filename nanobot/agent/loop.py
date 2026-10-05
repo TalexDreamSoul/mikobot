@@ -1033,6 +1033,47 @@ class AgentLoop:
             raise CollaborationPermissionError("automation session is no longer authorized for its project")
         return scope
 
+    async def _owner_project_scope(self, msg: InboundMessage) -> ConversationScope | None:
+        """Resolve host WebUI projects without trusting a client authority flag."""
+        if self.collaboration is None:
+            return None
+        owner, _ = await self.collaboration.ensure_local_owner(self.workspace)
+        session = self.sessions.peek(msg.session_key)
+        if session is not None and not session.policy.persist:
+            return None
+        saved = session.metadata if session is not None else {}
+        saved_user = saved.get(COLLABORATION_USER_METADATA_KEY)
+        if saved_user is not None and saved_user != owner.id:
+            raise CollaborationPermissionError("session belongs to another user")
+        project_id = saved.get(COLLABORATION_PROJECT_METADATA_KEY)
+        raw_scope = (msg.metadata or {}).get(WORKSPACE_SCOPE_METADATA_KEY)
+        if not isinstance(raw_scope, dict) and not isinstance(project_id, str):
+            raw_scope = saved.get(WORKSPACE_SCOPE_METADATA_KEY)
+        if isinstance(raw_scope, dict):
+            raw_scope = cast(dict[str, object], raw_scope)
+            path = raw_scope.get("project_path")
+            if isinstance(path, str):
+                root = Path(path).expanduser().resolve(strict=False)
+                projects = await self.collaboration.list_all_projects(owner.id)
+                project_id = next((
+                    project.id for project in projects
+                    if Path(project.workspace_path).resolve(strict=False) == root
+                ), None)
+                if project_id is None:
+                    if self.session_has_collaboration_provenance(saved):
+                        raise CollaborationPermissionError("project workspace is no longer authorized")
+                    return None
+        if not isinstance(project_id, str):
+            project_id = owner.default_project_id
+        if project_id is None:
+            raise CollaborationPermissionError("owner has no project")
+        scope = await self.collaboration.resolve_session_scope(
+            owner.id, project_id, channel="websocket", chat_id=msg.chat_id,
+        )
+        if scope is None:
+            raise CollaborationPermissionError("owner project is no longer authorized")
+        return scope
+
     async def _conversation_scope_for_message(
         self, msg: InboundMessage
     ) -> ConversationScope | None:
@@ -1042,7 +1083,7 @@ class AgentLoop:
         if self._is_runtime_sender(msg):
             return await self._inherited_session_scope(msg)
         if self._is_local_owner(msg):
-            return None
+            return await self._owner_project_scope(msg) if msg.channel == "websocket" else None
         await self.collaboration.ensure_identity_user(
             msg.channel,
             msg.sender_id,
@@ -1087,10 +1128,6 @@ class AgentLoop:
         session.metadata[SESSION_ACCESS_KIND_METADATA_KEY] = scope.kind.value
         session.metadata[SESSION_ACCESS_USER_METADATA_KEY] = scope.user_id
         session.metadata[SESSION_ACCESS_PROJECT_METADATA_KEY] = scope.project_id
-        if scope.is_local_owner:
-            # The host's own turns keep the host's prompt, memory, media and Dream
-            # routing; only the access record above follows their assignment.
-            return
         if scope.user_id is None or scope.project_id is None:
             return
         metadata = dict(msg.metadata or {})
@@ -1117,7 +1154,7 @@ class AgentLoop:
         if scope.workspace_path is not None:
             session.metadata[WORKSPACE_SCOPE_METADATA_KEY] = build_workspace_scope(
                 scope.workspace_path,
-                "restricted",
+                "full" if scope.is_local_owner and scope.project is not None and scope.project.is_main else "restricted",
                 source_channel=msg.channel,
             ).metadata()
     def _tool_authorizer(
@@ -1126,10 +1163,23 @@ class AgentLoop:
         admitted_scope: ConversationScope,
     ) -> Callable[[], Awaitable[None]] | None:
         """Revalidate a member capability immediately before each tool execution."""
-        if admitted_scope.is_local_owner or admitted_scope.user_id is None or admitted_scope.project_id is None:
+        if admitted_scope.user_id is None or admitted_scope.project_id is None:
             return None
         user_id = admitted_scope.user_id
         project_id = admitted_scope.project_id
+        if admitted_scope.is_local_owner:
+            async def authorize_owner() -> None:
+                if self.collaboration is None or admitted_scope.project is None:
+                    raise CollaborationPermissionError("project authorization is unavailable")
+                current = await self.collaboration.get_project(
+                    user_id, project_id,
+                )
+                if current is None or (
+                    current.is_main != admitted_scope.project.is_main
+                    or current.workspace_path != admitted_scope.project.workspace_path
+                ):
+                    raise CollaborationPermissionError("project authority changed; start a new turn")
+            return authorize_owner
         metadata = session.metadata
         channel = metadata.get(_COLLABORATION_CHANNEL_METADATA_KEY)
         chat_id = metadata.get(_COLLABORATION_CHAT_METADATA_KEY)
@@ -1235,9 +1285,19 @@ class AgentLoop:
         collaboration_scope = self._conversation_scope_from_attributes(attributes)
         if collaboration_scope is not None:
             if collaboration_scope.workspace_path is not None:
+                project = collaboration_scope.project
+                if (
+                    collaboration_scope.is_local_owner and self.collaboration is not None
+                    and collaboration_scope.user_id is not None and collaboration_scope.project_id is not None
+                ):
+                    project = await self.collaboration.get_project(
+                        collaboration_scope.user_id, collaboration_scope.project_id,
+                    )
+                    if project is None:
+                        raise CollaborationPermissionError("project is no longer authorized")
                 return build_workspace_scope(
-                    collaboration_scope.workspace_path,
-                    "restricted",
+                    project.workspace_path if project is not None else collaboration_scope.workspace_path,
+                    "full" if collaboration_scope.is_local_owner and project is not None and project.is_main else "restricted",
                     source_channel=channel,
                 )
             if collaboration_scope.is_isolated:
@@ -1246,10 +1306,35 @@ class AgentLoop:
                     "restricted",
                     source_channel=channel,
                 )
-        return self.workspace_scopes.for_turn(
+        fallback = self.workspace_scopes.for_turn(
             channel=channel,
             message_metadata=message_metadata,
             session_metadata=session_metadata,
+        )
+        if self.collaboration is None or channel != "websocket":
+            return fallback
+        owner, _ = await self.collaboration.ensure_local_owner(self.workspace)
+        explicit_workspace = any(
+            metadata is not None and WORKSPACE_SCOPE_METADATA_KEY in metadata
+            for metadata in (message_metadata, session_metadata)
+        )
+        if explicit_workspace:
+            projects = await self.collaboration.list_all_projects(owner.id)
+            project = next((
+                item for item in projects
+                if Path(item.workspace_path).resolve(strict=False) == fallback.project_path
+            ), None)
+        else:
+            project = (
+                await self.collaboration.get_project(owner.id, owner.default_project_id)
+                if owner.default_project_id is not None else None
+            )
+        if project is None:
+            return fallback
+        return build_workspace_scope(
+            project.workspace_path,
+            "full" if project.is_main and fallback.access_mode == "full" else "restricted",
+            source_channel=channel,
         )
 
     async def _isolated_workspace_path(self, scope: ConversationScope) -> Path:

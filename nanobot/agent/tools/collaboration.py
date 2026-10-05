@@ -45,6 +45,7 @@ def _project_payload(project: Project) -> dict[str, object]:
         "id": project.id,
         "name": project.name,
         "workspace_path": project.workspace_path,
+        "is_main": project.is_main,
     }
 
 
