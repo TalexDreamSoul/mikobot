@@ -6,13 +6,13 @@ For this fork's tagged releases, see [GitHub Releases](https://github.com/TalexD
 
 ## Unreleased
 
-### 0.8.0 candidate
+### 0.8.0 — GG deployment, 2026-10-06
 
 - Full canonical upstream integration through `9dc0abae4f7e2b015c56881d4eb4f3500b15e529`, preserving Mikobot projects, private session provenance, member isolation and revocation-safe tools.
 - Desktop/mobile project creation and globally unique King authority, separate from active-project preference. Collaboration schema 13 upgrades to 14 without resetting records or changing preferences.
 - Exact WeChat instance deletion, first-click replacement QR login and independent confirmed project re-pairing; cancellation cannot lose to a blocked provider poll.
 - Safe member channel-health inspection and full persisted-history lookup retain their separate authorization boundaries. Owner Seatbelt support remains separate from mandatory Linux Bubblewrap for members.
-- GG rollout uses an exact uniquely versioned wheel, preserved dependencies and paired code/state rollback. No tag or hosted GitHub release is created by this candidate preparation.
+- GG runs the accepted exact platform wheel from commit `bb2ab8c4bf5d616dbe258a8ade03133d1f9e5b0c`; code/state rollback and dependencies are preserved. Production is ready with zero service restarts, 426 historical JSONL files retained, and schema 14. No tag or hosted GitHub release was created.
 
 
 
