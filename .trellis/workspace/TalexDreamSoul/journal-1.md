@@ -51,3 +51,26 @@ Released project-bound privacy and fail-closed member execution as v0.6.0, migra
 ### Status
 
 [OK] **Completed**
+
+
+## Session 3: Full upstream integration and verified GG 0.8.0
+<!-- trellis-session: v=2 fp=828cec41c2372994 -->
+
+**Date**: 2026-10-06
+**Task**: Full upstream integration and verified GG 0.8.0
+**Branch**: `main`
+
+### Summary
+
+Preserved project creation and King, integrated canonical upstream 9dc0abae, added exact WeChat delete/replace/re-pair controls with cancellable polling, passed full Python/WebUI/TUI gates, deployed exact licensed platform wheel to GG with stopped backup, schema14 and 426 JSONL retained, authenticated public UI and finite snapshot timer. Existing task archived; no tag or hosted release.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bb2ab8c4bf5d616dbe258a8ade03133d1f9e5b0c` | feat: integrate canonical upstream and release Mikobot 0.8.0 |
+| `5c9652815138f443970015c29283ef4c3e699366` | chore(release): record and archive verified GG 0.8.0 delivery |
+
+### Status
+
+[OK] **Completed**
