@@ -1377,10 +1377,13 @@ class GatewayHTTPHandler:
             return await self._handle_login_security(request, update=False)
         if got == "/api/settings" or got.startswith("/api/settings/"):
             setattr(request, _SETTINGS_HOST_ADMIN_ATTR, False)
-            try:
-                identity = await self._collaboration_identity(request)
-            except (CollaborationStoreError, ValueError):
-                identity = None
+            identity = None
+            # Resolving an identity persists a binding, so anonymous requests must not reach it.
+            if self.check_api_token(request):
+                try:
+                    identity = await self._collaboration_identity(request)
+                except (CollaborationStoreError, ValueError):
+                    identity = None
             if identity is not None:
                 user, _local_owner = identity
                 setattr(request, _SETTINGS_ACTOR_USER_ATTR, user.id)
@@ -3716,6 +3719,8 @@ class GatewayHTTPHandler:
     async def _handle_webui_skill_update(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
+        if not await self._is_system_admin(request):
+            return _http_error(403, "System administrator access is required")
         query = _request_query(request)
         name = _query_first(query, "name") or ""
         raw_enabled = (_query_first(query, "enabled") or "").lower()

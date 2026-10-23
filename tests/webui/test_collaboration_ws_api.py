@@ -1917,3 +1917,54 @@ async def test_loopback_member_cannot_access_host_ssh(tmp_path, auth):
     response = await handler.dispatch(connection, connection.request)
     assert response.status_code == 403
     assert response.body.decode() == "remote_connections_local_only"
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_settings_request_never_binds_an_identity(tmp_path) -> None:
+    """Resolving a settings identity persists a binding, so it needs a valid credential first."""
+    handler = await _handler(tmp_path)
+    seen: list[tuple[object, object]] = []
+
+    async def settings_dispatch(_connection, request, _path):
+        seen.append((
+            getattr(request, "_nanobot_settings_actor_user_id", None),
+            getattr(request, "_nanobot_settings_host_admin", None),
+        ))
+        return http_json_response({})
+
+    handler.settings_routes = SimpleNamespace(
+        dispatch=settings_dispatch,
+        is_mutation_path=lambda _path: False,
+    )
+
+    anonymous = _connection(_request("/api/settings?client_id=squatter", {}))
+    await handler.dispatch(anonymous, anonymous.request)
+
+    assert seen == [(None, False)]
+    assert await handler.collaboration.resolve_identity("websocket", "squatter") is None
+
+    owner = _local_connection("/api/settings?client_id=owner-browser")
+    await handler.dispatch(owner, owner.request)
+
+    actor_user_id, host_admin = seen[1]
+    assert isinstance(actor_user_id, str) and actor_user_id.strip()
+    assert host_admin is True
+    assert await handler.collaboration.resolve_identity("websocket", "owner-browser") is not None
+
+
+@pytest.mark.asyncio
+async def test_skill_toggle_is_a_system_administrator_action(tmp_path) -> None:
+    """Enabling or disabling a skill changes the host's configuration, not the member's own."""
+    handler = await _handler(tmp_path)
+    payload = {"name": "demo", "enabled": "maybe"}
+
+    member = await handler.dispatch_webui_mutation(
+        _proxy_connection("ordinary-member"), "skill.update", payload
+    )
+    owner = await handler.dispatch_webui_mutation(_local_connection(), "skill.update", payload)
+
+    assert member.status_code == 403
+    assert member.body.decode() == "System administrator access is required"
+    # The owner gets past the gate and is only stopped by the deliberately invalid value.
+    assert owner.status_code == 400
+    assert owner.body.decode() == "enabled must be true or false"
