@@ -73,6 +73,7 @@ from nanobot.collaboration import (
     COLLABORATION_USER_METADATA_KEY,
     CollaborationPermissionError,
     CollaborationRepository,
+    CollaborationStoreError,
     ConversationScope,
     private_memory_root_for_scope,
 )
@@ -1391,6 +1392,31 @@ class AgentLoop:
             content="",
             session_key_override=session.key,
         ))
+
+    async def is_host_conversation(
+        self, msg: InboundMessage, *, allow_admin: bool = False
+    ) -> bool:
+        """Whether a command carries the host's own authority.
+
+        Only the host owner qualifies, plus system administrators when
+        ``allow_admin`` is set. Anything unresolved fails closed.
+        """
+        if self.collaboration is None or self._is_local_owner(msg):
+            return True
+        try:
+            scope = await self._conversation_scope_for_message(msg)
+            if scope is None:
+                return self._is_runtime_sender(msg)
+            if scope.is_local_owner:
+                return True
+            if not allow_admin or scope.user is None:
+                return False
+            if scope.user.is_admin:
+                return True
+            owner, _ = await self.collaboration.ensure_local_owner(self.workspace)
+        except (CollaborationStoreError, ValueError):
+            return False
+        return scope.user.id == owner.id
 
     async def _authorize_consolidation(self, session: Session) -> None:
         scope = await self.collaboration_scope_for_session(session)

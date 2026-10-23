@@ -15,7 +15,7 @@ from loguru import logger
 
 from nanobot import __version__
 from nanobot.bus.events import INBOUND_META_USER_SHELL, InboundMessage, OutboundMessage
-from nanobot.command.router import CommandContext, CommandRouter, normalize_command_text
+from nanobot.command.router import CommandContext, CommandRouter, Handler, normalize_command_text
 from nanobot.providers.base import LLMUsage
 from nanobot.session.history_visibility import HIDDEN_HISTORY_META
 from nanobot.session.keys import UNIFIED_SESSION_KEY
@@ -1107,10 +1107,30 @@ def build_help_text() -> str:
     return "\n".join(lines)
 
 
+def _host_only(handler: Handler, *, allow_admin: bool = False) -> Handler:
+    """Run a command that acts on the host itself only for the host's own principals."""
+
+    async def guarded(ctx: CommandContext) -> InboundMessage | OutboundMessage | None:
+        if await ctx.loop.is_host_conversation(ctx.msg, allow_admin=allow_admin):
+            return await handler(ctx)
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=(
+                "This command requires system administrator access."
+                if allow_admin
+                else "This command is only available to the host owner."
+            ),
+            metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
+        )
+
+    return guarded
+
+
 def register_builtin_commands(router: CommandRouter) -> None:
     """Register the default set of slash commands."""
     router.priority("/stop", cmd_stop)
-    router.priority("/restart", cmd_restart)
+    router.priority("/restart", _host_only(cmd_restart, allow_admin=True))
     router.priority("/status", cmd_status)
     router.exact("/new", cmd_new)
     router.exact("/compact", cmd_compact, session_queue=True)
@@ -1124,14 +1144,18 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/trigger", cmd_trigger)
     router.prefix("/trigger ", cmd_trigger)
     router.exact("/dream", cmd_dream)
-    router.exact("/dream-log", cmd_dream_log)
-    router.prefix("/dream-log ", cmd_dream_log)
-    router.exact("/dream-restore", cmd_dream_restore)
-    router.prefix("/dream-restore ", cmd_dream_restore)
-    router.exact("/dream-prompt", cmd_dream_prompt)
-    router.prefix("/dream-prompt ", cmd_dream_prompt)
-    router.exact("/evaluator-prompt", cmd_evaluator_prompt)
-    router.prefix("/evaluator-prompt ", cmd_evaluator_prompt)
+    host_dream_log = _host_only(cmd_dream_log)
+    router.exact("/dream-log", host_dream_log)
+    router.prefix("/dream-log ", host_dream_log)
+    host_dream_restore = _host_only(cmd_dream_restore)
+    router.exact("/dream-restore", host_dream_restore)
+    router.prefix("/dream-restore ", host_dream_restore)
+    host_dream_prompt = _host_only(cmd_dream_prompt)
+    router.exact("/dream-prompt", host_dream_prompt)
+    router.prefix("/dream-prompt ", host_dream_prompt)
+    host_evaluator_prompt = _host_only(cmd_evaluator_prompt)
+    router.exact("/evaluator-prompt", host_evaluator_prompt)
+    router.prefix("/evaluator-prompt ", host_evaluator_prompt)
     router.exact("/skill", cmd_skill)
     router.exact("/help", cmd_help)
     router.exact("/pairing", cmd_pairing)
