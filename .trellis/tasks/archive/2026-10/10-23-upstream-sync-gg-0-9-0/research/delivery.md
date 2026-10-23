@@ -37,3 +37,4 @@
 - Existing operational issues observed on GG and not changed here: the e-mail channel fails to start without `trusted_authserv_ids`, and the default WeChat login and one project instance need QR re-pairing.
 - The two session-access maintenance scripts still read the JSONL layout; their test module is skipped (see the PRD).
 - The JSONL importer is available through 0.9.x and is removed in upstream 1.0.0, so every deployment must have imported its JSONL sessions before this fork syncs 1.0.0 or later.
+- GG runs the wheel built from `628bb8ac`. The later commit `764c4a11` keeps member, OIDC and trusted-proxy WebUI turns out of the host's shared `unified:default` session; it is not deployed. GG has `unifiedSession` off, so the gap is not reachable there.
