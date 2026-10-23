@@ -322,7 +322,8 @@ def test_revision_ignores_endpoint_proxy_and_header_configuration(tmp_path: Path
     config.providers.openai.api_key = "sk-live"
     baseline = _packages(config)["openai"].revision
     config.providers.openai.api_base = "https://relay.invalid/v1"
-    config.providers.openai.proxy = "http://proxy.invalid:8080"
+    config.network.proxy = "http://proxy.invalid:8080"
+    config.providers.openai.use_proxy = True
     config.providers.openai.extra_headers = {"X-Tenant": "acme"}
 
     assert _packages(config)["openai"].revision == baseline
@@ -342,7 +343,8 @@ def test_descriptors_carry_no_secret_endpoint_or_path(tmp_path: Path) -> None:
     config = _config(tmp_path)
     config.providers.openai.api_key = secrets[0]
     config.providers.openai.api_base = secrets[1]
-    config.providers.openai.proxy = secrets[2]
+    config.network.proxy = secrets[2]
+    config.providers.openai.use_proxy = True
     config.providers.openai.extra_headers = {"X-Tenant": secrets[3]}
     config.providers.bedrock.region = secrets[5]
     config.providers.bedrock.profile = secrets[6]

@@ -22,7 +22,8 @@ from nanobot.channels.websocket.runtime import (
     WebSocketConfig,
 )
 from nanobot.collaboration import AsyncLocalCollaborationRepository, CollaborationStore
-from nanobot.config.schema import Config, _resolve_tool_config_refs
+from nanobot.config.schema import Config
+from nanobot.runtime_admission import RuntimeAdmission
 from nanobot.webui.gateway_endpoint import WebUIGatewayEndpoint
 from nanobot.webui.gateway_tokens import GatewayTokenStore
 from nanobot.webui.http_utils import http_json_response
@@ -33,10 +34,6 @@ from nanobot.webui.ws_http import GatewayHTTPHandler
 _ISSUER = "https://issuer.example"
 _CLIENT_ID = "webui-client"
 _REDIRECT_URI = "https://agent.example/auth/oidc/callback"
-
-# Config may be imported during a circular tool-config import; resolve its
-# forward references after all test dependencies have loaded.
-_resolve_tool_config_refs()
 
 
 def _config(**overrides: object) -> OidcAuthConfig:
@@ -221,6 +218,7 @@ async def _http_handler(tmp_path, authenticator: OidcAuthenticator) -> GatewayHT
     handler.skills_workspace_path = tmp_path / "workspace"
     handler.tokens = GatewayTokenStore()
     handler.ingress = WebUIIngressPolicy()
+    handler.bus = SimpleNamespace(admission=RuntimeAdmission())
     handler.runtime_model_name = None
     handler.settings = SimpleNamespace(config=SimpleNamespace(path=None))
     handler._runtime_surface = "native"

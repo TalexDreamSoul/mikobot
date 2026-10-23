@@ -12,11 +12,13 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.collaboration.pairing import CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY
+from nanobot.config.network import NetworkConfig
 from nanobot.pairing import (
     PAIRING_CODE_META_KEY,
     format_pairing_reply,
     generate_code,
     is_approved,
+    record_delivery,
 )
 
 
@@ -30,14 +32,19 @@ class BaseChannel(ABC):
 
     name: str = "base"
     display_name: str = "Base"
+    # Opt-in construction capability, not a channel configuration field.
+    uses_shared_proxy: bool = False
     send_progress: bool = True
     send_tool_hints: bool = True
     show_reasoning: bool = True
     show_compaction_notices: bool = False
 
-    def __init__(self, config: Any, bus: MessageBus):
+    def __init__(
+        self, config: Any, bus: MessageBus, *, network: NetworkConfig | None = None,
+    ):
         """Initialize channel configuration, transport, and optional assignment pairing."""
         self.config = config
+        self.network = network if network is not None else NetworkConfig()
         self.logger = logger.bind(channel=self.name)
         self.bus = bus
         self.assignment_pairing_handler: (
@@ -105,8 +112,22 @@ class BaseChannel(ABC):
 
         Implementations should raise on delivery failure so the channel manager
         can apply any retry policy in one place.
+        Raise ChannelNotReadyError only before submitting any part of a message.
+        Raise DeliveryRejectedError for a rejected destination or policy.
+        Other exceptions have an unknown delivery outcome for scheduled results.
+        A normal return confirms this adapter completed, not a recipient read receipt.
         """
         pass
+
+    @property
+    def has_pending_delivery(self) -> bool:
+        """Whether delivery outlives an awaited ``send``/streaming call.
+
+        The manager already accounts for awaited sends and retries. Channels
+        that enqueue their own writes must expose that work here, including
+        transport cleanup, before a gateway can be considered idle.
+        """
+        return False
 
     def progress_transport_defaults(self) -> tuple[bool, bool] | None:
         """Return channel-owned defaults for progress and tool-hint messages.
@@ -319,6 +340,7 @@ class BaseChannel(ABC):
         is_dm: bool = False,
         authorization_id: str | None = None,
         require_existing_session: bool = False,
+        session_generation: str | None = None,
     ) -> None:
         """Handle a message after checking its authorization subject.
 
@@ -355,14 +377,20 @@ class BaseChannel(ABC):
                         "Pairing store unavailable; dropping DM from {}", sender_id
                     )
                     return
-                await self.send(
-                    OutboundMessage(
-                        channel=self.name,
-                        chat_id=str(chat_id),
-                        content=format_pairing_reply(code),
-                        metadata={PAIRING_CODE_META_KEY: code},
+                record_delivery(code, "sending")
+                try:
+                    await self.send(
+                        OutboundMessage(
+                            channel=self.name,
+                            chat_id=str(chat_id),
+                            content=format_pairing_reply(code),
+                            metadata={PAIRING_CODE_META_KEY: code},
+                        )
                     )
-                )
+                except Exception:
+                    record_delivery(code, "failed")
+                    raise
+                record_delivery(code, "sent")
                 self.logger.info(
                     "Sent pairing code {} to sender {} in chat {}",
                     code, sender_id, chat_id,
@@ -391,6 +419,7 @@ class BaseChannel(ABC):
             media=media or [],
             metadata=meta,
             session_key_override=session_key,
+            session_generation=session_generation,
             require_existing_session=require_existing_session,
         )
 

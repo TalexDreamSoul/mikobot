@@ -152,6 +152,7 @@ diagnostics, never the process-isolation mechanism.
 **WhatsApp:**
 - Keep the neonize session database under `~/.nanobot/whatsapp-auth` secure (mode 0700).
 - Use `nanobot channels login whatsapp --force` to remove and recreate the local session database when rotating linked devices.
+- The separate `whatsapp_agent` channel authenticates with a per-agent API token. Treat it as a secret, prefer `${WA_AGENT_TOKEN}` over a literal value in `config.json`, and regenerate it in WhatsApp when it may have leaked. Its poll cursor holds no token material.
 
 ### 6. Dependency Security
 

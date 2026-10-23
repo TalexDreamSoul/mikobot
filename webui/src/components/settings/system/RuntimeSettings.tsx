@@ -123,7 +123,7 @@ export function RuntimeSettings({
       {
         host: apiHost,
         port: apiPort,
-        timeout: apiDefaults.timeout,
+        timeout: settings.api?.timeout ?? apiDefaults.timeout,
         apiKey: apiKey.trim() || undefined,
       },
       {

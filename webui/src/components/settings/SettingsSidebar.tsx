@@ -1,22 +1,16 @@
+import {
+  OverviewIcon,
+  AboutIcon,
+  RestartIcon,
+  CapabilitiesIcon,
+  AppearanceIcon,
+  SystemIcon,
+  AdvancedIcon,
+  ModelsIcon,
+} from "@/components/icons/product-icons";
 import { useContext, useRef, useState } from "react";
 import { HostNavigationContext, HostSwitcher } from "@/components/remote/HostSwitcher";
-import {
-  Activity,
-  Info,
-  KeyRound,
-  Check,
-  ChevronDown,
-  ChevronLeft,
-  LogOut,
-  Loader2,
-  RotateCcw,
-  Blocks,
-  Palette,
-  Server,
-  ShieldCheck,
-  SlidersHorizontal,
-  type LucideIcon,
-} from "lucide-react";
+import { Bell, Blocks, Check, ChevronDown, ChevronLeft, KeyRound, LogOut, Loader2, type LucideIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -36,16 +30,24 @@ import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { cn } from "@/lib/utils";
 
 const SETTINGS_NAV_ITEMS: Array<{ key: SettingsSectionKey; icon: LucideIcon; fallback: string }> = [
-  { key: "overview", icon: Activity, fallback: "Overview" },
-  { key: "appearance", icon: Palette, fallback: "Appearance" },
-  { key: "models", icon: SlidersHorizontal, fallback: "Models" },
+  { key: "overview", icon: OverviewIcon, fallback: "Overview" },
+  { key: "appearance", icon: AppearanceIcon, fallback: "Appearance" },
+  { key: "notifications", icon: Bell, fallback: "Notifications" },
+  { key: "models", icon: ModelsIcon, fallback: "Models" },
   { key: "login-security", icon: KeyRound, fallback: "Login & Security" },
-  { key: "capabilities", icon: Blocks, fallback: "Capabilities" },
+  { key: "capabilities", icon: CapabilitiesIcon, fallback: "Capabilities" },
   { key: "extensions", icon: Blocks, fallback: "Extensions" },
-  { key: "runtime", icon: Server, fallback: "System" },
-  { key: "advanced", icon: ShieldCheck, fallback: "Advanced" },
-  { key: "about", icon: Info, fallback: "About" },
+  { key: "runtime", icon: SystemIcon, fallback: "System" },
+  { key: "advanced", icon: AdvancedIcon, fallback: "Advanced" },
+  { key: "about", icon: AboutIcon, fallback: "About" },
 ];
+
+// Members only reach preferences that stay in this browser.
+function visibleNavItems(isAdmin: boolean) {
+  return isAdmin
+    ? SETTINGS_NAV_ITEMS
+    : SETTINGS_NAV_ITEMS.filter((item) => item.key === "appearance" || item.key === "notifications");
+}
 
 export function standaloneSectionTitle(section: SettingsSectionKey): string {
   if (section === "apps") return "Apps";
@@ -88,7 +90,7 @@ export function SettingsSidebar(props: SettingsSidebarProps) {
     : t("app.system.restartAction");
   const navSection = isCapabilitySection(activeSection) ? "capabilities" : activeSection;
   const activeNavItemRef = useRef<HTMLButtonElement>(null);
-  const navItems = props.isAdmin ? SETTINGS_NAV_ITEMS : SETTINGS_NAV_ITEMS.filter((item) => item.key === "appearance");
+  const navItems = visibleNavItems(props.isAdmin);
   const activeItem = navItems.find((item) => item.key === navSection) ?? navItems[0];
   const activeLabel = t(`settings.nav.${activeItem.key}`, {
     defaultValue: activeItem.fallback,
@@ -111,7 +113,7 @@ export function SettingsSidebar(props: SettingsSidebarProps) {
         onClick={onBackToChat}
         aria-label={t("settings.backToChat")}
         className={cn(
-          "touch-target mb-2 inline-flex h-9 w-9 items-center justify-center rounded-full text-[13px] leading-5 font-normal text-sidebar-content transition-colors settings-hover hover:text-foreground lg:mb-3",
+          "touch-target mb-2 inline-flex h-9 w-9 items-center justify-center rounded-xl text-ui text-sidebar-content transition-colors duration-150 motion-reduce:transition-none focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-ring hover:text-foreground lg:mb-3",
           hostChromeInset && "-ml-1",
         )}
       >
@@ -139,7 +141,7 @@ export function SettingsSidebar(props: SettingsSidebarProps) {
                 aria-current={active ? "page" : undefined}
                 onClick={() => onSelectSection(key)}
                 className={cn(
-                  "touch-target flex h-9 w-full items-center gap-2 rounded-xl px-2.5 text-left text-[13px] leading-5 font-normal",
+                  "touch-target flex h-9 w-full items-center gap-2 rounded-xl px-2.5 text-left text-ui",
                   SIDEBAR_SELECTION_ITEM_CLASS,
                   active
                     ? "text-sidebar-accent-foreground"
@@ -170,13 +172,13 @@ export function SettingsSidebar(props: SettingsSidebarProps) {
               onClick={onRestart}
               disabled={isRestarting}
               aria-describedby={restartPending ? "settings-restart-status" : undefined}
-              className={cn("h-9 w-full justify-start gap-2 rounded-control px-2.5 text-[13px] leading-5 font-normal settings-hover",
+              className={cn("h-9 w-full justify-start gap-2 rounded-control px-2.5 text-ui settings-hover",
                 restartPending && !isRestarting
                   ? "settings-restart-pending text-orange-600 hover:text-orange-700 dark:text-orange-400 dark:hover:text-orange-300"
                   : "text-sidebar-content hover:text-foreground")}
             >
               {isRestarting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                : <RotateCcw className="h-4 w-4" aria-hidden />}
+                : <RestartIcon className="h-4 w-4" aria-hidden />}
               <span>{restartLabel}</span>
             </Button>
           </div>
@@ -186,7 +188,7 @@ export function SettingsSidebar(props: SettingsSidebarProps) {
             type="button"
             variant="ghost"
             onClick={onLogout}
-            className="hidden h-9 w-full justify-start gap-2 rounded-control px-2.5 text-[13px] leading-5 font-normal text-sidebar-content hover:bg-destructive/8 hover:text-destructive lg:flex"
+            className="hidden h-9 w-full justify-start gap-2 rounded-control px-2.5 text-ui text-sidebar-content hover:bg-destructive/8 hover:text-destructive lg:flex"
           >
             <LogOut className="h-4 w-4" aria-hidden />
             <span>{t("app.account.logout")}</span>
@@ -223,7 +225,7 @@ function MobileSettingsNavigation({
     ? "text-orange-600 hover:text-orange-700 dark:text-orange-400 dark:hover:text-orange-300"
     : "text-muted-foreground hover:text-foreground";
   const restartIcon = isRestarting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-    : <RotateCcw className="h-4 w-4" aria-hidden />;
+    : <RestartIcon className="h-4 w-4" aria-hidden />;
   const restartAction = onRestart ? (
     <Button type="button" variant="ghost" disabled={isRestarting}
       onClick={restart}
@@ -239,9 +241,9 @@ function MobileSettingsNavigation({
       hostChromeInset ? "pt-10" : "pt-[env(safe-area-inset-top)]")}
     >
       <div className="grid h-14 grid-cols-[2.75rem_minmax(0,1fr)_2.75rem] items-center px-3">
-        <Button type="button" variant="ghost" onClick={onBackToChat}
+        <Button size="icon" type="button" variant="ghost" onClick={onBackToChat}
           aria-label={t("settings.backToChat")}
-          className="h-11 w-11 rounded-full p-0 text-sidebar-content"
+          className="h-11 w-11 rounded-xl p-0 text-sidebar-content"
         >
           <ChevronLeft className="h-5 w-5" aria-hidden />
         </Button>
@@ -259,7 +261,7 @@ function MobileSettingsNavigation({
             aria-label={t("settings.sidebar.ariaLabel")} aria-labelledby={undefined}
             className="w-60 max-w-[calc(100vw-1.5rem)] data-[state=open]:slide-in-from-top-1 data-[state=closed]:slide-out-to-top-1 data-[state=open]:duration-150 data-[state=closed]:duration-100 motion-reduce:data-[state=open]:animate-none motion-reduce:data-[state=closed]:animate-none"
           >
-            {(isAdmin ? SETTINGS_NAV_ITEMS : SETTINGS_NAV_ITEMS.filter((item) => item.key === "appearance")).map(({ key, icon: Icon, fallback }) => {
+            {visibleNavItems(isAdmin).map(({ key, icon: Icon, fallback }) => {
               const active = key === navSection;
               return (
                 <DropdownMenuItem key={key}

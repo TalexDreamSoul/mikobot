@@ -1,49 +1,33 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, Loader2, Plus } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { channelFieldMessageKey, channelTranslator } from "@/channel-plugins/i18n";
-import { channelLocaleMessages } from "@/channel-plugins/locale-registry";
+import { channelTranslator } from "@/channel-plugins/i18n";
 import type { ChannelPluginPanelProps } from "@/channel-plugins/types";
 import {
-  type ChannelConfigField,
-} from "@/components/settings/channels/catalog";
-import {
-  CredentialForm,
   channelValuesForSave,
   defaultChannelFieldValues,
 } from "@/components/settings/channels/CredentialForm";
 import { NanobotFeatureInstallDialog } from "@/components/settings/shared/SettingsControls";
-import { ToggleButton } from "@/components/settings/ToggleButton";
-import { WeixinInstanceControls } from "./WeixinInstanceControls";
-import {
-  CHANNEL_SETUP_PANEL_CLASS_NAME,
-  ChannelLogo,
-} from "@/components/settings/channels/ChannelIdentity";
 import { Button } from "@/components/ui/button";
-import { DisclosureContent } from "@/components/ui/disclosure";
-import { normalizeLocale } from "@/i18n/config";
+import { ToggleButton } from "@/components/ui/toggle-button";
 import {
   configureChannel,
   disableNanobotFeature,
   enableNanobotFeature,
 } from "@/lib/api";
-import type {
-  ChannelSetupContractField,
-  NanobotChannelInstanceInfo,
-  NanobotFeatureInfo,
-} from "@/lib/types";
+import type { NanobotChannelInstanceInfo } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useClient } from "@/providers/ClientProvider";
 
+import { WeixinConnectFlow } from "./WeixinConnectFlow";
+import { WeixinInstanceControls } from "./WeixinInstanceControls";
+import { WeixinPanelView } from "./WeixinPanelView";
 import {
   WEIXIN_AUTH_EXPIRED_MESSAGE,
-  WeixinConnectFlow,
-} from "./WeixinConnectFlow";
-import {
-  WEIXIN_ADVANCED_FIELD_KEYS,
-  WEIXIN_PRIMARY_FIELD_KEYS,
-  WEIXIN_QR_TOKEN_FIELD_KEY,
+  localizeBooleanFields,
+  weixinRuntimeError,
+  weixinSetupFields,
 } from "./presentation";
 
 type WeixinSaveContext = {
@@ -79,12 +63,6 @@ export function WeixinPanel({
   const [authRecoveryActive, setAuthRecoveryActive] = useState(authExpired);
   const runtimeError = weixinRuntimeError(feature.runtime_error, channelTx)
     ?? (authRecoveryActive ? channelTx("custom.expired", WEIXIN_AUTH_EXPIRED_MESSAGE) : undefined);
-  const displayName = channelTx("displayName", "WeChat");
-  const enabledBusy = actionKey === `enable:${feature.name}`;
-  const missingSupport = feature.enabled && !feature.installed;
-  const [visibleSecrets, setVisibleSecrets] = useState<Record<string, boolean>>({});
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const advancedPanelId = useId();
   const [touchedFields, setTouchedFields] = useState<Set<string>>(() => new Set());
   const [saving, setSaving] = useState(false);
   const [saveRevision, setSaveRevision] = useState(0);
@@ -150,7 +128,6 @@ export function WeixinPanel({
     }
     fieldValuesRef.current = nextValues;
     setFieldValues(nextValues);
-    setVisibleSecrets({});
   }, [configValuesKey, setupFieldsKey]);
 
   useEffect(() => {
@@ -264,81 +241,49 @@ export function WeixinPanel({
     }
   };
   return (
-    <aside className={CHANNEL_SETUP_PANEL_CLASS_NAME}>
-      <NanobotFeatureInstallDialog feature={installConfirmInstance ? feature : null} installing={busyInstanceId !== null}
-        onOpenChange={(open) => { if (!open) setInstallConfirmInstance(null); }}
-        onConfirm={() => { const instance = installConfirmInstance; setInstallConfirmInstance(null); if (instance) void toggleInstance(instance, true, true); }} />
-      <NanobotFeatureInstallDialog feature={installConfirmSave ? feature : null} installing={saving}
-        onOpenChange={(open) => { if (!open) { pendingSaveRef.current = null; setInstallConfirmSave(false); } }}
-        onConfirm={() => { const pending = pendingSaveRef.current; pendingSaveRef.current = null; setInstallConfirmSave(false); if (pending) void saveSettings(pending.values, pending.savedFields, true, pending.context); }} />
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pe-20">
-        <div className="flex min-w-0 max-w-full items-center gap-3">
-          <ChannelLogo feature={feature} showBrandLogos={showBrandLogos} />
-          <h3 className="sr-only">{displayName}</h3>
-          {missingSupport && feature.install_supported ? (
+    <WeixinPanelView
+      feature={feature}
+      actionKey={actionKey}
+      showBrandLogos={showBrandLogos}
+      primaryFields={primaryFields}
+      advancedFields={advancedFields}
+      fieldValues={fieldValues}
+      configuredFields={configuredFields}
+      secretVisibilityKey={`${configValuesKey}:${setupFieldsKey}`}
+      runtimeError={runtimeError}
+      saving={saving}
+      saveState={saveState}
+      saveError={saveError}
+      connectFlow={<>
+        <NanobotFeatureInstallDialog feature={installConfirmInstance ? feature : null} installing={busyInstanceId !== null}
+          onOpenChange={(open) => { if (!open) setInstallConfirmInstance(null); }}
+          onConfirm={() => { const instance = installConfirmInstance; setInstallConfirmInstance(null); if (instance) void toggleInstance(instance, true, true); }} />
+        <NanobotFeatureInstallDialog feature={installConfirmSave ? feature : null} installing={saving}
+          onOpenChange={(open) => { if (!open) { pendingSaveRef.current = null; setInstallConfirmSave(false); } }}
+          onConfirm={() => { const pending = pendingSaveRef.current; pendingSaveRef.current = null; setInstallConfirmSave(false); if (pending) void saveSettings(pending.values, pending.savedFields, true, pending.context); }} />
+        {defaultPairingOnly ? (
+          <div className="rounded-control border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-[12px] text-amber-900 dark:text-amber-100">
+            <p className="font-semibold">
+              {tx("settings.channels.pairingRequiredTitle", "Connected — bot assignment required")}
+            </p>
+            <p className="mt-1 leading-5">
+              {tx(
+                "settings.channels.pairingRequiredDescription",
+                "Assign instance {{instance}} to a bot with a one-time Pair Code before it can receive messages.",
+              ).replace("{{instance}}", defaultInstance?.id || "default")}
+            </p>
             <Button
               type="button"
               size="sm"
-              variant="secondary"
-              disabled={enabledBusy}
-              onClick={() => onAction("enable", feature.name)}
-              className="h-8 rounded-full px-3 text-[12px] font-semibold"
+              variant="outline"
+              className="mt-3 h-8 rounded-full px-3 text-[12px] font-semibold"
+              onClick={() => { window.location.hash = "#/projects?section=bots"; }}
             >
-              {enabledBusy ? (
-                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
-              ) : (
-                <Plus className="mr-1.5 h-3.5 w-3.5" aria-hidden />
-              )}
-              {tx("settings.nanobotFeatures.installSupport", "Install support")}
+              {tx("settings.channels.manageBots", "Open bot management")}
             </Button>
-          ) : null}
-        </div>
-        {advancedFields.length ? (
-          <button
-            type="button"
-            className="ms-auto inline-flex min-h-8 items-center gap-1.5 rounded px-1 text-[12px] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-offset-2"
-            aria-expanded={advancedOpen}
-            aria-controls={advancedPanelId}
-            onClick={() => setAdvancedOpen((current) => !current)}
-          >
-            {tx("settings.channels.advanced", "Advanced")}
-            <ChevronDown className={cn(
-              "h-3.5 w-3.5 transition-transform motion-reduce:transition-none",
-              advancedOpen && "rotate-180",
-            )} aria-hidden />
-          </button>
+          </div>
         ) : null}
-      </div>
 
-      {runtimeError ? (
-        <div className="mt-4 rounded-control border border-destructive/20 bg-destructive/5 px-3 py-2 text-[12px] leading-5 text-destructive">
-          {runtimeError}
-        </div>
-      ) : null}
-      {defaultPairingOnly ? (
-        <div className="mt-4 rounded-control border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-[12px] text-amber-900 dark:text-amber-100">
-          <p className="font-semibold">
-            {tx("settings.channels.pairingRequiredTitle", "Connected — bot assignment required")}
-          </p>
-          <p className="mt-1 leading-5">
-            {tx(
-              "settings.channels.pairingRequiredDescription",
-              "Assign instance {{instance}} to a bot with a one-time Pair Code before it can receive messages.",
-            ).replace("{{instance}}", defaultInstance?.id || "default")}
-          </p>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="mt-3 h-8 rounded-full px-3 text-[12px] font-semibold"
-            onClick={() => { window.location.hash = "#/projects?section=bots"; }}
-          >
-            {tx("settings.channels.manageBots", "Open bot management")}
-          </Button>
-        </div>
-      ) : null}
-
-      <div className="mt-4 space-y-4">
         {defaultInstance ? (
         <WeixinConnectFlow
           token={token}
@@ -416,158 +361,9 @@ export function WeixinPanel({
           mode="create"
           onFeaturesUpdate={onFeaturesUpdate}
         />
-
-        {primaryFields.length ? (
-          <CredentialForm
-            fields={primaryFields}
-            values={fieldValues}
-            configuredFields={configuredFields}
-            visibleSecrets={visibleSecrets}
-            onChange={setFieldValue}
-            onToggleSecret={(key) => {
-              setVisibleSecrets((current) => ({ ...current, [key]: !current[key] }));
-            }}
-            compact
-          />
-        ) : null}
-
-        <div
-          role="status"
-          aria-live="polite"
-          aria-atomic="true"
-          className={cn(
-            "flex items-center justify-end gap-1.5 text-[11px] leading-4 text-muted-foreground",
-            !saving && saveState !== "saved" && "sr-only",
-          )}
-        >
-          {saving ? (
-            <>
-              <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
-              {tx("settings.actions.saving", "Saving")}
-            </>
-          ) : saveState === "saved" ? (
-            <>
-              <Check className="h-3 w-3" aria-hidden />
-              {tx("settings.channels.savedSettings", "Saved settings.")}
-            </>
-          ) : null}
-        </div>
-
-        {saveError ? (
-          <div
-            role="alert"
-            className="rounded-control border border-destructive/20 bg-destructive/5 px-3 py-2 text-[12px] leading-5 text-destructive"
-          >
-            {saveError}
-          </div>
-        ) : null}
-
-        {advancedFields.length ? (
-          <DisclosureContent id={advancedPanelId} open={advancedOpen} className="text-[12px] leading-5 text-muted-foreground">
-            <CredentialForm
-              fields={advancedFields}
-              values={fieldValues}
-              configuredFields={configuredFields}
-              visibleSecrets={visibleSecrets}
-              onChange={setFieldValue}
-              onToggleSecret={(key) => {
-                setVisibleSecrets((current) => ({ ...current, [key]: !current[key] }));
-              }}
-              compact
-            />
-          </DisclosureContent>
-        ) : null}
-
-      </div>
-    </aside>
+      </>}
+      onInstall={() => onAction("enable", feature.name)}
+      onFieldChange={setFieldValue}
+    />
   );
-}
-
-function weixinSetupFields(
-  feature: NanobotFeatureInfo,
-  locale: string,
-): { primary: ChannelConfigField[]; advanced: ChannelConfigField[] } {
-  const fields = (feature.setup?.fields ?? []).filter(
-    (field) => field.key !== WEIXIN_QR_TOKEN_FIELD_KEY,
-  );
-  const fieldsByKey = new Map(fields.map((field) => [field.key, field]));
-  const messages = channelLocaleMessages("weixin", normalizeLocale(locale))?.setup;
-  const knownKeys = new Set<string>([
-    ...WEIXIN_PRIMARY_FIELD_KEYS,
-    ...WEIXIN_ADVANCED_FIELD_KEYS,
-  ]);
-  const extraKeys = fields
-    .map((field) => field.key)
-    .filter((key) => !knownKeys.has(key));
-  const hydrate = (keys: readonly string[]) => keys.flatMap((key) => {
-    const field = fieldsByKey.get(key);
-    if (!field) return [];
-    const copy = messages?.fields?.[channelFieldMessageKey("weixin", key)];
-    return [weixinConfigField(field, copy)];
-  });
-
-  return {
-    primary: hydrate(WEIXIN_PRIMARY_FIELD_KEYS),
-    advanced: hydrate([...WEIXIN_ADVANCED_FIELD_KEYS, ...extraKeys]),
-  };
-}
-
-function weixinConfigField(
-  field: ChannelSetupContractField,
-  copy: { label: string; placeholder?: string; choices?: Record<string, string> }
-    | undefined,
-): ChannelConfigField {
-  const choices = field.kind === "bool" ? ["true", "false"] : field.choices;
-  return {
-    key: field.key,
-    label: copy?.label ?? fieldLabel(field.field),
-    placeholder: copy?.placeholder,
-    secret: field.kind === "secret",
-    optional: !field.required,
-    inputType: field.kind === "int" ? "number" : undefined,
-    defaultValue: field.default_value,
-    options:
-      field.kind === "enum" || field.kind === "bool"
-        ? choices.map((choice) => ({
-            value: choice,
-            label: copy?.choices?.[choice] ?? fieldLabel(choice),
-          }))
-        : undefined,
-  };
-}
-
-function fieldLabel(value: string): string {
-  const spaced = value
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/[_-]+/g, " ")
-    .trim();
-  return spaced ? spaced[0].toUpperCase() + spaced.slice(1) : value;
-}
-
-function weixinRuntimeError(
-  error: string | undefined,
-  tx: (key: string, fallback: string) => string,
-): string | undefined {
-  if (error === WEIXIN_AUTH_EXPIRED_MESSAGE) {
-    return tx("custom.expired", error);
-  }
-  return error;
-}
-
-function localizeBooleanFields(
-  fields: ChannelConfigField[],
-  onLabel: string,
-  offLabel: string,
-): ChannelConfigField[] {
-  return fields.map((field) => {
-    const values = new Set(field.options?.map((option) => option.value));
-    if (values.size !== 2 || !values.has("true") || !values.has("false")) return field;
-    return {
-      ...field,
-      options: field.options?.map((option) => ({
-        ...option,
-        label: option.value === "true" ? onLabel : offLabel,
-      })),
-    };
-  });
 }

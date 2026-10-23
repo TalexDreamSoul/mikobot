@@ -4,15 +4,18 @@ import { fetchSkills } from "@/lib/api";
 import { isSkillsPayload, SKILLS_CHANGED_EVENT, SKILLS_REFRESH_EVENT } from "@/lib/skill-events";
 import type { SkillSummary } from "@/lib/types";
 
-export function useSkills(
-  getToken: () => string,
-  enabled = true,
-): SkillSummary[] {
-  const [skills, setSkills] = useState<SkillSummary[]>([]);
+type SkillsState =
+  | { status: "loading" | "error"; skills: null }
+  | { status: "ready"; skills: SkillSummary[] };
+
+const EMPTY_SKILLS: SkillSummary[] = [];
+
+export function useSkills(getToken: () => string, enabled = true) {
+  const [state, setState] = useState<SkillsState>({ status: "loading", skills: null });
 
   useEffect(() => {
     if (!enabled) {
-      setSkills([]);
+      setState({ status: "loading", skills: null });
       return;
     }
     let cancelled = false;
@@ -28,13 +31,16 @@ export function useSkills(
       }
       refreshing = true;
       refreshQueued = false;
+      setState((current) => current.skills === null ? { status: "loading", skills: null } : current);
       const version = payloadVersion;
       fetchSkills(getToken())
         .then(({ skills: nextSkills }) => {
-          if (!cancelled && version === payloadVersion) setSkills(nextSkills);
+          if (!cancelled && version === payloadVersion) setState({ status: "ready", skills: nextSkills });
         })
         .catch(() => {
-          // Keep the last known list usable during transient refresh failures.
+          if (!cancelled && version === payloadVersion) {
+            setState((current) => current.skills === null ? { status: "error", skills: null } : current);
+          }
         })
         .finally(() => {
           refreshing = false;
@@ -45,7 +51,7 @@ export function useSkills(
       const payload = (event as CustomEvent<unknown>).detail;
       if (!cancelled && isSkillsPayload(payload)) {
         payloadVersion += 1;
-        setSkills(payload.skills);
+        setState({ status: "ready", skills: payload.skills });
       }
     };
 
@@ -59,5 +65,9 @@ export function useSkills(
     };
   }, [enabled, getToken]);
 
-  return skills;
+  return {
+    skills: state.skills ?? EMPTY_SKILLS,
+    loading: state.status === "loading",
+    error: state.status === "error",
+  };
 }

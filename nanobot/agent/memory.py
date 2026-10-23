@@ -22,12 +22,12 @@ from uuid import uuid4
 from loguru import logger
 
 from nanobot.agent.tools.context import require_tool_authorization
-from nanobot.events import NO_EVENTS, ContextCompactionEvent, EventSink
+from nanobot.events import NO_EVENTS, CompactionReason, ContextCompactionEvent, EventSink
 from nanobot.llm_usage.context import llm_usage_source
 from nanobot.providers.base import LLMResponse, ProviderConversationState
 from nanobot.providers.conversation_state import ProviderConversationStateController
 from nanobot.runtime_context import public_history_messages
-from nanobot.session.keys import UNIFIED_SESSION_KEY, is_dream_session
+from nanobot.session.keys import UNIFIED_SESSION_KEY
 from nanobot.session.manager import Session, SessionManager
 from nanobot.session.summary import is_summary_checkpoint, session_summary_from_metadata
 from nanobot.utils.gitstore import GitStore
@@ -550,7 +550,7 @@ class MemoryStore:
 
     @staticmethod
     def default_dream_prompt() -> str:
-        from nanobot.agent.skills import BUILTIN_SKILLS_DIR
+        from nanobot.agent.skill_metadata import BUILTIN_SKILLS_DIR
 
         return render_template(
             "agent/dream.md",
@@ -611,7 +611,7 @@ class MemoryStore:
 
     def build_dream_tools(self, *, allow_skill_generation: bool = True) -> ToolRegistry:
         """Build Dream tools, suppressing skill writes for private member stores."""
-        from nanobot.agent.skills import BUILTIN_SKILLS_DIR
+        from nanobot.agent.skill_metadata import BUILTIN_SKILLS_DIR
         from nanobot.agent.tools.apply_patch import ApplyPatchTool
         from nanobot.agent.tools.file_state import FileStates
         from nanobot.agent.tools.filesystem import EditFileTool, ReadFileTool, WriteFileTool
@@ -777,28 +777,6 @@ class MemoryStore:
         if not diff_body:
             return prefix
         return f"{prefix}\n\n{diff_body}"
-
-    @staticmethod
-    def prune_dream_sessions(sessions: SessionManager, *, keep: int = 10) -> None:
-        """Remove the oldest Dream session files, keeping only the N most recent.
-
-        Only current base64url-encoded Dream session keys are considered.
-        Non-dream session files are never touched.
-        """
-        with sessions.locked_session_files() as sessions_dir:
-            dream_files: list[tuple[Path, str]] = []
-            for path in sessions_dir.glob("*.jsonl"):
-                decoded_key = SessionManager.decode_storage_key(path.stem)
-                if decoded_key is not None and is_dream_session(decoded_key):
-                    dream_files.append((path, decoded_key))
-            dream_files.sort(key=lambda item: item[0].stat().st_mtime)
-
-            for path, key in dream_files[: max(0, len(dream_files) - keep)]:
-                if sessions.delete_session(key):
-                    logger.debug("Pruned old dream session: {}", path.stem)
-                else:
-                    logger.warning("Failed to prune dream session {}", path)
-
 
 # ---------------------------------------------------------------------------
 # Memory ingestion and context-pressure coordination
@@ -1204,10 +1182,19 @@ class Consolidator:
             weakref.WeakValueDictionary()
         )
 
+    async def _stored_session(self, session_key: str) -> Session | None:
+        """Return the committed metadata header used for authorization decisions."""
+        if self._authorize_session is None and self._store_for_session is None:
+            return None  # No consumer, so a transient compaction must not open the session database.
+        stored = await self.sessions.state.read_metadata(session_key)
+        if stored is None:
+            return None
+        return Session(key=session_key, metadata=stored["metadata"])
+
     async def _authorize_archive(self, session: Session) -> None:
         await require_tool_authorization()
         if self._authorize_session is not None:
-            await self._authorize_session(self.sessions.peek(session.key) or session)
+            await self._authorize_session(await self._stored_session(session.key) or session)
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
@@ -1232,7 +1219,7 @@ class Consolidator:
         ]
         if not source_messages:
             return None
-        session = self.sessions.peek(session_key) or Session(key=session_key)
+        session = await self._stored_session(session_key) or Session(key=session_key)
         await self._authorize_archive(session)
         store = self._store_for_session(session) if self._store_for_session else self.store
         if store is None:
@@ -1361,6 +1348,7 @@ class Consolidator:
         max_suffix: int = 0,
         events: EventSink = NO_EVENTS,
         notify: bool = False,
+        reason: CompactionReason | None = None,
     ) -> str | None:
         """Replace archived history with a summary checkpoint.
 
@@ -1369,8 +1357,8 @@ class Consolidator:
         """
         lock = self.get_lock(session_key)
         async with lock:
-            self.sessions.invalidate(session_key)
-            session = self.sessions.get_or_create(session_key)
+            await self.sessions.state.discard(session_key)
+            session = await self.sessions.state.get(session_key)
             if self._store_for_session is not None and self._store_for_session(session) is None:
                 return None
 
@@ -1385,34 +1373,30 @@ class Consolidator:
 
             compaction_id = uuid4().hex
             await events.emit(
-                ContextCompactionEvent(compaction_id=compaction_id, phase="started", notify=notify),
+                ContextCompactionEvent(compaction_id=compaction_id, phase="started", notify=notify, reason=reason),
             )
-            last_active = session.updated_at
             archive_end = archive_start + len(messages_to_archive)
             try:
                 summary = await self.archive_session(
                     session, archive_end=archive_end, runtime=runtime,
                 )
                 if summary:
-                    # Concurrent appends remain after the captured boundary.
-                    session.commit_summary_checkpoint(
-                        summary, insert_at=archive_end, last_active=last_active,
+                    await self.sessions.state.commit_summary(
+                        session, summary, archive_end=archive_end,
                     )
-                    # Resume from the summary and retained transcript, not the old provider history.
-                    session.provider_state = None
-                    self.sessions.save(session)
             except (Exception, asyncio.CancelledError) as exc:
                 await events.emit(
                     ContextCompactionEvent(
                         compaction_id=compaction_id,
                         phase="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
                         notify=notify,
+                        reason=reason,
                     ),
                 )
                 raise
             if not summary:
                 await events.emit(
-                    ContextCompactionEvent(compaction_id=compaction_id, phase="failed", notify=notify),
+                    ContextCompactionEvent(compaction_id=compaction_id, phase="failed", notify=notify, reason=reason),
                 )
                 return None
 
@@ -1421,6 +1405,7 @@ class Consolidator:
                     compaction_id=compaction_id,
                     phase="succeeded",
                     notify=notify,
+                    reason=reason,
                 ),
             )
 

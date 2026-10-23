@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import { CalendarClock, Loader2, ShieldCheck } from "lucide-react";
 
 import { formatAutomationSchedule } from "@/components/settings/system/AutomationsSettings";
-import { fmtDateTime } from "@/lib/format";
+import { fmtDateTime } from "@/lib/format-time";
 import type { CollaborationProjectPayload, SessionAutomationJob } from "@/lib/types";
 
 const BUILTIN_AUTOMATION_LABELS: Record<string, string> = {

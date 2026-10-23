@@ -41,6 +41,85 @@ describe("NanobotTui lifecycle", () => {
     expect(state()).toBe(false)
   })
 
+  test("shows actionable connection states without implementation details", async () => {
+    setup = await createRenderer({ width: 100, height: 20, screenMode: "alternate-screen" })
+    const app = mount(setup)
+    const ui = app as unknown as {
+      status: TextRenderable
+      handleStatus(
+        status: "starting" | "connecting" | "connected" | "reconnecting" | "unavailable" | "error",
+        detail?: string,
+        info?: {
+          endpoint: string
+          attempt: number
+          elapsedMs: number
+          health?: "ready" | "degraded" | "unreachable"
+        },
+      ): void
+    }
+
+    ui.handleStatus("starting", undefined, {
+      endpoint: "127.0.0.1:8769",
+      attempt: 1,
+      elapsedMs: 0,
+    })
+    expect(ui.status.plainText).toBe("Getting ready…")
+
+    ui.handleStatus("connecting")
+    expect(ui.status.plainText).toBe("Getting ready…")
+
+    ui.handleStatus("connected")
+    expect(ui.status.plainText).toBe("Getting ready…")
+
+    ui.handleStatus("error", "gateway sent an invalid event")
+    expect(ui.status.plainText).toBe("Getting ready…")
+    expect(ui.status.plainText).not.toContain("Unable")
+
+    ui.handleStatus("reconnecting", "connection closed", {
+      endpoint: "127.0.0.1:8769",
+      attempt: 2,
+      elapsedMs: 800,
+    })
+    expect(ui.status.plainText).toBe("Resuming…")
+
+    ui.handleStatus("reconnecting", "connection closed", {
+      endpoint: "127.0.0.1:8769",
+      attempt: 2,
+      elapsedMs: 900,
+      health: "degraded",
+    })
+    expect(ui.status.plainText).toBe("Resuming…")
+
+    ui.handleStatus("unavailable", "connection refused", {
+      endpoint: "127.0.0.1:8769",
+      attempt: 7,
+      elapsedMs: 3_200,
+      health: "degraded",
+    })
+    expect(ui.status.plainText).toBe("Still getting ready…")
+    expect(ui.status.plainText).not.toContain("Unable")
+
+    ui.handleStatus("unavailable", "connection refused", {
+      endpoint: "127.0.0.1:8769",
+      attempt: 8,
+      elapsedMs: 3_500,
+      health: "unreachable",
+    })
+    expect(ui.status.plainText).toBe("Mikobot is taking longer to respond…")
+    expect(ui.status.plainText).not.toContain("Unable")
+
+    ui.handleStatus("error", "gateway bootstrap failed: HTTP 401", {
+      endpoint: "127.0.0.1:8769",
+      attempt: 9,
+      elapsedMs: 3_800,
+    })
+    expect(ui.status.plainText).toBe("Mikobot unavailable. Restart nanobot.")
+    expect(ui.status.plainText).not.toContain("gateway")
+    expect(ui.status.plainText).not.toContain("127.0.0.1")
+    expect(ui.status.plainText).not.toContain("HTTP")
+    expect(ui.status.plainText).not.toContain("attempt")
+  })
+
   test("does not expose transport diagnostics in connection status", async () => {
     setup = await createRenderer({ width: 100, height: 20, screenMode: "alternate-screen" })
     const app = mount(setup)
@@ -279,7 +358,8 @@ describe("NanobotTui lifecycle", () => {
 
       expect(sent).toEqual([])
       expect(composer.plainText).toBe("sent during reconnect")
-      expect(ui.status.plainText).toContain("Not sent · press Enter to retry when ready")
+      expect(ui.status.plainText).toContain("Not sent.")
+      expect(ui.status.plainText).toContain("Press Enter to retry when ready.")
 
       resolveReconnect(new Response(JSON.stringify({
         schemaVersion: 3, projection: "events",
@@ -287,7 +367,7 @@ describe("NanobotTui lifecycle", () => {
         page: { has_more_before: false },
       })))
       await waitUntil(() => ui.ready)
-      expect(ui.status.plainText).toBe("Not sent · press Enter to retry")
+      expect(ui.status.plainText).toBe("Not sent. Press Enter to retry.")
       composer.submit()
       await waitUntil(() => sent.length === 1)
       await setup.flush()

@@ -47,6 +47,7 @@ from nanobot.collaboration.models import (
 )
 from nanobot.collaboration.pairing import CHANNEL_ASSIGNMENT_REQUIRED_METADATA_KEY
 from nanobot.providers.base import LLMResponse, ToolCallRequest
+from nanobot.runtime_context import public_history_messages
 from nanobot.security.private_media import user_private_memory_root
 
 
@@ -311,8 +312,13 @@ def _scope_loop(
         )
 
 
-def _provider() -> SimpleNamespace:
-    return SimpleNamespace(
+class _StrictProvider(SimpleNamespace):
+    # The model runtime resolver tracks providers in a set.
+    __hash__ = object.__hash__
+
+
+def _provider() -> _StrictProvider:
+    return _StrictProvider(
         get_default_model=lambda: "test-model",
         generation=SimpleNamespace(max_tokens=4096, temperature=0.1, reasoning_effort=None),
     )
@@ -1747,13 +1753,17 @@ async def test_agent_loop_automation_turns_never_provision_an_identity(
     assert await repository.resolve_identity("weixin", "runtime") is None
 
     # A session that records a project keeps the automation inside it.
-    session = loop.sessions.get_or_create("weixin:wx-open-id")
-    session.metadata[COLLABORATION_USER_METADATA_KEY] = owner.id
-    session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = project.id
-    session.metadata[COLLABORATION_ASSIGNMENT_METADATA_KEY] = False
-    session.metadata["collaboration_channel"] = "weixin"
-    session.metadata["collaboration_chat_id"] = "wx-open-id"
-    loop.sessions.save(session)
+    await loop.sessions.state.update_metadata(
+        "weixin:wx-open-id",
+        {
+            COLLABORATION_USER_METADATA_KEY: owner.id,
+            COLLABORATION_PROJECT_METADATA_KEY: project.id,
+            COLLABORATION_ASSIGNMENT_METADATA_KEY: False,
+            "collaboration_channel": "weixin",
+            "collaboration_chat_id": "wx-open-id",
+        },
+        create_if_missing=True,
+    )
     scoped = await loop._conversation_scope_for_message(cron)
 
     assert scoped is not None
@@ -1921,8 +1931,9 @@ async def test_runtime_turns_revalidate_persisted_member_provenance(
         assert scope is not None
         assert (scope.user_id, scope.project_id) == (member.id, project.id)
 
-    session.metadata.pop(COLLABORATION_PROJECT_METADATA_KEY)
-    loop.sessions.save(session)
+    await loop.sessions.state.update_metadata(
+        key, {}, remove=(COLLABORATION_PROJECT_METADATA_KEY,)
+    )
     with pytest.raises(CollaborationPermissionError):
         await loop._conversation_scope_for_message(
             InboundMessage(
@@ -1935,8 +1946,7 @@ async def test_runtime_turns_revalidate_persisted_member_provenance(
             )
         )
 
-    session.metadata[COLLABORATION_PROJECT_METADATA_KEY] = project.id
-    loop.sessions.save(session)
+    await loop.sessions.state.update_metadata(key, {COLLABORATION_PROJECT_METADATA_KEY: project.id})
     assert store.remove_member(project.id, owner.id, member.id)
     for sender_id in ("cron", "system:continuation", "system:recovery"):
         with pytest.raises(CollaborationPermissionError):
@@ -2030,7 +2040,8 @@ async def test_member_history_stays_private_when_their_default_project_changes(
         else f"user:{member.id}:project:{project_a.id}:weixin:member-chat"
     )
     assert key_a == expected_a
-    assert any(message["content"] == "A_SECRET_MARKER" for message in loop.sessions.get_or_create(key_a).messages)
+    history_a = public_history_messages(loop.sessions.get_or_create(key_a).messages)
+    assert any(message["content"] == "A_SECRET_MARKER" for message in history_a)
     store.update_user_default_project(member.id, project_b.id)
 
     second = InboundMessage("weixin", "member", "member-chat", "B_SECRET_MARKER", metadata={"direct": True})
@@ -2045,9 +2056,10 @@ async def test_member_history_stays_private_when_their_default_project_changes(
 
     assert key_b == expected_b
     assert key_b != key_a
-    history_b = loop.sessions.get_or_create(key_b).messages
+    stored_b = loop.sessions.get_or_create(key_b).messages
+    history_b = public_history_messages(stored_b)
     assert any(message["content"] == "B_SECRET_MARKER" for message in history_b)
-    assert all(message["content"] != "A_SECRET_MARKER" for message in history_b)
+    assert all("A_SECRET_MARKER" not in str(message.get("content")) for message in stored_b)
 
 
 @pytest.mark.asyncio

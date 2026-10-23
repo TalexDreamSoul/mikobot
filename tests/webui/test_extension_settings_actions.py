@@ -31,6 +31,7 @@ from nanobot.extensions.contracts import (
 )
 from nanobot.extensions.registry import ExtensionRegistry
 from nanobot.optional_features import OptionalFeatureError
+from nanobot.runtime_admission import RuntimeAdmission
 from nanobot.webui.nanobot_features_api import execute_nanobot_extension_action
 from nanobot.webui.settings_capabilities import (
     CapabilitySettingsHandler,
@@ -196,6 +197,7 @@ def _system_handler(
     return SystemSettingsHandler(
         settings,
         logger=type("Logger", (), {"exception": staticmethod(lambda *_args: None)})(),
+        admission=RuntimeAdmission(),
     )
 
 

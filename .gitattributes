@@ -10,3 +10,6 @@
 # picking either side (task state lives in task.json, not index.md). See
 # .trellis/spec/cli/backend/directory-structure.md for details.
 .trellis/workspace/*/journal-*.md merge=union
+
+# The public Sigstore fixture is signed over exact bytes, including newlines.
+tests/fixtures/sigstore/bundle_v3.txt -text

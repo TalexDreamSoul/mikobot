@@ -73,6 +73,7 @@ def _connection_loop_channel(endpoint: WebUIGatewayEndpoint) -> WebSocketChannel
     channel._outbound_retire_tasks = set()
     channel._conn_chats = {}
     channel._conn_default = {}
+    channel._uploads = SimpleNamespace(issue=lambda _connection: {"path": "/upload", "token": "upload-token"})
     channel._hydrate_after_subscribe = AsyncMock()
     channel._handle_message = AsyncMock()
     channel._cleanup_connection = AsyncMock()
@@ -281,6 +282,7 @@ async def test_static_token_authentication_still_uses_client_id_without_proxy_id
     assert endpoint.authorize_websocket_handshake(connection, {"token": ["static-token"]}) is None
     assert endpoint.trusted_proxy_principal(connection) is None
     channel = _connection_loop_channel(endpoint)
+    channel.config = config
     await channel._connection_loop(connection)
 
     ready = json.loads(connection.sent[0])

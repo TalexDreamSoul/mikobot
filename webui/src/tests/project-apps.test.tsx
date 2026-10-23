@@ -22,8 +22,8 @@ afterEach(async () => {
 function renderPanel(overrides: {
   busyKey?: string | null;
   canManage?: boolean;
-  onJoin?: (name: string, revision?: string | null) => Promise<unknown>;
-  onLeave?: (name: string) => Promise<unknown>;
+  onJoin?: (name: string, revision?: string | null) => Promise<void>;
+  onLeave?: (name: string) => Promise<void>;
 } = {}) {
   return render(
     <ProjectAppsPanel

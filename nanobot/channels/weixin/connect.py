@@ -51,6 +51,11 @@ class WeixinConnectStore:
         self._start_lock = asyncio.Lock()
         _CONNECT_STORES.add(self)
 
+    @property
+    def has_pending_work(self) -> bool:
+        # Poll/commit are awaited by the settings request owner, not detached.
+        return any(session.deadline > time.monotonic() for session in self._sessions.values())
+
     async def handle(self, action: str, query: QueryParams) -> dict[str, Any]:
         """Handle one instance-aware settings connection action."""
         actor_user_id = (query_first(query, "_actor_user_id") or "").strip() or None

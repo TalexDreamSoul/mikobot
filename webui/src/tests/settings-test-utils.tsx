@@ -2,7 +2,6 @@ import { cleanup, render } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, vi } from "vitest";
 import { SettingsView } from "@/components/settings/SettingsView";
-import type { SettingsSectionKey } from "@/components/settings/contracts";
 import { ClientProvider } from "@/providers/ClientProvider";
 import type { SettingsPayload } from "@/lib/types";
 import type { NanobotClient } from "@/lib/nanobot-client";
@@ -60,7 +59,7 @@ export function settingsPayload(): SettingsPayload {
     },
     web: {
       enable: true,
-      proxy: null,
+      use_proxy: false,
       user_agent: null,
       search: { max_results: 5, timeout: 30 },
       fetch: { use_jina_reader: true },
@@ -126,22 +125,24 @@ export function settingsPayload(): SettingsPayload {
   };
 }
 
-export function renderSettingsView(
-  options: {
-    client?: NanobotClient;
-    initialSection?: SettingsSectionKey;
-    initialSettings?: SettingsPayload;
-    showSidebar?: boolean;
-    isAdmin?: boolean;
-    restrictedNotice?: boolean;
-    mainNavigationExpanded?: boolean;
-    onBackToChat?: () => void;
-    onSettingsChange?: (payload: SettingsPayload) => void;
-    onStartAutomationChat?: React.ComponentProps<typeof SettingsView>["onStartAutomationChat"];
-    onNativeEngineRestart?: () => Promise<string>;
-    onRestart?: () => void;
-  } = {},
-) {
+type SettingsViewTestOptions = Partial<Pick<
+  React.ComponentProps<typeof SettingsView>,
+  | "initialSection"
+  | "initialSettings"
+  | "skills"
+  | "skillsLoading"
+  | "showSidebar"
+  | "isAdmin"
+  | "restrictedNotice"
+  | "mainNavigationExpanded"
+  | "onBackToChat"
+  | "onSettingsChange"
+  | "onStartAutomationChat"
+  | "onNativeEngineRestart"
+  | "onRestart"
+>> & { client?: NanobotClient };
+
+export function renderSettingsView(options: SettingsViewTestOptions = {}) {
   render(
     <ClientProvider client={options.client ?? {
       requestMutation: requestMutationMock,
@@ -155,6 +156,8 @@ export function renderSettingsView(
         theme="light"
         initialSection={options.initialSection ?? "apps"}
         initialSettings={options.initialSettings}
+        skills={options.skills}
+        skillsLoading={options.skillsLoading}
         showSidebar={options.showSidebar}
         isAdmin={options.isAdmin ?? true}
         restrictedNotice={options.restrictedNotice}

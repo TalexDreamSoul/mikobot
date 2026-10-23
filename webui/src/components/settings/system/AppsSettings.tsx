@@ -1,4 +1,10 @@
 import {
+  ImportIcon,
+  UpdateIcon,
+  McpIcon,
+  AppActionsIcon,
+} from "@/components/icons/product-icons";
+import {
   forwardRef,
   useEffect,
   useId,
@@ -14,20 +20,19 @@ import {
   ChevronDown,
   ChevronRight,
   Clipboard,
-  Database,
   ExternalLink,
   Loader2,
   PauseCircle,
   PlayCircle,
   Plus,
-  RotateCcw,
   Search,
-  Server,
-  SlidersHorizontal,
   TriangleAlert,
   Trash2,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+
+import { CatalogSkeleton } from "@/components/settings/shared/CatalogSkeleton";
+import { ProxySettingsControl } from "@/components/settings/shared/ProxySettingsControl";
 
 import {
   DismissibleStatusMessage,
@@ -46,7 +51,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
+import { Input, SearchInput } from "@/components/ui/input";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Textarea } from "@/components/ui/textarea";
 import { SettingsTextEditor } from "@/components/settings/shared/SettingsTextEditor";
@@ -80,6 +85,7 @@ export interface CustomMcpForm {
   env: string;
   headers: string;
   toolTimeout: string;
+  useProxy: boolean;
 }
 
 export const DEFAULT_CUSTOM_MCP_FORM: CustomMcpForm = {
@@ -92,11 +98,13 @@ export const DEFAULT_CUSTOM_MCP_FORM: CustomMcpForm = {
   env: "",
   headers: "",
   toolTimeout: "30",
+  useProxy: false,
 };
 
 export function AppsCatalogSettings({
   setupName,
   onSetupOpened,
+  onConfigureProxy,
   cliApps,
   mcpPresets,
   cliAppsLoading,
@@ -142,6 +150,7 @@ export function AppsCatalogSettings({
 }: {
   setupName?: string | null;
   onSetupOpened?: () => void;
+  onConfigureProxy?: () => void;
   cliApps: CliAppsPayload | null;
   mcpPresets: McpPresetsPayload | null;
   cliAppsLoading: boolean;
@@ -168,8 +177,8 @@ export function AppsCatalogSettings({
   onQueryChange: (value: string) => void;
   onFilterChange: (value: AppsKindFilter) => void;
   onCliAction: (action: "install" | "update" | "uninstall" | "test", name: string) => void;
-  onMcpAction: (action: "enable" | "disable" | "remove" | "test" | "reconnect", name: string, values?: Record<string, string>) => void;
-  onMcpOAuthConnect: (name: string, reset?: boolean) => void;
+  onMcpAction: (action: "enable" | "disable" | "remove" | "test" | "reconnect" | "proxy", name: string, values?: Record<string, string>) => void;
+  onMcpOAuthConnect: (name: string, reset?: boolean, values?: Record<string, string>) => void;
   onMcpOAuthCancel: () => void;
   onMcpOAuthOpen: () => void;
   onMcpOAuthCallbackUrlChange: (value: string) => void;
@@ -214,10 +223,8 @@ export function AppsCatalogSettings({
   const focusedApp = cliFocusName
     ? (cliApps?.apps ?? []).find((app) => app.name === cliFocusName && app.installed)
     : null;
-  const loading =
-    (cliAppsLoading || mcpPresetsLoading) &&
-    !cliApps &&
-    !mcpPresets;
+  const loading = (mcpPresetsLoading && !mcpPresets)
+    || ((filter !== "mcp" || Boolean(normalizedQuery)) && cliAppsLoading && !cliApps);
   const cliAppCount = cliApps?.apps.length ?? 0;
   const emptyTitle = normalizedQuery
     ? tx("settings.apps.empty", "No tools match your search.")
@@ -261,7 +268,7 @@ export function AppsCatalogSettings({
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
-            <Input
+            <SearchInput
               value={query}
               onChange={(event) => onQueryChange(event.target.value)}
               placeholder={tx("settings.apps.searchPlaceholder", "Search Apps")}
@@ -307,15 +314,10 @@ export function AppsCatalogSettings({
               : tx("settings.apps.featured", "Tools")}
           </SettingsSectionTitle>
           <span className="text-[12px] tabular-nums text-muted-foreground">
-            {items.length}
+            {loading ? "—" : items.length}
           </span>
         </div>
-        {loading ? (
-          <div className="flex h-36 items-center justify-center text-sm text-muted-foreground">
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-            {tx("settings.apps.loading", "Loading apps…")}
-          </div>
-        ) : items.length ? (
+        {items.length ? (
           <div className="grid grid-cols-1 gap-x-10 gap-y-1 py-3 xl:grid-cols-2">
             {items.map((item) =>
               item.kind === "cli" ? (
@@ -332,6 +334,7 @@ export function AppsCatalogSettings({
                   preset={item.preset}
                   openConnection={setupName === item.preset.name}
                   onConnectionOpened={onSetupOpened}
+                  onConfigureProxy={onConfigureProxy}
                   values={mcpFieldValues[item.preset.name] ?? {}}
                   actionKey={mcpActionKey}
                   oauthFlow={mcpOAuthFlow?.name === item.preset.name ? mcpOAuthFlow : null}
@@ -353,7 +356,11 @@ export function AppsCatalogSettings({
               ),
             )}
           </div>
-        ) : (
+        ) : null}
+        {loading ? (
+          <CatalogSkeleton label={tx("settings.apps.loading", "Loading apps…")} layout="apps"
+            appActionLabel={filter === "cli" ? undefined : tx("settings.mcp.manage", "Manage")} />
+        ) : !items.length && !statusIsError ? (
           <div className="px-3 py-12 text-center text-sm text-muted-foreground">
             <p>{emptyTitle}</p>
             {normalizedQuery ? (
@@ -385,11 +392,12 @@ export function AppsCatalogSettings({
               </p>
             )}
           </div>
-        )}
+        ) : null}
       </section>
 
       {filter === "mcp" ? (
         <McpCustomServerPanel
+          onConfigureProxy={onConfigureProxy}
           form={customMcpForm}
           configImport={mcpConfigImport}
           actionKey={mcpActionKey}
@@ -444,7 +452,7 @@ function CliAppsCatalogRow({
                   disabled={busy}
                   tone="installed"
                 >
-                  <Check className="h-4 w-4" aria-hidden />
+                  <AppActionsIcon className="h-4 w-4" aria-hidden />
                 </AppsActionButton>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -453,7 +461,7 @@ function CliAppsCatalogRow({
                   {tx("settings.cliApps.test", "Test CLI")}
                 </DropdownMenuItem>
                 <DropdownMenuItem disabled={busy} onClick={() => onAction("update", app.name)}>
-                  <RotateCcw aria-hidden />
+                  <UpdateIcon aria-hidden />
                   {tx("settings.cliApps.update", "Update CLI")}
                 </DropdownMenuItem>
                 <DropdownMenuItem
@@ -497,6 +505,7 @@ function CliAppsCatalogRow({
 function McpAppsCatalogRow({
   openConnection = false,
   onConnectionOpened,
+  onConfigureProxy,
   preset,
   values,
   actionKey,
@@ -518,6 +527,7 @@ function McpAppsCatalogRow({
 }: {
   openConnection?: boolean;
   onConnectionOpened?: () => void;
+  onConfigureProxy?: () => void;
   preset: McpPresetInfo;
   values: Record<string, string>;
   actionKey: string | null;
@@ -529,8 +539,8 @@ function McpAppsCatalogRow({
   showBrandLogos: boolean;
   showTypeBadge: boolean;
   onFieldChange: (presetName: string, fieldName: string, value: string) => void;
-  onAction: (action: "enable" | "disable" | "remove" | "test" | "reconnect", name: string, values?: Record<string, string>) => void;
-  onOAuthConnect: (name: string, reset?: boolean) => void;
+  onAction: (action: "enable" | "disable" | "remove" | "test" | "reconnect" | "proxy", name: string, values?: Record<string, string>) => void;
+  onOAuthConnect: (name: string, reset?: boolean, values?: Record<string, string>) => void;
   onOAuthCancel: () => void;
   onOAuthOpen: () => void;
   onOAuthCallbackUrlChange: (value: string) => void;
@@ -555,7 +565,8 @@ function McpAppsCatalogRow({
   const toolsBusy = actionKey === `tools:${preset.name}`;
   const oauthBusy = actionKey === `oauth:${preset.name}`;
   const anotherOAuthBusy = Boolean(actionKey?.startsWith("oauth:")) && !oauthBusy;
-  const busy = enableBusy || disableBusy || removeBusy || testBusy || reconnectBusy || toolsBusy || oauthBusy;
+  const proxyBusy = actionKey === `proxy:${preset.name}`;
+  const busy = enableBusy || disableBusy || removeBusy || testBusy || reconnectBusy || toolsBusy || oauthBusy || proxyBusy;
   const toggleable = preset.enabled !== undefined;
   const isOAuth = preset.auth === "oauth";
   const missingFields = preset.required_fields.filter((field) => field.required && !field.configured);
@@ -591,13 +602,13 @@ function McpAppsCatalogRow({
     onAction("disable", preset.name);
   };
   const enableOrOpenSetup = () => {
-    if (isOAuth) {
-      onOAuthConnect(preset.name);
-      return;
-    }
-    if (needsSetupInput || (preset.installed && !preset.configured && hasFields)) {
+    if (preset.transport !== "stdio" || needsSetupInput || (preset.installed && !preset.configured && hasFields)) {
       setManagementTab("connection");
       setManagementOpen(true);
+      return;
+    }
+    if (isOAuth) {
+      onOAuthConnect(preset.name);
       return;
     }
     requestEnable();
@@ -610,8 +621,14 @@ function McpAppsCatalogRow({
   return (
     <article className="min-w-0 rounded-control transition-colors settings-hover">
       <div className="group flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 px-3 py-3">
+        <button
+          type="button"
+          aria-label={preset.display_name}
+          onClick={() => openManagement()}
+          className="flex min-w-0 flex-[1_1_8rem] items-center gap-3 rounded-control text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
         <McpPresetLogo preset={preset} showBrandLogos={showBrandLogos} />
-        <div className="min-w-[8rem] flex-[1_1_8rem]">
+        <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-baseline gap-2">
             <h3 className="truncate text-[14px] font-semibold leading-5 text-foreground">{preset.display_name}</h3>
             {showTypeBadge ? (
@@ -632,6 +649,7 @@ function McpAppsCatalogRow({
             </span>
           </p>
         </div>
+        </button>
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {oauthFlow ? (
             <>
@@ -677,7 +695,7 @@ function McpAppsCatalogRow({
               disabled={anotherOAuthBusy}
               onClick={() => openManagement("connection")}
             >
-              <SlidersHorizontal className="h-4 w-4" aria-hidden />
+              <AppActionsIcon className="h-4 w-4" aria-hidden />
             </AppsActionButton>
           ) : readyInstalled ? (
             toggleable ? (
@@ -690,7 +708,7 @@ function McpAppsCatalogRow({
                     disabled={busy}
                     tone="installed"
                   >
-                    <Check className="h-4 w-4" aria-hidden />
+                    <AppActionsIcon className="h-4 w-4" aria-hidden />
                   </AppsActionButton>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
@@ -710,12 +728,12 @@ function McpAppsCatalogRow({
                   defaultValue: "Manage {{name}}",
                 })}
                 visibleLabel={tx("settings.mcp.manage", "Manage")}
-                busy={testBusy || toolsBusy || removeBusy || reconnectBusy}
+                busy={testBusy || toolsBusy || removeBusy || reconnectBusy || proxyBusy}
                 disabled={busy}
                 tone={runtimeConnected ? "installed" : "default"}
                 onClick={() => openManagement("overview")}
               >
-                <Check className="h-4 w-4" aria-hidden />
+                <AppActionsIcon className="h-4 w-4" aria-hidden />
               </AppsActionButton>
             )
           ) : preset.enabled === false ? (
@@ -734,7 +752,7 @@ function McpAppsCatalogRow({
               visibleLabel={tx("settings.mcp.setup", "Connect")}
               busy={oauthBusy}
               disabled={anotherOAuthBusy}
-              onClick={() => onOAuthConnect(preset.name)}
+              onClick={enableOrOpenSetup}
             />
           ) : preset.installed && !preset.configured ? (
             <AppsActionButton
@@ -742,7 +760,7 @@ function McpAppsCatalogRow({
               visibleLabel={hasFields ? tx("settings.mcp.configure", "Connect") : tx("settings.mcp.enable", "Enable")}
               busy={enableBusy}
               onClick={() => {
-                if (hasFields) openManagement("connection");
+                if (hasFields || preset.transport !== "stdio") openManagement("connection");
                 else requestEnable();
               }}
             />
@@ -874,6 +892,7 @@ function McpAppsCatalogRow({
 
       {managementOpen ? (
         <McpManagementDialog
+          onConfigureProxy={onConfigureProxy}
           preset={preset}
           values={values}
           actionKey={actionKey}
@@ -930,18 +949,18 @@ const AppsActionButton = forwardRef<HTMLButtonElement, AppsActionButtonProps>(
         ref={ref}
         type="button"
         size={visibleLabel ? "sm" : "icon"}
-        variant="ghost"
+        variant={visibleLabel ? "ghost" : "icon"}
         aria-label={ariaLabel}
-        title={ariaLabel}
+        title={visibleLabel ? undefined : ariaLabel}
         disabled={disabled || busy}
         className={cn(
           "rounded-full text-muted-foreground transition-colors",
           visibleLabel
             ? "h-8 w-auto gap-1.5 px-3 text-[12px] font-semibold"
             : "h-9 w-9",
-          tone === "installed" && "bg-transparent settings-hover hover:text-foreground",
-          tone === "danger" && "bg-transparent hover:bg-destructive/10 hover:text-destructive",
-          tone === "default" && "bg-muted/70 settings-hover hover:text-foreground",
+          tone === "installed" && "bg-transparent hover:text-foreground",
+          tone === "danger" && "bg-transparent hover:text-destructive",
+          tone === "default" && "bg-muted/70 hover:text-foreground",
           className,
         )}
       >
@@ -999,6 +1018,7 @@ function appsSearchText(item: AppsCatalogItem): string {
 }
 
 function McpCustomServerPanel({
+  onConfigureProxy,
   form,
   configImport,
   actionKey,
@@ -1007,6 +1027,7 @@ function McpCustomServerPanel({
   onSave,
   onImportConfig,
 }: {
+  onConfigureProxy?: () => void;
   form: CustomMcpForm;
   configImport: string;
   actionKey: string | null;
@@ -1045,7 +1066,7 @@ function McpCustomServerPanel({
       <div className="flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-center gap-3">
           <span className="grid h-9 w-9 shrink-0 place-items-center rounded-control bg-muted text-muted-foreground">
-            <Server className="h-4 w-4" aria-hidden />
+            <McpIcon className="h-4 w-4" aria-hidden />
           </span>
           <div className="min-w-0">
             <h3 className="text-[13px] font-semibold leading-5 text-foreground">
@@ -1067,7 +1088,7 @@ function McpCustomServerPanel({
             onClick={() => setActiveMode((mode) => (mode === "custom" ? null : "custom"))}
             className="h-8 rounded-full px-3 text-[12px] font-semibold"
           >
-            <Server className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+            <McpIcon className="mr-1.5 h-3.5 w-3.5" aria-hidden />
             {tx("settings.mcp.customAction", "Custom")}
           </Button>
           <Button
@@ -1077,7 +1098,7 @@ function McpCustomServerPanel({
             onClick={() => setActiveMode((mode) => (mode === "import" ? null : "import"))}
             className="h-8 rounded-full px-3 text-[12px] font-semibold"
           >
-            <Database className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+            <ImportIcon className="mr-1.5 h-3.5 w-3.5" aria-hidden />
             {tx("settings.mcp.importAction", "Import")}
           </Button>
         </div>
@@ -1163,6 +1184,16 @@ function McpCustomServerPanel({
                 </p>
               ) : null}
             </div>
+          ) : null}
+
+          {remote ? (
+            <ProxySettingsControl
+              className="mt-3 rounded-control bg-background/55 px-3 py-3"
+              checked={form.useProxy}
+              disabled={customBusy}
+              onChange={(useProxy) => update("useProxy", useProxy)}
+              onConfigure={onConfigureProxy}
+            />
           ) : null}
 
           {remote && form.auth === "headers" ? (
@@ -1282,7 +1313,7 @@ function McpCustomServerPanel({
               disabled={!configImport.trim() || importBusy}
               className="h-9 shrink-0 rounded-full px-4 text-[12.5px] font-semibold"
             >
-              {importBusy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden /> : <Database className="mr-1.5 h-3.5 w-3.5" aria-hidden />}
+              {importBusy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden /> : <ImportIcon className="mr-1.5 h-3.5 w-3.5" aria-hidden />}
               {tx("settings.mcp.importConfig", "Import")}
             </Button>
           </div>
@@ -1385,7 +1416,8 @@ function McpPresetLogo({
   return (
     <span
       className={cn(
-        "grid shrink-0 place-items-center font-semibold text-white",
+        "grid shrink-0 place-items-center font-semibold",
+        preset.brand_color ? "text-white" : "text-muted-foreground",
         compact
           ? "h-10 w-10 rounded-control text-[12px]"
           : "h-9 w-9 rounded-[10px] text-[12px]",
@@ -1436,9 +1468,7 @@ function CliAppReadyPanel({
           </div>
           <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1.5 text-[12px] text-muted-foreground">
             <span className="font-mono">@{app.name}</span>
-            <span aria-hidden>·</span>
             <span className="truncate font-mono">{app.entry_point || app.name}</span>
-            <span aria-hidden>·</span>
             <span>{app.category}</span>
           </div>
         </div>

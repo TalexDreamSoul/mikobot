@@ -58,7 +58,7 @@ export function FeishuAssistantsPanel({
             onFeaturesUpdate={onFeaturesUpdate}
           />
         ),
-        footer: (
+        footer: instances.some((instance) => instance.configured) ? (
           <div className="mt-4 overflow-hidden rounded-floating border border-border/70 bg-background px-4 py-4">
             <div className="text-[13px] font-semibold text-foreground">
               {tx("custom.createAnother", "Create another assistant")}
@@ -70,15 +70,16 @@ export function FeishuAssistantsPanel({
               )}
             </p>
             <FeishuConnectFlow
+              key={instances.map((instance) => instance.id).join(",")}
               token={token}
               feature={feature}
               instanceId="default"
               mode="create"
-              idleLabel={tx("custom.createAssistant", "Create assistant")}
+              idleLabel={tx("custom.addAssistant", "Add another assistant")}
               onFeaturesUpdate={onFeaturesUpdate}
             />
           </div>
-        ),
+        ) : null,
       }}
     />
   );

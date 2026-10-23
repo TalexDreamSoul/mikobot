@@ -21,6 +21,7 @@ from nanobot.collaboration.models import (
     MembershipRole,
 )
 from nanobot.cron.types import CronJob, CronPayload, CronSchedule
+from nanobot.runtime_admission import RuntimeAdmission
 from nanobot.session.manager import SessionManager
 from nanobot.webui.forking import handle_webui_fork_chat
 from nanobot.webui.http_utils import http_json_response
@@ -78,6 +79,7 @@ async def _handler(tmp_path) -> GatewayHTTPHandler:
     handler._collaboration_initialized = False
     handler._collaboration_closed = False
     handler._member_connect_sessions = {}
+    handler.bus = SimpleNamespace(admission=RuntimeAdmission())
     handler.session_manager = sessions
     handler.tokens = SimpleNamespace(
         check_api_token=lambda request: request.headers.get("Authorization") == "Bearer local-token"
@@ -89,6 +91,7 @@ async def _handler(tmp_path) -> GatewayHTTPHandler:
         default_scope=lambda: scope,
         scope_for_indexed_metadata=lambda *_args, **_kwargs: scope,
         scope_for_session_key=lambda _key: scope,
+        existing_scope_for_session_key=lambda _key: scope,
     )
     handler.settings_routes = SimpleNamespace(
         dispatch=AsyncMock(return_value=None),
@@ -792,7 +795,7 @@ async def test_proxy_session_boundary_hides_foreign_legacy_and_automation_resour
     accessible_to_bob = {
         "websocket:alice": await handler.can_access_webui_session(bob, "websocket:alice")
     }
-    mention = WebuiSessionAccess(handler.session_manager).normalize_mentions(
+    mention = await WebuiSessionAccess(handler.session_manager).normalize_mentions(
         [{"name": "Alice", "session_key": "websocket:alice"}],
         can_access=accessible_to_bob.__getitem__,
     )
@@ -830,9 +833,9 @@ async def test_member_webui_session_pins_project_and_denies_reads_attach_and_rec
     key = "websocket:pinned-member-chat"
 
     assert await handler.prepare_webui_session(alice, key) is True
-    session = handler.session_manager.get_or_create(key)
+    session = await handler.session_manager.state.get(key)
     session.add_message("user", "pinned-project-private-history")
-    handler.session_manager.save(session)
+    await handler.session_manager.state.finish_turn(session)
 
     list_request = _request("/api/sessions", alice.request.headers)
     listed = await handler.dispatch(_connection(list_request), list_request)

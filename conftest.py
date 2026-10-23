@@ -8,6 +8,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 from threading import Thread
+from uuid import uuid4
 
 import certifi
 import pytest
@@ -19,6 +20,12 @@ def _isolate_tokenizer_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep tests deterministic and out of the user's tokenizer cache and network."""
     monkeypatch.setattr("nanobot.utils.token_encoding._encoding", None)
     monkeypatch.setattr("nanobot.utils.token_encoding._warmup_thread", Thread())
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tool_entry_points(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only load external tool plugins explicitly provided by the test."""
+    monkeypatch.setattr("nanobot.agent.tools.loader.entry_points", lambda **_kwargs: ())
 
 
 @pytest.fixture(autouse=True)
@@ -47,40 +54,42 @@ def _isolate_home_and_runtime_config(
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
     yield
 
-@pytest.fixture(autouse=True)
-def _isolate_sessions_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Redirect session storage away from the real active config data directory.
 
-    Session storage lives under the active runtime data root (outside the workspace,
-    per ADR-0001), so without redirection tests would write into the real home.
-    """
-    runtime_root = tmp_path.parent / f"{tmp_path.name}-runtime-root"
-    legacy_root = tmp_path.parent / f"{tmp_path.name}-legacy-sessions-root"
+@pytest.fixture(autouse=True)
+def _isolate_runtime_stores(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Isolate writable stores without making a directory for pure tests."""
+    import nanobot.llm_usage.service as llm_usage
+    import nanobot.pairing.store as pairing_store
+    import nanobot.session.location as session_location
+    from nanobot.webui import star_prompt
+
+    # A sibling of tmp_path stays outside any test's agent workspace. mkdir is
+    # deferred until a store is used and remains safe for concurrent callers.
+    data_root = tmp_path_factory.getbasetemp() / "runtime-data" / uuid4().hex
+
+    def data_dir() -> Path:
+        data_root.mkdir(parents=True, exist_ok=True)
+        return data_root
 
     def runtime_subdir(name: str) -> Path:
-        path = runtime_root / name
+        path = data_root / name
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    monkeypatch.setattr(
-        "nanobot.session.manager.get_runtime_subdir",
-        runtime_subdir,
-    )
-    monkeypatch.setattr(
-        "nanobot.session.manager.get_legacy_sessions_dir",
-        lambda: legacy_root,
-    )
-    yield
-
-
-@pytest.fixture(autouse=True)
-def _isolate_pairing_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep channel pairing tests out of the user's active pairing store."""
-    pairing_path = tmp_path / "pairing.json"
-    monkeypatch.setattr(
-        "nanobot.pairing.store._store_path",
-        lambda: pairing_path,
-    )
+    monkeypatch.setattr(session_location, "get_runtime_subdir", runtime_subdir)
+    monkeypatch.setattr("nanobot.webui.history.get_webui_dir", lambda: runtime_subdir("webui"))
+    monkeypatch.setattr(star_prompt, "get_webui_dir", lambda: runtime_subdir("webui"))
+    monkeypatch.setattr(pairing_store, "_store_path", lambda: data_dir() / "pairing.json")
+    monkeypatch.setattr(llm_usage, "get_data_dir", data_dir)
+    stores: dict[Path, llm_usage.LLMUsageStore] = {}
+    monkeypatch.setattr(llm_usage, "_STORES", stores)
+    try:
+        yield
+    finally:
+        for store in stores.values():
+            store.close()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -121,3 +130,83 @@ def _use_windows_system_ca_for_default_http_clients() -> Iterator[None]:
         yield
     finally:
         ssl.create_default_context = original
+
+
+@pytest.fixture
+def create_symlink():
+    """Create real symlinks, skipping only Windows' missing-privilege error."""
+    def create(link: Path, target: Path, *, target_is_directory: bool = False) -> None:
+        try:
+            link.symlink_to(target, target_is_directory=target_is_directory)
+        except OSError as exc:
+            if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires Developer Mode or privilege")
+            raise
+
+    return create
+
+
+class DisplayHistoryFixture:
+    """Explicit offline setup plus snapshot reads for history projection tests."""
+
+    def __init__(self, workspace: Path) -> None:
+        from nanobot.session.manager import SessionManager
+
+        self.sessions = SessionManager(workspace)
+
+    async def metadata(self, chat_id, metadata=None):
+        from nanobot.session.display_history import HISTORY_GENERATION_METADATA_KEY
+
+        session = await self.sessions.state.get_header(f"websocket:{chat_id}")
+        return {**(metadata or {}), HISTORY_GENERATION_METADATA_KEY: session.generation}
+
+    async def message(self, **kwargs):
+        from nanobot.bus.events import OutboundMessage
+
+        kwargs["metadata"] = await self.metadata(kwargs["chat_id"], kwargs.get("metadata"))
+        return OutboundMessage(**kwargs)
+
+    async def stream(self, channel, method, chat_id, *args, **kwargs):
+        kwargs["metadata"] = await self.metadata(chat_id, kwargs.get("metadata"))
+        await getattr(channel, method)(chat_id, *args, **kwargs)
+
+    def append(self, key, record):
+        from nanobot.webui.transcript import append_transcript_object
+
+        append_transcript_object(key, record, sessions=self.sessions)
+
+    def _project(self, name, key, *args, **kwargs):
+        from nanobot.webui import transcript
+
+        return self.sessions.project_history(key, lambda snapshot: getattr(transcript, name)(
+            key, *args, history=snapshot, **kwargs,
+        ))
+
+    def read(self, key):
+        return self._project("read_transcript_lines", key)
+
+    def build(self, key, **kwargs):
+        return self._project("build_webui_thread_response", key, **kwargs)
+
+    def trace(self, key, detail_ref):
+        return self._project("build_webui_trace_detail_response", key, detail_ref)
+
+    def revision(self, key, **kwargs):
+        return self._project("webui_transcript_revision", key, **kwargs)
+
+    def prompts(self, key, **kwargs):
+        return self._project("build_prompt_index", key, **kwargs)
+
+    def prompt_response(self, key, previous_revision, **kwargs):
+        return self._project("prompt_index_response", key, previous_revision, **kwargs)
+
+    def unfinished(self, key):
+        return self._project("has_unfinished_transcript_tail", key)
+
+
+@pytest.fixture
+async def history(tmp_path: Path):
+    fixture = DisplayHistoryFixture(tmp_path)
+    yield fixture
+    if fixture.sessions._state is not None:
+        await fixture.sessions.state.aclose()

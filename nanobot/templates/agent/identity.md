@@ -1,5 +1,6 @@
 ## Runtime
 {{ runtime }}
+{{ platform_policy }}
 
 ## Workspace
 {% if agent_workspace_path != workspace_path %}
@@ -20,7 +21,6 @@ Mikobot's agent workspace is at: {{ agent_workspace_path }}
 
 Only Dream memory-consolidation tasks may edit the profile and long-term memory files listed above.
 
-{{ platform_policy }}
 {% if channel == 'telegram' or channel == 'qq' or channel == 'discord' %}
 ## Format Hint
 This conversation is on a messaging app. Use short paragraphs. Avoid large headings (#, ##). Use **bold** sparingly. No tables — use plain lists.

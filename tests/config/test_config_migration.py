@@ -5,12 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from nanobot.config.loader import load_config, save_config
-from nanobot.config.schema import _resolve_tool_config_refs
 from nanobot.security.network import validate_url_target
-
-# Config may be imported during a circular tool-config import; resolve its
-# forward references after all test dependencies have loaded.
-_resolve_tool_config_refs()
 
 
 def _fake_resolve(host: str, results: list[str]):

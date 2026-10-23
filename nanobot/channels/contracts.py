@@ -7,9 +7,12 @@ import secrets
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, TypeGuard, cast
+
+from nanobot.config.network import NetworkConfig
 
 if TYPE_CHECKING:
     from nanobot.channels.plugin import ChannelPlugin
@@ -23,6 +26,7 @@ class ChannelValidationContext:
     """Host policy passed to package-owned setup validators."""
 
     allow_local_service_access: bool = False
+    network: NetworkConfig = dataclass_field(default_factory=NetworkConfig)
 
 
 # Keep callback contracts precise for static consumers. The public adapters below

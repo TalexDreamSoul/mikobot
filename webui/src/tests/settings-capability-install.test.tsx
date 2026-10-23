@@ -56,7 +56,7 @@ const stoppedApiService = {
   command: "nanobot serve",
 };
 
-const bedrockProvider = {
+const bedrockProvider: SettingsPayload["providers"][number] = {
   name: "bedrock",
   label: "Amazon Bedrock",
   configured: true,
@@ -76,7 +76,7 @@ describe("Capability install risk acknowledgement", () => {
 
     renderSettingsView({ initialSection: "runtime", initialSettings: base, showSidebar: true });
 
-    const enable = await screen.findByRole("button", { name: "Enable tracing support" });
+    const enable = await screen.findByRole("button", { name: "Enable tracing" });
     fireEvent.click(enable);
 
     const confirmation = await screen.findByRole("dialog", {
@@ -90,9 +90,9 @@ describe("Capability install risk acknowledgement", () => {
         .not.toBeInTheDocument(),
     );
     expect(requestMutationMock).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Enable tracing support" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Enable tracing" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Enable tracing support" }));
+    fireEvent.click(screen.getByRole("button", { name: "Enable tracing" }));
     fireEvent.click(
       within(await screen.findByRole("dialog", { name: "Install support for Langfuse?" }))
         .getByRole("button", { name: "Install and enable" }),
@@ -117,6 +117,7 @@ describe("Capability install risk acknowledgement", () => {
 
     renderSettingsView({ initialSection: "models", initialSettings: base });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Manage providers" }));
     fireEvent.click(await screen.findByRole("button", { name: /Amazon Bedrock/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Save provider" }));
 
@@ -176,7 +177,7 @@ describe("Capability install risk acknowledgement", () => {
     fireEvent.change(screen.getByPlaceholderText("Enter API key"), {
       target: { value: "olostep-key" },
     });
-    const save = screen.getByRole("button", { name: "Install and enable", exact: true });
+    const save = screen.getByRole("button", { name: /^Install and enable$/ });
     fireEvent.click(save);
 
     const confirmation = await screen.findByRole("dialog", {
@@ -235,6 +236,7 @@ describe("Capability install risk acknowledgement", () => {
 
     renderSettingsView({ initialSection: "models", initialSettings: base });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Manage providers" }));
     fireEvent.click(await screen.findByRole("button", { name: /Amazon Bedrock/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Save provider" }));
 
@@ -243,6 +245,6 @@ describe("Capability install risk acknowledgement", () => {
       expect.objectContaining({ provider: "bedrock" }),
       20_000,
     ));
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: /Install support/ })).not.toBeInTheDocument();
   });
 });

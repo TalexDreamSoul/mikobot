@@ -8,6 +8,7 @@ The Python gateway owns agent execution, sessions, tools, memory, and security p
 | --- | --- |
 | Core boundaries, extensions, or internal types | [`.agent/design.md`](.agent/design.md) |
 | Refactoring, fallbacks, or test selection | [`.agent/simplify.md`](.agent/simplify.md) |
+| User-facing copy, feature naming, or localization | [`.agent/copywriting.md`](.agent/copywriting.md) |
 | Path permissions, HTTP/MCP, or shell isolation | [`.agent/security.md`](.agent/security.md) |
 | Dependency setup, WebUI transport, config, Windows, prompts, or persistence | [`.agent/gotchas.md`](.agent/gotchas.md) |
 | Reusing verification evidence | [`.agent/workflow.md`](.agent/workflow.md) |
@@ -18,7 +19,9 @@ The Python gateway owns agent execution, sessions, tools, memory, and security p
 
 - Analyze required behavior, state ownership, and root cause before extending code. Refactor when the structure causes the problem; a smaller diff does not justify another fallback.
 - Do not add tests for hypothetical internal states or unsupported combinations. Each new test needs a reachable path and a meaningful contract.
+- Do not add tests merely to prove that nonexistent behavior, removed code, or obsolete symbols are absent. Negative assertions must exercise a concrete, reachable risk and protect an observable behavioral contract; prefer testing supported actions and their results.
 - Do not run `ruff format`; mechanical formatting obscures git blame and creates unrelated diffs. This takes precedence over optional touched-file formatting in `CONTRIBUTING.md`.
+- Do not manually wrap prose in Markdown files. Keep each paragraph on one source line; use line breaks only for Markdown structure.
 - Python 3.11+, asyncio, line length 100. Tests mirror `nanobot/`; channel packages contain their own tests as well.
 
 ## Fork boundaries

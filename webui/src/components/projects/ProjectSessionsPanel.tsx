@@ -1,7 +1,8 @@
 import { useTranslation } from "react-i18next";
 import { MessagesSquare } from "lucide-react";
 
-import { deriveTitle, relativeTime } from "@/lib/format";
+import { deriveTitle } from "@/lib/format";
+import { relativeTime } from "@/lib/format-time";
 import type { ChatSummary } from "@/lib/types";
 
 /**

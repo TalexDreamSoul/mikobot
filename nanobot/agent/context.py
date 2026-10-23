@@ -9,16 +9,9 @@ from typing import Any, Mapping, Sequence, cast
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
-from nanobot.agent.tools import image_generation as image_generation_tools
 from nanobot.agent.tools import mcp as mcp_tools
 from nanobot.agent.tools import sessions as session_tools
-from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.apps.cli import utils as cli_app_utils
-from nanobot.bus.events import (
-    INBOUND_META_RUNTIME_CONTROL,
-    RUNTIME_CONTROL_SESSION_DISCARD,
-    InboundMessage,
-)
 from nanobot.collaboration.models import (
     COLLABORATION_PROJECT_METADATA_KEY,
     COLLABORATION_USER_METADATA_KEY,
@@ -39,6 +32,7 @@ from nanobot.session.summary import SessionSummary
 from nanobot.utils.helpers import (
     bundled_default_text,
     detect_image_mime,
+    image_placeholder_text,
     is_bundled_default,
     truncate_text_to_tokens,
 )
@@ -52,13 +46,6 @@ def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
         | mcp_tools.session_extra(metadata)
         | session_tools.session_extra(metadata)
     )
-
-
-async def handle_runtime_control(state: Any, msg: InboundMessage, tools: ToolRegistry) -> bool:
-    if msg.metadata.get(INBOUND_META_RUNTIME_CONTROL) == RUNTIME_CONTROL_SESSION_DISCARD:
-        await state.discard_session(msg.session_key)
-        return True
-    return await image_generation_tools.handle_runtime_control(state, msg, tools)
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,26 +172,27 @@ class ContextBuilder:
         if include_memory:
             memory = self._memory_for_workspace(memory_workspace).read_memory()
             if memory and not is_bundled_default(memory, "memory/MEMORY.md"):
-                parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
+                parts.append(memory)
 
         skill_loader = (
             self.skills
             if memory_workspace is None
             else SkillsLoader(root)
         )
-        active_skills = skill_loader.get_always_skills()
-        if allowed_skills is not None:
-            active_skills = [name for name in active_skills if name in allowed_skills]
-        if active_skills:
-            active_content = skill_loader.load_skills_for_context(active_skills)
-            if active_content:
-                parts.append(f"# Active Skills\n\n{active_content}")
+        with skill_loader.snapshot():
+            active_skills = skill_loader.get_always_skills()
+            if allowed_skills is not None:
+                active_skills = [name for name in active_skills if name in allowed_skills]
+            if active_skills:
+                active_content = skill_loader.load_skills_for_context(active_skills)
+                if active_content:
+                    parts.append(f"# Active Skills\n\n{active_content}")
 
-        skills_summary = skill_loader.build_skills_summary(
-            exclude=set(active_skills),
-            workspace=root,
-            include=allowed_skills,
-        )
+            skills_summary = skill_loader.build_skills_summary(
+                exclude=set(active_skills),
+                workspace=root,
+                include=allowed_skills,
+            )
         if skills_summary:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
 
@@ -412,36 +400,37 @@ class ContextBuilder:
     ) -> list[dict[str, Any]]:
         """Build a model transcript while preserving the fresh-turn boundary."""
         root = workspace or self.workspace
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                "content": self.build_system_prompt(
-                    channel=channel,
-                    session_summary=transcript.session_summary,
-                    workspace=root,
-                    include_memory=include_memory,
-                    include_memory_recent_history=include_memory_recent_history,
-                    session_key=session_key,
-                    unified_session=unified_session,
-                    allowed_skills=allowed_skills,
-                    memory_workspace=memory_workspace,
-                    project_description=project_description,
-                ),
-            },
-            *transcript.history,
-        ]
-        if transcript.current_message is None:
-            return messages
+        with self.skills.snapshot():
+            messages: list[dict[str, Any]] = [
+                {
+                    "role": "system",
+                    "content": self.build_system_prompt(
+                        channel=channel,
+                        session_summary=transcript.session_summary,
+                        workspace=root,
+                        include_memory=include_memory,
+                        include_memory_recent_history=include_memory_recent_history,
+                        session_key=session_key,
+                        unified_session=unified_session,
+                        allowed_skills=allowed_skills,
+                        memory_workspace=memory_workspace,
+                        project_description=project_description,
+                    ),
+                },
+                *transcript.history,
+            ]
+            if transcript.current_message is None:
+                return messages
 
-        current = self.build_current_message(
-            transcript.current_message,
-            media=list(transcript.media) if transcript.media else None,
-            current_role=transcript.current_role,
-            runtime_context_blocks=transcript.runtime_context_blocks,
-            allowed_skills=allowed_skills,
-        )
-        messages.append(current)
-        return messages
+            current = self.build_current_message(
+                transcript.current_message,
+                media=list(transcript.media) if transcript.media else None,
+                current_role=transcript.current_role,
+                runtime_context_blocks=transcript.runtime_context_blocks,
+                allowed_skills=allowed_skills,
+            )
+            messages.append(current)
+            return messages
 
     def build_current_message(
         self,
@@ -480,7 +469,7 @@ class ContextBuilder:
         if not image_paths:
             return text
 
-        image_blocks: list[dict[str, Any]] = []
+        media_blocks: list[dict[str, Any]] = []
         for path in image_paths:
             p = Path(path)
             if not p.is_file():
@@ -492,12 +481,13 @@ class ContextBuilder:
             if not mime or not mime.startswith("image/"):
                 continue
             b64 = base64.b64encode(raw).decode()
-            image_blocks.append({
+            media_blocks.append({"type": "text", "text": image_placeholder_text(str(p))})
+            media_blocks.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime};base64,{b64}"},
                 "_meta": {"path": str(p)},
             })
 
-        if not image_blocks:
+        if not media_blocks:
             return text
-        return image_blocks + [{"type": "text", "text": text}]
+        return media_blocks + [{"type": "text", "text": text}]

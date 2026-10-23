@@ -7,7 +7,7 @@ import pytest
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.channels.plugin import ChannelPlugin
 from nanobot.config import loader
-from nanobot.config.schema import Config, _resolve_tool_config_refs
+from nanobot.config.schema import Config
 from nanobot.extensions.adapters import channels as channel_adapters
 from nanobot.extensions.contracts import (
     ExtensionAction,
@@ -17,8 +17,6 @@ from nanobot.extensions.contracts import (
 from nanobot.extensions.management import build_management_extension_registry
 from nanobot.extensions.registry import ExtensionRegistryError
 from nanobot.extensions.runtime import build_core_extension_registry
-
-_resolve_tool_config_refs()
 
 
 def _plugin() -> ChannelPlugin:

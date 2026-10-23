@@ -4,6 +4,7 @@ Linux/Windows CI retain the portable generation tests in test_sandbox.py.
 These native tests use only isolated fixtures and a loopback HTTP service.
 """
 
+import re
 import shlex
 import shutil
 import sys
@@ -48,6 +49,11 @@ def layout(tmp_path, monkeypatch):
         yield paths
 
 
+def _without_elapsed(result: object) -> str:
+    # Exec results end with a wall-clock line that varies between runs.
+    return re.sub(r"\nElapsed: \d+(?:\.\d+)?s\Z", "", str(result))
+
+
 async def run_script(paths, script):
     workspace = paths["workspace"]
     (workspace / "probe.sh").write_text(script)
@@ -56,13 +62,15 @@ async def run_script(paths, script):
         sandbox_ro_binds=[str(paths["ro"])], sandbox_rw_binds=[str(paths["rw"])],
     )
     # Scripts are legitimate exec input; the kernel must enforce their effects.
-    return str(await tool.execute(command="sh probe.sh", timeout=5))
+    return _without_elapsed(
+        await tool.execute(command="sh probe.sh", timeout=5, yield_time_ms=10000)
+    )
 
 
 @pytest.mark.parametrize("target", ["workspace", "media", "ro", "rw"])
 async def test_native_allowed_reads(layout, target):
     result = await run_script(layout, f"cat {shlex.quote(str(layout[target] / 'sentinel'))}")
-    assert result == "synthetic-data\n\nExit code: 0"
+    assert result == "synthetic-data\nExit code: 0"
 
 
 @pytest.mark.parametrize("target", ["config", "peer", "link"])
@@ -77,7 +85,7 @@ async def test_native_outside_reads_denied(layout, target):
 async def test_native_explicit_writes_allowed(layout, target):
     path = layout[target] / "sentinel"
     result = await run_script(layout, f"printf changed > {shlex.quote(str(path))}")
-    assert result == "\nExit code: 0"
+    assert result == "Exit code: 0"
     assert path.read_text() == "changed"
 
 
@@ -115,8 +123,10 @@ async def test_native_launcher_cannot_be_shadowed_by_project_path(layout):
     tool = ExecTool(
         working_dir=str(workspace), sandbox="seatbelt", path_prepend=str(workspace),
     )
-    result = str(await tool.execute(command="printf real-sandbox", timeout=5))
-    assert result == "real-sandbox\n\nExit code: 0"
+    result = _without_elapsed(
+        await tool.execute(command="printf real-sandbox", timeout=5, yield_time_ms=10000)
+    )
+    assert result == "real-sandbox\nExit code: 0"
 
 
 async def test_native_network_remains_available(layout):
@@ -136,7 +146,7 @@ async def test_native_network_remains_available(layout):
             result = await run_script(
                 layout, f"curl --noproxy '*' --max-time 2 -sS http://127.0.0.1:{server.server_port}",
             )
-            assert result == "network-ok\n\nExit code: 0"
+            assert result == "network-ok\nExit code: 0"
         finally:
             server.shutdown()
             thread.join(timeout=3)
@@ -175,7 +185,7 @@ async def test_native_readonly_ancestor_keeps_other_children_writable(layout):
         "mv tree/sibling tree/renamed && rm tree/renamed/file && rmdir tree/renamed",
     )
 
-    assert result == "\nExit code: 0"
+    assert result == "Exit code: 0"
     assert protected.is_dir()
     assert not (workspace / "tree" / "renamed").exists()
 
@@ -190,7 +200,7 @@ async def test_native_rw_override_preserves_readonly_ancestor_policy(layout, ove
     layout["rw"] = {"root": protected, "parent": protected.parent, "child": writable}[override]
 
     result = await run_script(layout, "printf writable > tree/readonly/cache/file")
-    assert result == "\nExit code: 0"
+    assert result == "Exit code: 0"
     assert (writable / "file").read_text() == "writable"
 
     result = await run_script(layout, "mv tree shifted")
@@ -198,7 +208,7 @@ async def test_native_rw_override_preserves_readonly_ancestor_policy(layout, ove
         assert "Operation not permitted" in result
         assert protected.is_dir()
     else:
-        assert result == "\nExit code: 0"
+        assert result == "Exit code: 0"
         assert (workspace / "shifted" / "readonly" / "cache" / "file").read_text() == "writable"
 
 
@@ -211,9 +221,9 @@ async def test_native_failed_cwd_does_not_execute_shell_list(layout, cwd_kind, s
         cwd.write_text("not-a-directory")
     tool = ExecTool(working_dir=str(workspace), sandbox="seatbelt")
 
-    result = str(await tool.execute(
+    result = _without_elapsed(await tool.execute(
         command=f"printf first > first{separator}printf second > second",
-        working_dir=str(cwd), timeout=5,
+        working_dir=str(cwd), timeout=5, yield_time_ms=10000,
     ))
 
     assert "cd:" in result
@@ -228,12 +238,12 @@ async def test_native_nested_cwd_runs_complete_shell_list(layout):
     cwd.mkdir()
     tool = ExecTool(working_dir=str(workspace), sandbox="seatbelt")
 
-    result = str(await tool.execute(
+    result = _without_elapsed(await tool.execute(
         command="printf first > first; printf second > second",
-        working_dir=str(cwd), timeout=5,
+        working_dir=str(cwd), timeout=5, yield_time_ms=10000,
     ))
 
-    assert result == "\nExit code: 0"
+    assert result == "Exit code: 0"
     assert (cwd / "first").read_text() == "first"
     assert (cwd / "second").read_text() == "second"
     assert not (workspace / "second").exists()
@@ -253,11 +263,11 @@ async def test_native_rw_override_respects_volume_case_sensitivity(layout, overr
     layout["rw"] = alias if override == "root" else alias.parent
 
     result = await run_script(layout, "printf writable > tree/readonly/other")
-    assert result == "\nExit code: 0"
+    assert result == "Exit code: 0"
     result = await run_script(layout, "mv Tree shifted")
 
     if same_directory:
-        assert result == "\nExit code: 0"
+        assert result == "Exit code: 0"
         assert (workspace / "shifted" / "ReadOnly" / "other").read_text() == "writable"
     else:
         # On a case-sensitive volume the distinct RW directory must not remove

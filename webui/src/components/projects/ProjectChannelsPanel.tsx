@@ -12,7 +12,6 @@ import {
 } from "lucide-react";
 
 import { ChannelStatusBadge } from "@/components/settings/channels/ChannelIdentity";
-import { ToggleButton } from "@/components/settings/ToggleButton";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,6 +23,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { ToggleButton } from "@/components/ui/toggle-button";
 import type { CollaborationProjectsController } from "@/hooks/useCollaborationProjects";
 import {
   ApiError,

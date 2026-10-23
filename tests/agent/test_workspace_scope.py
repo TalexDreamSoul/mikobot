@@ -67,6 +67,11 @@ def _make_directory_link(link: Path, target: Path) -> None:
         pytest.skip(f"directory symlink unavailable: {exc}")
 
 
+class _StrictProvider(SimpleNamespace):
+    # The model runtime resolver tracks providers in a set.
+    __hash__ = object.__hash__
+
+
 @pytest_asyncio.fixture
 async def main_project_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -86,7 +91,7 @@ async def main_project_runtime(
     store.update_project(main.id, owner.id, is_main=True)
     repository = AsyncLocalCollaborationRepository(store)
     await repository.initialize()
-    provider = SimpleNamespace(
+    provider = _StrictProvider(
         get_default_model=lambda: "test-model",
         generation=SimpleNamespace(max_tokens=4096, temperature=0.1, reasoning_effort=None),
     )
@@ -156,6 +161,7 @@ async def _assert_cross_root_project_access(
                     "Path('exec-marker.txt').write_text('CROSS_ROOT_EXEC')\""
                 ),
                 working_dir=str(outside),
+                yield_time_ms=10000,
             )
     finally:
         reset_workspace_scope(token)

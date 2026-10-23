@@ -11,6 +11,7 @@ type TuiCommandAction =
   | "context"
   | "usage"
   | "diff"
+  | "diagrams"
   | "branch"
   | "detach"
   | "exit"
@@ -30,6 +31,14 @@ export type ResolvedSlashCommandLifecycle = Exclude<SlashCommandLifecycle, "agen
 
 function descriptor(choice: CommandChoice): SlashCommand | TuiCommand {
   return choice.command
+}
+
+function commandMatchRank(choice: CommandChoice, query: string): number {
+  const name = descriptor(choice).command.slice(1).toLocaleLowerCase()
+  if (name === query) return 0
+  if (name.startsWith(query)) return 1
+  if (name.includes(query)) return 2
+  return 3
 }
 
 export function resolveSlashCommandLifecycle(
@@ -108,8 +117,13 @@ export class CommandMenu {
       this.hide()
       return
     }
-    if (changed || !this.picker.visible) this.picker.show(this.commands, token.slice(1), limit)
-    else this.picker.update(token.slice(1), limit)
+    const query = token.slice(1)
+    if (changed || !this.picker.visible) {
+      const commands = [...this.commands].sort((left, right) => (
+        commandMatchRank(left, query) - commandMatchRank(right, query)
+      ))
+      this.picker.show(commands, query, limit)
+    } else this.picker.update(query, limit)
   }
 
   move(direction: -1 | 1): boolean {

@@ -509,7 +509,7 @@ describe("Settings navigation", () => {
 
     expect(await screen.findByRole("status")).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Settings sections" });
-    expect(within(nav).getByRole("button", { name: "Appearance", exact: true })).toHaveAttribute("aria-current", "page");
+    expect(within(nav).getByRole("button", { name: /^Appearance$/ })).toHaveAttribute("aria-current", "page");
     expect(within(nav).queryByRole("button", { name: /Extensions/ })).not.toBeInTheDocument();
     expect(screen.getByText("Theme")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();

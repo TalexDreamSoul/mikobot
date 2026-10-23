@@ -31,6 +31,7 @@ function project(id: string, name: string): CollaborationProject {
     allowed_mcp_servers: null,
     created_at_ms: timestamp,
     updated_at_ms: timestamp,
+    is_builtin: false,
     is_main: false,
   };
 }
@@ -40,6 +41,9 @@ function projectPayload(value: CollaborationProject): CollaborationProjectPayloa
     project: value,
     members: [{ project_id: value.id, user_id: "user-1", role: "owner", created_at_ms: timestamp }],
     assignments: [],
+    automations: [],
+    tasks: [],
+    apps: [],
     available: { skills: [], mcp_servers: [] },
     can_manage: true,
   };

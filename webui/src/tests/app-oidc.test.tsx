@@ -62,6 +62,7 @@ vi.mock("@/lib/nanobot-client", async (importOriginal) => {
       statusHandlers.add(handler);
       return () => statusHandlers.delete(handler);
     };
+    onTaskNotice = () => () => {};
     onRuntimeModelUpdate = () => () => {};
     onError = () => () => {};
     onChat = () => () => {};

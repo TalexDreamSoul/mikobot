@@ -66,6 +66,12 @@ export function client(
       sentOptions.push(messageOptions)
       return "turn"
     },
+    async sendAttachments(content: string, messageOptions: MessageOptions) {
+      return this.send(content, messageOptions)
+    },
+    async inspectAttachment(_path: string): Promise<import("../../../packages/client-events/attachments").LocalAttachment> {
+      throw new Error("file not found")
+    },
     attach(chatId: string) {
       attached.push(chatId)
     },

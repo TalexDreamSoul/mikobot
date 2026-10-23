@@ -9,11 +9,14 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger as default_logger
 
+from nanobot.channels.websocket.attachment_http import AttachmentHTTP
+from nanobot.channels.websocket.attachment_store import AttachmentStore
 from nanobot.collaboration import (
     AsyncLocalCollaborationRepository,
     CollaborationRepository,
 )
 from nanobot.config.loader import get_config_path
+from nanobot.config.paths import get_media_dir
 from nanobot.webui.gateway_endpoint import WebUIGatewayEndpoint
 from nanobot.webui.gateway_tokens import GatewayTokenStore
 from nanobot.webui.ingress_policy import DEFAULT_WEBUI_INGRESS_POLICY, WebUIIngressPolicy
@@ -48,6 +51,7 @@ class GatewayServices:
     collaboration: CollaborationRepository
     tokens: GatewayTokenStore
     media: WebUIMediaGateway
+    uploads: AttachmentHTTP
     ingress: WebUIIngressPolicy
     transcripts: WebUITranscriptRecorder
     workspaces: WebUIWorkspaceController
@@ -58,6 +62,8 @@ class GatewayServices:
     local_trigger_store: LocalTriggerStore | None
     cron_pending_job_ids: Callable[[str], set[str]] | None
     local_trigger_pending_ids: Callable[[str], set[str]] | None
+    unified_session: bool = False
+
     async def initialize(self) -> None:
         """Initialize the selected collaboration repository exactly once."""
         await self.http.initialize_collaboration()
@@ -95,6 +101,7 @@ def build_gateway_services(
     static_dist_path: Path | None,
     workspace_path: Path,
     default_restrict_to_workspace: bool,
+    unified_session: bool = False,
     config_path: Path | None = None,
     extension_registry: ExtensionRegistry | None = None,
     runtime_model_name: Callable[[], str | None] | None,
@@ -106,9 +113,11 @@ def build_gateway_services(
     local_trigger_store: LocalTriggerStore | None = None,
     cron_pending_job_ids: Callable[[str], set[str]] | None = None,
     local_trigger_pending_ids: Callable[[str], set[str]] | None = None,
+    channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
     channel_pairing_action: Callable[[str, str], Any] | None = None,
     mcp_runtime_status: Callable[[], Mapping[str, str]] | None = None,
     mcp_reload: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+    image_generation_reload: Callable[[], Awaitable[dict[str, Any]]] | None = None,
     skill_state_action: Callable[[set[str]], None] | None = None,
     recovery_action: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     collaboration: CollaborationRepository | None = None,
@@ -141,10 +150,12 @@ def build_gateway_services(
     media = WebUIMediaGateway(
         workspace_path=workspace_path,
         logger=logger,
-        attachment_limits=ingress.attachments,
         session_manager=session_manager,
     )
-    transcripts = WebUITranscriptRecorder(log=logger)
+    uploads = AttachmentHTTP(AttachmentStore(
+        get_media_dir("websocket"), limits=ingress.attachments,
+    ))
+    transcripts = WebUITranscriptRecorder(session_manager, log=logger)
     workspaces = WebUIWorkspaceController(
         session_manager=session_manager,
         default_workspace=workspace_path,
@@ -181,9 +192,11 @@ def build_gateway_services(
         local_trigger_store=local_trigger_store,
         cron_pending_job_ids=cron_pending_job_ids,
         local_trigger_pending_ids=local_trigger_pending_ids,
+        channel_runtime_status=channel_runtime_status,
         channel_pairing_action=channel_pairing_action,
         mcp_runtime_status=mcp_runtime_status,
         mcp_reload=mcp_reload,
+        image_generation_reload=image_generation_reload,
         skill_state_action=skill_state_action,
         recovery_action=recovery_action,
         oidc=oidc,
@@ -205,6 +218,7 @@ def build_gateway_services(
         tokens=tokens,
         collaboration=collaboration,
         media=media,
+        uploads=uploads,
         ingress=ingress,
         transcripts=transcripts,
         workspaces=workspaces,
@@ -215,4 +229,5 @@ def build_gateway_services(
         local_trigger_store=local_trigger_store,
         cron_pending_job_ids=cron_pending_job_ids,
         local_trigger_pending_ids=local_trigger_pending_ids,
+        unified_session=unified_session,
     )

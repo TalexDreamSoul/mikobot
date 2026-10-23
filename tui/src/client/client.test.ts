@@ -478,8 +478,21 @@ describe("gateway protocol", () => {
     client.close()
   })
 
-  test("represents lifecycle frames without browser state", () => {
-    const events: InboundEvent[] = [
+  test("delivers lifecycle frames with media metadata through the gateway socket", () => {
+    const original = globalThis.WebSocket
+    let socket: FakeSocket | undefined
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      value: class extends FakeSocket {
+        constructor() {
+          super()
+          socket = this
+        }
+      },
+    })
+    const frames: InboundEvent[] = [
+      { event: "ready", chat_id: "", client_id: "client" },
+      { event: "attached", chat_id: "one" },
       {
         event: "user_message",
         chat_id: "one",
@@ -493,12 +506,26 @@ describe("gateway protocol", () => {
       { event: "stream_end", chat_id: "one", resuming: false },
       { event: "turn_end", chat_id: "one", latency_ms: 12 },
     ]
-    expect(events.map((event) => event.event)).toEqual([
-      "user_message",
-      "delta",
-      "stream_end",
-      "turn_end",
-    ])
+    const delivered: InboundEvent[] = []
+    const client = new NanobotClient({
+      url: "ws://nanobot.test/ws",
+      chatId: "one",
+      onEvent: (event) => delivered.push(event),
+      onStatus: () => undefined,
+    })
+
+    try {
+      client.connect()
+      if (!socket) throw new Error("socket was not created")
+      socket.emit("open")
+      for (const frame of frames) {
+        socket.emit("message", { data: JSON.stringify(frame) })
+      }
+      expect(delivered).toEqual(frames)
+    } finally {
+      client.close()
+      Object.defineProperty(globalThis, "WebSocket", { configurable: true, value: original })
+    }
   })
 
   test("attaches and sends turns through the gateway envelope", () => {
@@ -539,7 +566,6 @@ describe("gateway protocol", () => {
         }),
       })
       client.send("hello", {
-        media: [{ data_url: "data:image/png;base64,AAAA", name: "clipboard-image-1.png" }],
         cliApps: [{ name: "github" }],
         sessionMentions: [{ name: "plan", session_key: "websocket:plan" }],
         userShell: true,
@@ -558,9 +584,7 @@ describe("gateway protocol", () => {
       expect(outbound[1]?.chat_id).toBe("terminal")
       expect(outbound[1]?.content).toBe("hello")
       expect(outbound[1]?.user_shell).toBe(true)
-      expect(outbound[1]?.media).toEqual([
-        { data_url: "data:image/png;base64,AAAA", name: "clipboard-image-1.png" },
-      ])
+      expect(outbound[1]?.media).toBeUndefined()
       expect(outbound[1]?.cli_apps).toEqual([{ name: "github" }])
       expect(outbound[1]?.session_mentions).toEqual([
         { name: "plan", session_key: "websocket:plan" },
@@ -1381,4 +1405,46 @@ describe("gateway protocol", () => {
       globalThis.fetch = original
     }
   })
+})
+
+
+test("uploads clipboard bytes over HTTP, sends only a reference, and awaits acceptance", async () => {
+  const originalSocket = globalThis.WebSocket
+  const originalFetch = globalThis.fetch
+  let socket: FakeSocket | undefined
+  const raw = "x".repeat(1_089_490)
+  Object.defineProperty(globalThis, "WebSocket", { configurable: true,
+    value: class extends FakeSocket { constructor() { super(); socket = this } } })
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    expect(String(url)).toBe("http://127.0.0.1:1234/api/attachments")
+    expect(init?.method).toBe("POST")
+    expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer capability")
+    expect(await (init?.body as Blob).text()).toBe(raw)
+    return Response.json({ reference: "binary-ref" }, { status: 201 })
+  }) as typeof fetch
+  const client = new NanobotClient({ url: "ws://127.0.0.1:1234/ws?token=one-shot", chatId: "chat",
+    reconnect: false, onStatus() {}, onEvent() {} })
+  try {
+    client.connect()
+    if (!socket) throw new Error("no socket")
+    socket.emit("message", { data: JSON.stringify({ event: "ready", chat_id: "chat", client_id: "test",
+      upload: { path: "/api/attachments", token: "capability" } }) })
+    let accepted = false
+    const delivery = client.sendAttachments("look", { media: [
+      { data_url: `data:image/png;base64,${btoa(raw)}`, name: "clipboard.png" },
+    ] }).then(() => { accepted = true })
+    await waitUntil(() => socket!.sent.some((frame) => frame.includes("binary-ref")))
+    expect(accepted).toBe(false)
+    const frame = socket.sent.find((value) => value.includes("binary-ref"))!
+    expect(frame.length).toBeLessThan(1024)
+    expect(frame).not.toContain("data_url")
+    const payload = JSON.parse(frame)
+    socket.emit("message", { data: JSON.stringify({ event: "message_accepted", chat_id: "chat", turn_id: payload.turn_id }) })
+    await delivery
+    expect(accepted).toBe(true)
+  } finally {
+    client.close()
+    globalThis.fetch = originalFetch
+    Object.defineProperty(globalThis, "WebSocket", { configurable: true, value: originalSocket })
+  }
 })

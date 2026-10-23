@@ -46,6 +46,12 @@ def _handle(manager: SessionManager, key: str) -> SessionHandle:
     return handle
 
 
+async def _ahandle(manager: SessionManager, key: str) -> SessionHandle:
+    handle = await SessionHandleResolver(manager).ahandle_for_session(key)
+    assert handle is not None
+    return handle
+
+
 class _Timer:
     def __init__(self, callback: Callable[[], None]) -> None:
         self.callback = callback
@@ -77,6 +83,10 @@ async def test_list_sessions_includes_all_persisted_channels_except_current(
     sessions = SessionManager(tmp_path)
     _persist(sessions, "websocket:current", "telegram:other", "slack:team")
     tool = ListSessionsTool(sessions)
+    expected = {
+        f"@{_handle(sessions, 'telegram:other').name}",
+        f"@{_handle(sessions, 'slack:team').name}",
+    }
 
     with request_context(RequestContext(
         channel="websocket",
@@ -85,10 +95,7 @@ async def test_list_sessions_includes_all_persisted_channels_except_current(
     )):
         result = json.loads(await tool.execute())
 
-    assert set(result) == {
-        f"@{_handle(sessions, 'telegram:other').name}",
-        f"@{_handle(sessions, 'slack:team').name}",
-    }
+    assert set(result) == expected
 
 @pytest.mark.asyncio
 async def test_member_session_listing_exposes_only_the_current_project(
@@ -109,7 +116,7 @@ async def test_member_session_listing_exposes_only_the_current_project(
     )):
         listed = json.loads(await ListSessionsTool(sessions).execute())
 
-    assert listed == [f"@{_handle(sessions, same_project).name}"]
+    assert listed == [f"@{(await _ahandle(sessions, same_project)).name}"]
 
 
 @pytest.mark.asyncio
@@ -135,7 +142,7 @@ async def test_member_can_send_only_to_a_session_in_the_same_project(
         )
 
     inbound = await bus.consume_inbound()
-    assert result == f"Sent to @{_handle(sessions, target).name}."
+    assert result == f"Sent to @{(await _ahandle(sessions, target)).name}."
     assert inbound.session_key_override == target
     assert inbound.content == "review the project artifact"
 
@@ -200,17 +207,17 @@ async def test_send_follows_the_recorded_access_scope(tmp_path: Path) -> None:
             expect_reply=False,
         )
         other_project_refusal = await tool.execute(
-            to=f"@{_handle(sessions, other_project).name}",
+            to=f"@{(await _ahandle(sessions, other_project)).name}",
             content="do not deliver this",
             expect_reply=False,
         )
         host_refusal = await tool.execute(
-            to=f"@{_handle(sessions, host_history).name}",
+            to=f"@{(await _ahandle(sessions, host_history)).name}",
             content="do not deliver this either",
             expect_reply=False,
         )
 
-    assert delivered == f"Sent to @{_handle(sessions, same_project).name}."
+    assert delivered == f"Sent to @{(await _ahandle(sessions, same_project)).name}."
     assert other_project_refusal.is_error
     assert host_refusal.is_error
     inbound = await bus.consume_inbound()
@@ -494,9 +501,12 @@ async def test_reply_follows_a_recycled_handle(tmp_path: Path) -> None:
         expect_reply=False,
     )
     received = await bus.consume_inbound()
-    assert sessions.delete_session(source.session_key)
-    _persist(sessions, "websocket:replacement")
-    replacement = _handle(sessions, "websocket:replacement")
+    assert await sessions.state.delete(source.session_key)
+    await sessions.state.get("websocket:replacement")
+    replacement = await SessionHandleResolver(sessions).ahandle_for_session(
+        "websocket:replacement"
+    )
+    assert replacement is not None
     assert replacement.name == source.name
 
     with request_context(RequestContext(

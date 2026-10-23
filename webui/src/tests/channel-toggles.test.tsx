@@ -31,7 +31,6 @@ function feature(enabled: boolean, instances = false): NanobotFeatureInfo {
     running: enabled,
     runtime_status: enabled ? "running" : "stopped",
     ready: true,
-    status: enabled ? "enabled" : "not_enabled",
     install_supported: true,
     requires_restart: false,
     setup: { fields: [], requirements: [] },

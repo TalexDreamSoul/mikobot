@@ -71,10 +71,7 @@ export interface MediaAttachment {
   name?: string
 }
 
-export interface OutboundMedia {
-  data_url: string
-  name?: string
-}
+export type OutboundMedia = import("../../../packages/client-events/attachments").DraftAttachment
 
 export interface WorkspaceScopePayload {
   project_path: string
@@ -193,7 +190,7 @@ export type OutboundEvent =
       turn_id: string
       webui: true
       workspace_scope?: WorkspaceScopePayload
-      media?: OutboundMedia[]
+      media?: import("../../../packages/client-events/attachments").AttachmentReference[]
       cli_apps?: Array<{ name: string }>
       mcp_presets?: Array<{ name: string }>
       session_mentions?: SessionMention[]

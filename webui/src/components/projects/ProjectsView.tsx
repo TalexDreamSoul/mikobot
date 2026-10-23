@@ -22,7 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import { RenameChatDialog } from "@/components/RenameChatDialog";
+import { RenameDialog } from "@/components/RenameDialog";
 import { CapabilitiesPanel } from "@/components/projects/CapabilitiesPanel";
 import { ProjectAutomationsPanel } from "@/components/projects/ProjectAutomationsPanel";
 import { ProjectAppsPanel } from "@/components/projects/ProjectAppsPanel";
@@ -598,7 +598,7 @@ export function ProjectsView({
         onCreate={projects.createProject}
       />
 
-      <RenameChatDialog
+      <RenameDialog
         open={renaming}
         title={selectedProject?.name ?? ""}
         dialogTitle={t("projects.renameTitle")}

@@ -36,6 +36,7 @@ from nanobot.extensions.contracts import (
     extension_package_id,
 )
 from nanobot.extensions.registry import ExtensionRegistry
+from nanobot.runtime_admission import RuntimeAdmission
 from nanobot.webui.http_utils import http_json_response
 from nanobot.webui.settings_routes import WebUISettingsRouter
 from nanobot.webui.settings_services import WebUISettingsServices
@@ -180,7 +181,7 @@ def _router(
             config_path,
             extension_registry=registry,
         ),
-        bus=SimpleNamespace(),
+        bus=SimpleNamespace(admission=RuntimeAdmission()),
         logger=SimpleNamespace(exception=lambda *_args: None),
         check_api_token=lambda _request: True,
         parse_query=lambda path: parse_qs(urlsplit(path).query),
@@ -778,7 +779,7 @@ def _reload_router(
             tmp_path / "config.json",
             extension_registry=_registry(adapter),
         ),
-        bus=SimpleNamespace(),
+        bus=SimpleNamespace(admission=RuntimeAdmission()),
         logger=SimpleNamespace(exception=lambda *_args: None),
         check_api_token=lambda _request: True,
         parse_query=lambda path: parse_qs(urlsplit(path).query),

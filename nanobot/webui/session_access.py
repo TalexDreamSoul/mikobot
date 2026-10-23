@@ -38,41 +38,31 @@ class WebuiSessionAccess:
         self._sessions = sessions
         self._handles = SessionHandleResolver(sessions)
 
-    def _metadata(
-        self,
-        session_key: str,
-        *,
-        exclude_session_key: str | None,
-        can_access: Callable[[str], bool] | None = None,
-    ) -> dict[str, Any] | None:
-        if session_key == exclude_session_key or (can_access is not None and not can_access(session_key)):
-            return None
-        payload = self._sessions.read_session_metadata(session_key)
-        if payload is None or not self._sessions.types.public_history(_session_metadata(payload)):
-            return None
-        return payload
-
-    def normalize_mentions(
+    async def normalize_mentions(
         self,
         raw: object,
         *,
         exclude_session_key: str | None = None,
         can_access: Callable[[str], bool] | None = None,
     ) -> list[SessionMention]:
+        mentions = normalize_session_mentions_metadata(raw)
+        if not mentions:
+            return []
         normalized: list[SessionMention] = []
         seen_keys: set[str] = set()
         seen_names: set[str] = set()
-        for raw_mention in normalize_session_mentions_metadata(raw):
+        handles = await self._handles.alist_all_by_key()
+        for raw_mention in mentions:
             mention = raw_mention
             key = mention["session_key"]
-            payload = self._metadata(
-                key,
-                exclude_session_key=exclude_session_key,
-                can_access=can_access,
+            payload = (
+                None
+                if key == exclude_session_key or (can_access is not None and not can_access(key))
+                else await self._sessions.state.read_metadata(key)
             )
             if payload is None or key in seen_keys:
                 continue
-            handle = self._handles.handle_for_session(key)
+            handle = handles.get(key)
             if handle is None:
                 continue
             folded_name = handle.name.casefold()

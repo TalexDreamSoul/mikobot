@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import builtins
 import json
 from datetime import datetime
-from pathlib import Path
 
 import pytest
 
 from nanobot.agent.tools.context import RequestContext, request_context
 from nanobot.agent.tools.sessions import ReadSessionTool, SearchSessionsTool
 from nanobot.session.history import SessionHistoryReader
-from nanobot.session.manager import JsonlSessionStore, SessionManager
-from nanobot.webui.transcript import append_transcript_object
+from nanobot.session.manager import SessionManager
+from nanobot.session.sqlite_store import SqliteSessionStore
 
 
 @pytest.mark.asyncio
@@ -61,10 +59,10 @@ async def test_session_tools_find_old_matches_in_full_session(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["canonical", "transcript", "mixed"])
-async def test_session_tools_use_canonical_records_after_restart(tmp_path, monkeypatch, state):
+async def test_session_tools_use_canonical_records_after_restart(history, tmp_path, monkeypatch, state):
     webui_dir = tmp_path / "webui"
-    monkeypatch.setattr("nanobot.webui.transcript.get_webui_dir", lambda: webui_dir)
-    manager = SessionManager(tmp_path)
+    monkeypatch.setattr("nanobot.webui.history.get_webui_dir", lambda: webui_dir)
+    manager = history.sessions
     key = "websocket:history"
     if state != "transcript":
         session = manager.get_or_create(key)
@@ -72,10 +70,10 @@ async def test_session_tools_use_canonical_records_after_restart(tmp_path, monke
         session.add_message("user", "canonical needle")
         manager.save(session)
     if state != "canonical":
-        append_transcript_object(key, {
+        history.append(key, {
             "event": "user", "chat_id": "history", "text": "display-only needle",
         })
-        append_transcript_object(key, {"event": "turn_end", "chat_id": "history"})
+        history.append(key, {"event": "turn_end", "chat_id": "history"})
 
     def durable_files():
         return {
@@ -86,7 +84,7 @@ async def test_session_tools_use_canonical_records_after_restart(tmp_path, monke
 
     original = durable_files()
     for _ in range(2):
-        manager = SessionManager(tmp_path)
+        manager = history.sessions
         with request_context(RequestContext(
             channel="websocket", chat_id="current", session_key="websocket:current",
         )):
@@ -95,7 +93,7 @@ async def test_session_tools_use_canonical_records_after_restart(tmp_path, monke
             display_search = json.loads(await SearchSessionsTool(manager).execute(query="display-only"))
         if state == "transcript":
             assert search["results"] == []
-            assert read.is_error and "session not found" in str(read)
+            assert json.loads(read)["messages"] == []
         else:
             assert [row["session_key"] for row in search["results"]] == [key]
             assert search["results"][0]["excerpts"][0]["content"] == "canonical needle"
@@ -114,18 +112,20 @@ def test_history_authorizes_and_excludes_before_opening_transcripts(
         session.metadata.update({"title": "needle", "title_user_edited": True})
         session.add_message("user", f"needle private body for {key}")
         manager.save(session)
-    protected = {
-        manager.sessions_dir / f"{JsonlSessionStore.storage_key(key)}.jsonl"
-        for key in ("sdk:denied", "sdk:current")
-    }
-    real_open = builtins.open
+    protected = {"sdk:denied", "sdk:current"}
 
-    def guarded_open(file, *args, **kwargs):
-        if isinstance(file, (str, Path)) and Path(file) in protected:
-            pytest.fail("Denied or current-session transcript was opened")
-        return real_open(file, *args, **kwargs)
+    def guarded(name):
+        real = getattr(SqliteSessionStore, name)
 
-    monkeypatch.setattr(builtins, "open", guarded_open)
+        def read(self, key, *args, **kwargs):
+            if key in protected:
+                pytest.fail("Denied or current-session transcript was opened")
+            return real(self, key, *args, **kwargs)
+
+        return read
+
+    for name in ("load", "read", "read_metadata"):
+        monkeypatch.setattr(SqliteSessionStore, name, guarded(name))
     reader = SessionHistoryReader(SessionManager(tmp_path))
     options = {
         "exclude_session_key": "sdk:current",
@@ -171,30 +171,20 @@ async def test_read_scoped_session_without_context_reads_only_header(tmp_path, m
     })
     session.add_message("user", "private transcript must not be read")
     manager.save(session)
-    target = manager.sessions_dir / f"{JsonlSessionStore.storage_key(session.key)}.jsonl"
-    real_open = builtins.open
+    real_load = SqliteSessionStore.load
+    real_read = SqliteSessionStore.read
 
-    class HeaderOnly:
-        def __init__(self, stream):
-            self.stream = stream
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            self.stream.close()
-
-        def __iter__(self):
-            yield self.stream.readline()
+    def guarded_load(self, key, *args, history=True, **kwargs):
+        if key == session.key and history:
             pytest.fail("Authorization parsed the scoped transcript body")
+        return real_load(self, key, *args, history=history, **kwargs)
 
-        def read(self, *args):
+    def guarded_read(self, key, *args, **kwargs):
+        if key == session.key:
             pytest.fail("Authorization read the full scoped transcript")
+        return real_read(self, key, *args, **kwargs)
 
-    def guarded_open(file, *args, **kwargs):
-        stream = real_open(file, *args, **kwargs)
-        return HeaderOnly(stream) if isinstance(file, (str, Path)) and Path(file) == target else stream
-
-    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(SqliteSessionStore, "load", guarded_load)
+    monkeypatch.setattr(SqliteSessionStore, "read", guarded_read)
     result = await ReadSessionTool(SessionManager(tmp_path)).execute(session_key=session.key)
     assert result == "Error: scoped session access requires a request context"

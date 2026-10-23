@@ -10,6 +10,7 @@ from typing import Any
 from nanobot.agent.hook import AgentHook, SDKCaptureHook
 from nanobot.agent.hooks import create_file_edit_activity_hook
 from nanobot.agent.loop import AgentLoop
+from nanobot.agent.tools.image_generation import register_image_generation_tool
 from nanobot.agent.tools.mcp import MCPProvider
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.config.schema import Config
@@ -17,7 +18,6 @@ from nanobot.extensions.adapters import long_lived_hooks, registered_hook_factor
 from nanobot.extensions.registry import ExtensionRegistry
 from nanobot.extensions.runtime import build_core_extension_registry, runtime_skills_loader
 from nanobot.providers.base import LLMUsage
-from nanobot.providers.image_generation import image_gen_provider_configs
 from nanobot.sdk.clients import MemoryClient, RuntimeClient, SessionClient
 from nanobot.sdk.runtime import (
     build_process_direct_kwargs,
@@ -137,6 +137,7 @@ class Nanobot:
             config.agents.defaults.model_preset = model_preset
 
         tools = ToolRegistry()
+        register_image_generation_tool(config, tools, workspace=config.workspace_path)
         mcp_provider = MCPProvider.from_config(config, tools)
         hooks = long_lived_hooks(
             "sdk",
@@ -144,7 +145,6 @@ class Nanobot:
         )
         loop = AgentLoop.from_config(
             config,
-            image_generation_provider_configs=image_gen_provider_configs(config),
             hooks=hooks.hooks,
             hook_factories=hooks.hook_factories,
             tool_registry=tools,

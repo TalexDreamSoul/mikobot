@@ -204,7 +204,7 @@ async def test_member_builtin_skill_access_respects_project_allowlist(
     denied.parent.mkdir(parents=True)
     allowed.write_text("project review skill", encoding="utf-8")
     denied.write_text("host-only skill", encoding="utf-8")
-    monkeypatch.setattr("nanobot.agent.skills.BUILTIN_SKILLS_DIR", builtin_skills)
+    monkeypatch.setattr("nanobot.agent.skill_metadata.BUILTIN_SKILLS_DIR", builtin_skills)
     tool = ReadFileTool.create(
         ToolContext(config=ToolsConfig(restrict_to_workspace=True), workspace=str(agent_workspace))
     )
@@ -309,21 +309,26 @@ async def test_member_shell_removes_host_secrets_from_the_process_environment(
     project = tmp_path / "project-alpha"
     project.mkdir()
     monkeypatch.setenv("HOST_SECRET", "host-only-token")
-    process = AsyncMock()
-    process.communicate.return_value = (b"", b"")
-    process.returncode = 0
-    process.pid = 1
+    forwarded: list[dict[str, str]] = []
+    real_spawn = ExecTool._spawn
+
+    async def spawn(command, cwd, env, *args, **kwargs):
+        forwarded.append(env)
+        # Exec supervision signals the child's process group, so it must be a real process.
+        return await real_spawn("exit 0", cwd, env, *args, **kwargs)
 
     with (
         patch("nanobot.agent.tools.shell.wrap_command", return_value="bwrap -- member-command"),
-        patch.object(ExecTool, "_spawn", return_value=process) as spawn,
+        patch.object(ExecTool, "_spawn", staticmethod(spawn)),
     ):
         with request_context(_member_request(project)):
-            result = await ExecTool(working_dir=str(tmp_path)).execute(command="echo safe")
+            result = await ExecTool(working_dir=str(tmp_path)).execute(
+                command="echo safe", yield_time_ms=10000,
+            )
 
-    forwarded_env = spawn.await_args.args[2]
+    assert len(forwarded) == 1
     assert "Exit code: 0" in result
-    assert "HOST_SECRET" not in forwarded_env
+    assert "HOST_SECRET" not in forwarded[0]
 
 
 def test_member_image_references_allow_project_files_and_exact_attachments_only(

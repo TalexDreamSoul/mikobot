@@ -1,7 +1,4 @@
-import { channelValidationMessage } from "./validationMessages";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import QRCode from "qrcode";
-import { Check, Loader2, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { NanobotFeatureInstallDialog } from "@/components/settings/shared/SettingsControls";
@@ -20,30 +17,19 @@ import type {
 } from "@/lib/types";
 import { useClient } from "@/providers/ClientProvider";
 
-export type ChannelQrConnectLabels = {
-  qrAlt?: string;
-  scanTitle: string;
-  scanDescription: string;
-  waiting: string;
-  connected: string;
-  stopped: string;
-  connecting: string;
-  scanAgain: string;
-  connect: string;
-};
+import {
+  ChannelQrConnectFlowView,
+  type ChannelQrConnectFlowViewProps,
+  type ChannelQrConnectLabels,
+  type ChannelQrConnectPendingContext,
+} from "./ChannelQrConnectFlowView";
 
 export type ChannelConnectStartOptions = Omit<ChannelConnectTarget, "riskAcknowledged"> & {
   domain?: string;
   mode?: "replace" | "create";
   force?: boolean;
 };
-export type ChannelQrConnectPendingContext = {
-  connect: ChannelConnectPayload;
-  busy: boolean;
-  poll: (
-    params?: Readonly<Record<string, string>>,
-  ) => Promise<ChannelConnectPayload | null>;
-};
+export type { ChannelQrConnectLabels, ChannelQrConnectPendingContext } from "./ChannelQrConnectFlowView";
 
 export function ChannelQrConnectFlow({
   feature,
@@ -64,6 +50,7 @@ export function ChannelQrConnectFlow({
   suppressSucceeded = false,
   onActiveChange,
   renderActions,
+  renderView,
 }: {
   feature: NanobotFeatureInfo;
   token: string;
@@ -85,15 +72,18 @@ export function ChannelQrConnectFlow({
   suppressSucceeded?: boolean;
   onActiveChange?: (active: boolean) => void;
   renderActions?: (connectButton: ReactNode) => ReactNode;
+  renderView?: (props: ChannelQrConnectFlowViewProps) => ReactNode;
 }) {
-  const { client } = useClient();
-  const pageVisible = usePageVisibility();
   const { t } = useTranslation();
   const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
+  const { client } = useClient();
+  const pageVisible = usePageVisibility();
   const [connect, setConnect] = useState<ChannelConnectPayload | null>(null);
-  const [qrDataUrl, setQrDataUrl] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{
+    action: NonNullable<ChannelQrConnectFlowViewProps["errorAction"]>;
+    message: string;
+  } | null>(null);
   const [installConfirm, setInstallConfirm] = useState<NanobotFeatureInfo | null>(null);
   const handledRequestId = useRef(0);
   const autoStarted = useRef(false);
@@ -109,37 +99,10 @@ export function ChannelQrConnectFlow({
   const pending = connect?.status === "pending";
   const succeeded = !pending && (connected || connect?.status === "succeeded");
   const pairingRequired = succeeded && connect?.pairing_required === true;
-  const canStart = !pending && !busy;
   useEffect(() => {
     onActiveChange?.(pending || busy);
   }, [pending, busy, onActiveChange]);
   const pollingPaused = Boolean(connect && pausePolling?.(connect));
-  const displayMessage = connect
-    ? resolveMessage?.(connect) ?? (connect.message ? channelValidationMessage(connect.message, t) : undefined)
-    : undefined;
-
-  useEffect(() => {
-    if (!showQrCode || !connect?.qr_url) {
-      setQrDataUrl("");
-      return;
-    }
-    let cancelled = false;
-    void QRCode.toDataURL(connect.qr_url, {
-      width: 184,
-      margin: 1,
-      color: { dark: "#111827", light: "#ffffff" },
-    })
-      .then((url) => {
-        if (!cancelled) setQrDataUrl(url);
-      })
-      .catch(() => {
-        if (!cancelled) setQrDataUrl("");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [connect?.qr_url, showQrCode]);
-
   useEffect(() => {
     if (
       !connect?.session_id
@@ -171,11 +134,10 @@ export function ChannelQrConnectFlow({
         if (payload.nanobot_features) {
           onFeaturesUpdate(payload.nanobot_features);
         }
-        if (payload.status !== "pending") {
-          setError(null);
-        }
+        setError((current) => payload.status !== "pending" || current?.action === "poll" ? null : current);
       } catch (err) {
-        if (!cancelled) setError((err as Error).message);
+        if (!cancelled) setError((current) => current?.action === "cancel"
+          ? current : { action: "poll", message: (err as Error).message });
       } finally {
         pollInFlight.current = false;
       }
@@ -230,7 +192,7 @@ export function ChannelQrConnectFlow({
         onFeaturesUpdate(payload.nanobot_features);
       }
     } catch (err) {
-      setError((err as Error).message);
+      setError({ action: "start", message: (err as Error).message });
     } finally {
       startInFlight.current = false;
       setBusy(false);
@@ -261,7 +223,7 @@ export function ChannelQrConnectFlow({
     }
     const actionTarget = sessionTargetRef.current;
     if (!actionTarget) {
-      setError("Extension action target is unavailable.");
+      setError({ action: "cancel", message: "Extension action target is unavailable." });
       return;
     }
     operationGeneration.current += 1;
@@ -274,8 +236,9 @@ export function ChannelQrConnectFlow({
         actionTarget,
       );
       setConnect(payload);
+      setError(null);
     } catch (err) {
-      setError((err as Error).message);
+      setError({ action: "cancel", message: (err as Error).message });
     } finally {
       setBusy(false);
     }
@@ -287,7 +250,7 @@ export function ChannelQrConnectFlow({
     if (!connect?.session_id) return null;
     const actionTarget = sessionTargetRef.current;
     if (!actionTarget) {
-      setError("Extension action target is unavailable.");
+      setError({ action: "poll", message: "Extension action target is unavailable." });
       return null;
     }
     const generation = operationGeneration.current;
@@ -315,19 +278,34 @@ export function ChannelQrConnectFlow({
       }
       return payload;
     } catch (err) {
-      setError((err as Error).message);
+      setError({ action: "poll", message: (err as Error).message });
       return null;
     } finally {
       setBusy(false);
     }
   };
 
-  const renderActionRow = renderActions ?? ((connectButton: ReactNode) => (
-    <div className="flex flex-wrap justify-end gap-2">{connectButton}</div>
-  ));
-
+  const viewProps: ChannelQrConnectFlowViewProps = {
+    connect,
+    busy,
+    error: error?.message ?? null,
+    errorAction: error?.action,
+    onStart: () => requestStart(forceOnRepeat && succeeded),
+    onCancel: () => void cancel(),
+    onPoll: submitPoll,
+    idleLabel,
+    connected,
+    autoStart,
+    minimalPending,
+    showQrCode,
+    labels,
+    renderPending,
+    resolveMessage,
+    suppressSucceeded: suppressSucceeded || pairingRequired,
+    renderActions,
+  };
   return (
-    <div className="mt-3 space-y-3">
+    <>
       <NanobotFeatureInstallDialog
         feature={installConfirm}
         installing={busy}
@@ -344,72 +322,8 @@ export function ChannelQrConnectFlow({
           if (pendingStart) void runStart(pendingStart.options, pendingStart.force, true);
         }}
       />
-      {autoStart && busy && !connect ? (
-        <div role="status" className="grid min-h-[228px] place-items-center">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
-          <span className="sr-only">{labels.connecting}</span>
-        </div>
-      ) : null}
-      {pending && minimalPending && showQrCode ? (
-        <div className="flex min-h-[228px] flex-col items-center justify-center gap-4 py-4">
-          <div className="grid h-[196px] w-[196px] place-items-center rounded-control bg-background shadow-[inset_0_0_0_1px_oklch(0_0_0/0.1)] dark:shadow-[inset_0_0_0_1px_oklch(1_0_0/0.1)]">
-            {qrDataUrl ? (
-              <img
-                src={qrDataUrl}
-                alt={labels.qrAlt ?? labels.scanTitle}
-                className="h-[184px] w-[184px]"
-              />
-            ) : (
-              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
-            )}
-          </div>
-          {renderPending?.({ connect, busy, poll: submitPoll })}
-          <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void cancel()}>{tx("settings.actions.cancel", "Cancel")}</Button>
-        </div>
-      ) : pending ? (
-        <div className={`grid gap-4 rounded-control border border-border/70 p-4 ${showQrCode ? "sm:grid-cols-[auto_minmax(0,1fr)]" : ""}`}>
-          {showQrCode ? <div className="grid h-[196px] w-[196px] place-items-center rounded-control border border-border/60 bg-background">
-            {qrDataUrl ? (
-              <img
-                src={qrDataUrl}
-                alt={labels.qrAlt ?? labels.scanTitle}
-                className="h-[184px] w-[184px]"
-              />
-            ) : (
-              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
-            )}
-          </div> : null}
-          <div className="flex min-w-0 flex-col justify-center">
-            <div className="text-[13px] font-semibold text-foreground">
-              {labels.scanTitle}
-            </div>
-            <p className="mt-1 text-[12.5px] leading-5 text-muted-foreground">
-              {!showQrCode || qrDataUrl ? labels.scanDescription : null}
-            </p>
-            {renderPending?.({ connect, busy, poll: submitPoll }) ?? (
-              <div className="mt-3 flex items-center gap-2 text-[12px] text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                {!showQrCode || qrDataUrl ? labels.waiting : labels.connecting}
-              </div>
-            )}
-            <div className="mt-4 flex flex-wrap justify-end gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-8 rounded-full px-3 text-[12px] font-semibold"
-                onClick={() => void cancel()}
-                disabled={busy}
-              >
-                {tx("settings.actions.cancel", "Cancel")}
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {succeeded && !suppressSucceeded && pairingRequired ? (
-        <div className="rounded-control border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-[12px] text-amber-900 dark:text-amber-100">
+      {pairingRequired && !suppressSucceeded ? (
+        <div className="mt-3 rounded-control border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-[12px] text-amber-900 dark:text-amber-100">
           <p className="font-semibold">
             {tx("settings.channels.pairingRequiredTitle", "Connected — project assignment required")}
           </p>
@@ -430,48 +344,14 @@ export function ChannelQrConnectFlow({
           </Button>
         </div>
       ) : null}
-
-      {succeeded && !suppressSucceeded && !pairingRequired ? (
-        <div className="flex items-center gap-2 rounded-control border border-emerald-500/20 px-3 py-2 text-[12px] font-medium text-emerald-700 dark:text-emerald-200">
-          <Check className="h-3.5 w-3.5" aria-hidden />
-          {displayMessage ?? labels.connected}
+      {renderView ? renderView(viewProps) : <ChannelQrConnectFlowView {...viewProps} />}
+      {pending && minimalPending && showQrCode ? (
+        <div className="flex justify-center">
+          <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void cancel()}>
+            {tx("settings.actions.cancel", "Cancel")}
+          </Button>
         </div>
       ) : null}
-
-      {connect && ["expired", "failed", "cancelled"].includes(connect.status)
-        && !(connected && connect.status === "cancelled") ? (
-        <div className="rounded-control border border-border/60 px-3 py-2 text-[12px] leading-5 text-muted-foreground">
-          {displayMessage || labels.stopped}
-        </div>
-      ) : null}
-
-      {error ? (
-        <div className="rounded-control border border-destructive/20 px-3 py-2 text-[12px] leading-5 text-destructive">
-          {error}
-        </div>
-      ) : null}
-
-      {!pending && !(autoStart && busy && !connect) ? renderActionRow(
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-8 rounded-full border-border/65 bg-background/80 px-3 text-[12px] font-semibold settings-hover"
-          onClick={() => requestStart(forceOnRepeat && succeeded)}
-          disabled={!canStart}
-        >
-          {busy ? (
-            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
-          ) : succeeded ? (
-            <RotateCcw className="mr-1.5 h-3.5 w-3.5" aria-hidden />
-          ) : null}
-          {pending
-            ? labels.connecting
-            : succeeded
-              ? labels.scanAgain
-              : idleLabel ?? labels.connect}
-        </Button>
-      ) : null}
-    </div>
+    </>
   );
 }

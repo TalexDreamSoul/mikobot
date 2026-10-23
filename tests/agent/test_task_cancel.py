@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
+from agent.session_helpers import mock_session_manager
 from nanobot.agent.memory import Consolidator
 from nanobot.bus.outbound_events import StreamDeltaEvent, StreamEndEvent
 from nanobot.collaboration import AsyncLocalCollaborationRepository, CollaborationStore
@@ -55,11 +56,11 @@ def _make_loop(
     from nanobot.bus.queue import MessageBus
 
     bus = MessageBus()
-    provider = MagicMock()
+    provider = MagicMock(aclose=AsyncMock())
     provider.get_default_model.return_value = "test-model"
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
-         patch("nanobot.agent.loop.SessionManager"), \
+         patch("nanobot.agent.loop.SessionManager", side_effect=mock_session_manager), \
          patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         loop = AgentLoop(
@@ -407,7 +408,7 @@ class TestDispatch:
     ):
         loop, bus = _make_loop(tmp_path, local_collaboration_repository)
         loop.aclose = AsyncMock()
-        loop.auto_compact.check_expired = MagicMock()
+        loop.auto_compact.check_expired = AsyncMock()
         warnings: list[str] = []
         calls = 0
 

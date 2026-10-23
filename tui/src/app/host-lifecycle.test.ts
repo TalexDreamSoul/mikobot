@@ -48,9 +48,11 @@ describe("NanobotTui with a Herdr pane title reporter", () => {
     await setup.mockInput.typeText("/")
     await setup.flush()
     const commandFrame = setup.captureCharFrame()
-    expect(commandFrame).toContain("/sessions")
     expect(commandFrame).toContain("/new-chat")
     expect(commandFrame).toContain("/branch")
+    await setup.mockInput.typeText("sessions")
+    await setup.flush()
+    expect(setup.captureCharFrame()).toContain("/sessions")
     setup.mockInput.pressEscape()
     ui.composer.setText("")
 
@@ -73,6 +75,8 @@ describe("NanobotTui with a Herdr pane title reporter", () => {
     const activeFrame = setup.captureCharFrame()
     expect(occurrences(activeFrame, "› Ship the Herdr integration")).toBe(1)
     expect(occurrences(activeFrame, "app.ts")).toBe(1)
+    expect(ui.composer.placeholder).toBe("Enter send now  Tab send next")
+    expect(ui.composerFrame.height).toBe(3)
     expect(titles).toEqual(["Ship the Herdr integration"])
 
     app.accept({

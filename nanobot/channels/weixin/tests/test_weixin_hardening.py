@@ -29,7 +29,7 @@ from nanobot.channels.weixin.runtime import (
     sanitize_weixin_markdown,
     split_weixin_message,
 )
-from nanobot.config.schema import Config, _resolve_tool_config_refs
+from nanobot.config.schema import Config
 from nanobot.extensions.adapters import channels as channel_adapters
 from nanobot.extensions.adapters.channels import (
     ChannelExtensionAdapter,
@@ -40,9 +40,6 @@ from nanobot.extensions.contracts import (
     ExtensionActionContext,
     ExtensionActionRequest,
 )
-
-# Resolve lazy tool-config forward references before constructing Config in isolated tests.
-_resolve_tool_config_refs()
 
 
 def _channel(**config: object) -> WeixinChannel:
@@ -421,7 +418,10 @@ async def test_qr_fetch_does_not_retry_invalid_request_without_local_tokens(tmp_
 @pytest.mark.asyncio
 async def test_lifecycle_notifications_are_best_effort() -> None:
     channel = _ready_channel()
-    channel._api_post = AsyncMock(return_value={"ret": 0})
+    channel._api_post = AsyncMock(side_effect=[
+        httpx.ReadTimeout("upstream unavailable"),
+        {"ret": -100, "errmsg": "upstream rejected notification"},
+    ])
 
     await channel._notify_lifecycle("start")
     await channel._notify_lifecycle("stop")

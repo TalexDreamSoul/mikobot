@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RemoteInstances, useRemoteConnections } from "@/components/remote/RemoteInstances";
+import { RemoteInstances } from "@/components/remote/RemoteInstances";
+import { useRemoteConnections } from "@/components/remote/remote-context";
 import { RemoteConnectionsPage } from "@/components/remote/RemoteConnectionsPage";
 import { Sidebar } from "@/components/Sidebar";
 import { HOST_BRIDGE } from "@/components/remote/host-bridge";
@@ -45,9 +46,9 @@ function LocalShell({ collapsed = false, initialRemote = false }) {
   return <>
   <Sidebar collapsed={collapsed} sessions={[]} activeKey={null} loading={false} newChatActive={false}
     onNewChat={() => { if (connections?.managing) connections.selectLocal(); window.location.hash = "/new"; setRemotePage(false); }} onSelect={noop} onRequestDelete={noop} onTogglePin={noop}
-    onRequestRename={noop} onToggleArchive={noop} onToggleGroup={noop}
+    onRequestRename={async () => {}} onToggleArchive={noop} onToggleGroup={noop}
     onRequestRenameProject={noop} onNewChatInProject={noop} onOpenSettings={noop}
-    onOpenApps={noop} onOpenSkills={noop} onOpenAutomations={noop} onOpenChannels={noop}
+    onOpenProjects={noop} onOpenApps={noop} onOpenSkills={noop} onOpenAutomations={noop} onOpenChannels={noop}
     onOpenSearch={noop} onToggleArchived={noop} />
   <main><div hidden={connections?.managing} aria-hidden={connections?.managing || undefined}>
     {remotePage ? <RemoteConnectionsPage onBackToChat={() => setRemotePage(false)} /> : <><p>Local conversations</p><textarea aria-label="Local draft" /></>}
@@ -103,9 +104,9 @@ describe("remote instance UX", () => {
       compatibility: { status, client_version: "1.0.0", host_version: "2.0.0" } }] });
     mocks.request.mockRejectedValue(new Error(code));
     view();
-    await screen.findByText(i18n.t(`remote.compatibility.${status}`));
-    expect(screen.queryByText("Server connection lost", { exact: true })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Version & compatibility" }));
+    await screen.findByRole("region", { name: i18n.t(`remote.compatibility.${status}`) });
+    expect(screen.queryByRole("region", { name: "Server connection lost" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Version check" }));
     expect(within(await screen.findByRole("dialog")).getByRole("status")).toHaveTextContent(i18n.t(`remote.compatibility.${status}`));
     expect(screen.queryByRole("textbox", { name: "SSH address" })).not.toBeInTheDocument();
     expect(readSelectedRemote()?.id).toBe(profile.id);
@@ -116,7 +117,7 @@ describe("remote instance UX", () => {
       compatibility: { status, client_version: "1.0.0", host_version: "2.0.0" } }] });
     view(); await openDirectory();
     fireEvent.pointerDown(screen.getByRole("button", { name: "Manage Team server" }), { button: 0, ctrlKey: false });
-    fireEvent.click(screen.getByRole("menuitem", { name: "Version & compatibility" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Version check" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("1.0.0")).toBeVisible();
     expect(within(dialog).getByText("2.0.0")).toBeVisible();
@@ -129,7 +130,7 @@ describe("remote instance UX", () => {
   it("keeps an unchecked host distinct from an incompatible host", async () => {
     view(); await openDirectory();
     fireEvent.pointerDown(screen.getByRole("button", { name: "Manage Team server" }), { button: 0, ctrlKey: false });
-    fireEvent.click(screen.getByRole("menuitem", { name: "Version & compatibility" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Version check" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByRole("status")).toHaveTextContent("Not checked yet");
     expect(within(dialog).queryByRole("link")).not.toBeInTheDocument();
@@ -167,8 +168,8 @@ describe("remote instance UX", () => {
       origin: "http://127.0.0.1:23456", data: { channel: HOST_BRIDGE, type: "hello" } })));
     await openDirectory();
     fireEvent.pointerDown(screen.getByRole("button", { name: "Manage Team server" }), { button: 0, ctrlKey: false });
-    fireEvent.click(screen.getByRole("menuitem", { name: "Rename", exact: true }));
-    const input = await screen.findByRole("textbox", { name: "Name", exact: true });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = await screen.findByRole("textbox", { name: "Name" });
     expect(input).toHaveValue("Team server");
     expect(input).toHaveAccessibleName("Name");
     expect(within(screen.getByRole("dialog")).queryByText("Name", { exact: true })).not.toBeInTheDocument();
@@ -182,6 +183,7 @@ describe("remote instance UX", () => {
     expect(screen.getByTitle(/ on 腾讯云 nanobot$/)).toBe(frame);
     expect(frame).toHaveAttribute("src", connection.url);
     expect(readSelectedRemote()).toMatchObject({ id: profile.id, name: "腾讯云 nanobot" });
+    expect(document.title).toBe("腾讯云 nanobot");
     expect(source.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: "init", name: "腾讯云 nanobot" }), "http://127.0.0.1:23456");
     expect(mocks.request.mock.calls.map(([action]) => action)).toEqual(["remote.connect", "remote.rename"]);
     fireEvent.click(screen.getByRole("button", { name: "腾讯云 nanobot ubuntu@example.test" }));
@@ -195,8 +197,8 @@ describe("remote instance UX", () => {
     fireEvent.pointerDown(screen.getByRole("button", { name: "Manage Team server" }), { button: 0, ctrlKey: false });
     fireEvent.click(screen.getByRole("menuitem", { name: i18n.t("remote.pair.route") }));
     const dialog = await screen.findByRole("dialog", { name: i18n.t("remote.pair.route") });
-    expect(within(dialog).getAllByText(i18n.t("remote.pair.routeHint"))).toHaveLength(1);
-    expect(dialog).toHaveAccessibleDescription(i18n.t("remote.pair.routeHint"));
+    expect(within(dialog).getAllByText(i18n.t("remote.pair.routeHint").replace(/\s+/g, " ").trim())).toHaveLength(1);
+    expect(dialog).toHaveAccessibleDescription(i18n.t("remote.pair.routeHint").replace(/\s+/g, " ").trim());
     expect(within(dialog).queryByText(i18n.t("remote.pair.routeDescription"))).not.toBeInTheDocument();
     expect(within(dialog).getByRole("combobox", { name: i18n.t("remote.pair.route") })).toBeEnabled();
     expect(mocks.request).not.toHaveBeenCalled();
@@ -205,8 +207,8 @@ describe("remote instance UX", () => {
   it("rejects a blank name, preserves input on failure and lets the user retry or cancel", async () => {
     view(); await openDirectory();
     fireEvent.pointerDown(screen.getByRole("button", { name: "Manage Team server" }), { button: 0, ctrlKey: false });
-    fireEvent.click(screen.getByRole("menuitem", { name: "Rename", exact: true }));
-    const input = await screen.findByRole("textbox", { name: "Name", exact: true });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = await screen.findByRole("textbox", { name: "Name" });
     fireEvent.change(input, { target: { value: "   " } });
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
     fireEvent.submit(input.closest("form")!);
@@ -218,7 +220,7 @@ describe("remote instance UX", () => {
     expect(input).toHaveAccessibleDescription(i18n.t("remote.errors.local_io_error"));
     expect(input).toHaveValue("Cloud");
     expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: "Cancel", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.getByRole("button", { name: "Manage Team server" })).toBeVisible();
     expect(mocks.request).toHaveBeenCalledTimes(1);
   });
@@ -229,8 +231,8 @@ describe("remote instance UX", () => {
     mocks.request.mockResolvedValue({ available: true, profiles: siblings.map((item) => ({ ...item, name: "Cloud" })) });
     view(); await openDirectory();
     fireEvent.pointerDown(screen.getByRole("button", { name: "Manage Team server" }), { button: 0, ctrlKey: false });
-    fireEvent.click(screen.getByRole("menuitem", { name: "Rename", exact: true }));
-    fireEvent.change(await screen.findByRole("textbox", { name: "Name", exact: true }), { target: { value: "Cloud" } });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Name" }), { target: { value: "Cloud" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await screen.findByRole("button", { name: "Manage Cloud" });
     expect(screen.getAllByRole("button", { name: "Cloud ubuntu@example.test" })).toHaveLength(1);
@@ -242,7 +244,7 @@ describe("remote instance UX", () => {
     mocks.read.mockResolvedValue({ available: true, profiles: [{ ...profile, paired: true, revoke_command: command }] });
     view(); await openDirectory();
     fireEvent.pointerDown(screen.getByRole("button", { name: "Manage Team server" }), { button: 0, ctrlKey: false });
-    fireEvent.click(screen.getByRole("menuitem", { name: "Forget server" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove connection" }));
     const dialog = await screen.findByRole("dialog", { name: "Forget Team server?" });
     const code = within(dialog).getByText(command);
     expect(code.closest("pre")).not.toBeNull();
@@ -251,7 +253,7 @@ describe("remote instance UX", () => {
     expect(await within(dialog).findByRole("button", { name: "Copied" })).toBeVisible();
     expect(copy).toHaveBeenCalledWith(command);
     expect(mocks.request).not.toHaveBeenCalled();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel", exact: true }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(mocks.request).not.toHaveBeenCalled();
   });
   it("shows one verified instance in management and the switcher while retaining both grants in details", async () => {
@@ -268,12 +270,12 @@ describe("remote instance UX", () => {
     fireEvent.pointerDown(within(details).getByRole("button", { name: "Manage connection 1" }), { button: 0, ctrlKey: false });
     fireEvent.click(screen.getByRole("menuitem", { name: "Forget connection" }));
     expect(await screen.findByRole("dialog", { name: "Forget this connection?" })).toHaveTextContent(i18n.t("remote.sameInstance.forgetHint"));
-    expect(screen.getByRole("button", { name: "Forget", exact: true })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Forget", exact: true }).firstElementChild).not.toHaveClass("truncate");
-    expect(screen.queryByRole("button", { name: "Forget server", exact: true })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Cancel", exact: true }));
+    expect(screen.getByRole("button", { name: "Forget" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Forget" }).firstElementChild).not.toHaveClass("truncate");
+    expect(screen.queryByRole("button", { name: "Remove connection" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(mocks.request).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Back", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
     fireEvent.pointerDown(screen.getByRole("button", { name: "Switch host" }), { button: 0, ctrlKey: false });
     expect(await screen.findAllByRole("menuitem", { name: "Team server ubuntu@example.test" })).toHaveLength(1);
   });
@@ -319,7 +321,7 @@ describe("remote instance UX", () => {
     expect(readSelectedRemote()?.id).toBe(profile.id);
     expect(window.location.hash).toBe(originalHash);
     expect(document.title).toBe(originalTitle);
-    fireEvent.click(within(panel).getByRole("button", { name: "Back", exact: true }));
+    fireEvent.click(within(panel).getByRole("button", { name: "Back" }));
     await waitFor(() => expect(panel).not.toBeInTheDocument());
     expect(screen.getByTitle(/ on Team server$/)).toBe(frame);
     expect(frame).toBeVisible();
@@ -335,7 +337,7 @@ describe("remote instance UX", () => {
     fireEvent.change(draft, { target: { value: "Keep this unsent draft" } });
     await openDirectory();
     expect(screen.queryByRole("textbox", { name: "Local draft" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Back", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Remote connections" })).not.toBeInTheDocument());
     expect(screen.getByRole("textbox", { name: "Local draft" })).toBe(draft);
     expect(draft).toHaveValue("Keep this unsent draft");
@@ -349,7 +351,7 @@ describe("remote instance UX", () => {
     view();
     await chooseHost("Team server ubuntu@example.test");
     await openDirectory();
-    fireEvent.click(screen.getByRole("button", { name: "Back", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
     await act(async () => finish(connection));
     const frame = await readyRemote();
     expect(frame).toBeVisible();
@@ -379,7 +381,7 @@ describe("remote instance UX", () => {
     const frame = await readyRemote();
     expect(frame).not.toBeVisible();
     expect(screen.getByRole("region", { name: "Remote connections" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Back", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
     expect(frame).toBeVisible();
     expect(readSelectedRemote()?.id).toBe(profile.id);
   });
@@ -408,7 +410,7 @@ describe("remote instance UX", () => {
     const row = screen.getByRole("button", { name: "Team server ubuntu@example.test" });
     expect(row).not.toHaveAttribute("aria-current");
     expect(within(row).getByRole("status")).toHaveTextContent(label);
-    fireEvent.click(screen.getByRole("button", { name: "Back", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
     fireEvent.pointerDown(screen.getByRole("button", { name: "Switch host" }), { button: 0, ctrlKey: false });
     const item = await screen.findByRole("menuitem", { name: "Team server ubuntu@example.test" });
     expect(within(item).getByRole("status")).toHaveTextContent(label);
@@ -426,7 +428,7 @@ describe("remote instance UX", () => {
     fireEvent.click(screen.getByRole("button", { name: "Other server ubuntu@example.test" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(i18n.t("remote.errors.ssh_unreachable"));
     expect(readSelectedRemote()?.id).toBe(profile.id);
-    fireEvent.click(within(screen.getByRole("dialog", { name: "Connect to a server" })).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Add connection" })).getByRole("button", { name: "Cancel" }));
     expect(within(screen.getByRole("button", { name: "Other server ubuntu@example.test" })).getByRole("status")).toHaveTextContent("Connection error");
     expect(screen.getByRole("region", { name: "Remote connections" })).toBeVisible();
   });
@@ -468,7 +470,7 @@ describe("remote instance UX", () => {
     mocks.read.mockResolvedValue({ available: true, machine_name: "Xubin-Mac", profiles: [{ ...profile, connected: true }] });
     view(false, true);
     fireEvent.pointerDown(await screen.findByRole("button", { name: "Manage Team server" }), { button: 0, ctrlKey: false });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Forget server" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Remove connection" }));
     const dialog = await screen.findByRole("dialog", { name: "Forget Team server?" });
     expect(within(dialog).getByRole("note")).toHaveTextContent("Unsaved work may be lost");
     expect(within(dialog).getByRole("note")).toHaveTextContent("tabs using this connection");
@@ -515,8 +517,8 @@ describe("remote instance UX", () => {
     chooseExistingSSH();
     fireEvent.change(screen.getByRole("textbox", { name: "SSH address" }), { target: { value: "ubuntu@203.0.113.1" } });
     fireEvent.click(screen.getByRole("button", { name: "Connection options" }));
-    fireEvent.click(screen.getByRole("button", { name: "Choose file: SSH config file (optional)" }));
-    await waitFor(() => expect(screen.getByRole("textbox", { name: "SSH config file (optional)" })).toHaveValue("/local/team/ssh_config"));
+    fireEvent.click(screen.getByRole("button", { name: "Choose file: SSH config" }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "SSH config" })).toHaveValue("/local/team/ssh_config"));
     expect(mocks.request).toHaveBeenCalledWith("remote.pick_file", {}, 310_000);
     expect(await screen.findByRole("button", { name: "Use cloud-team" })).toBeVisible();
     expect(screen.getByRole("textbox", { name: "SSH address" })).toHaveValue("ubuntu@203.0.113.1");
@@ -530,10 +532,10 @@ describe("remote instance UX", () => {
     fireEvent.click(screen.getByRole("button", { name: /Connect to remote / }));
     chooseExistingSSH();
     fireEvent.click(screen.getByRole("button", { name: "Connection options" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Private key path (optional)" }), { target: { value: "/local/ssh-key" } });
-    fireEvent.click(screen.getByRole("button", { name: "Choose file: Private key path (optional)" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Choose file: Private key path (optional)" })).toBeEnabled());
-    expect(screen.getByRole("textbox", { name: "Private key path (optional)" })).toHaveValue("/local/ssh-key");
+    fireEvent.change(screen.getByRole("textbox", { name: "Private key path" }), { target: { value: "/local/ssh-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "Choose file: Private key path" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Choose file: Private key path" })).toBeEnabled());
+    expect(screen.getByRole("textbox", { name: "Private key path" })).toHaveValue("/local/ssh-key");
   });
 
   it("does not apply a late file choice to a new editor", async () => {
@@ -543,7 +545,7 @@ describe("remote instance UX", () => {
     fireEvent.click(screen.getByRole("button", { name: /Connect to remote / }));
     chooseExistingSSH();
     fireEvent.click(screen.getByRole("button", { name: "Connection options" }));
-    fireEvent.click(screen.getByRole("button", { name: "Choose file: Private key path (optional)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose file: Private key path" }));
     expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
     expect(screen.getByText("Choose a file in the system dialog…")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -551,7 +553,7 @@ describe("remote instance UX", () => {
     chooseExistingSSH();
     fireEvent.click(screen.getByRole("button", { name: "Connection options" }));
     await act(async () => finish({ path: "/old/choice" }));
-    expect(screen.getByRole("textbox", { name: "Private key path (optional)" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "Private key path" })).toHaveValue("");
   });
 
   async function addAndInspect() {
@@ -632,7 +634,7 @@ describe("remote instance UX", () => {
   it("asks for the server location only after SSH succeeds but discovery finds nothing", async () => {
     mocks.inspect.mockResolvedValue({ hostname: "team-host", candidates: [], incomplete: true });
     await addAndInspect();
-    const configPath = await screen.findByRole("textbox", { name: /Server's .* config path/ });
+    const configPath = await screen.findByRole("textbox", { name: "Config path" });
     expect(screen.getByText("SSH connected")).toBeVisible();
     fireEvent.change(configPath, { target: { value: "/srv/bot/config.json" } });
     fireEvent.click(screen.getByRole("button", { name: /^Open / }));
@@ -646,8 +648,8 @@ describe("remote instance UX", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("does not confirm a key problem");
     expect(screen.queryByText("SSH connected")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "SSH login settings" }));
-    expect(screen.getByRole("textbox", { name: "Private key path (optional)" })).toBeVisible();
-    expect(screen.queryByRole("textbox", { name: /Server's .* config path/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Private key path" })).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "Config path" })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "SSH address" })).toHaveValue(profile.host);
   });
 
@@ -658,7 +660,7 @@ describe("remote instance UX", () => {
     await waitFor(() => expect(mocks.inspect).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await act(async () => resolve({ hostname: "server", candidates: [{ config_path: "/srv/bot/config.json", runtime_user: "", service: "" }], incomplete: false }));
-    expect(screen.queryByRole("dialog", { name: "Connect to a server" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Add connection" })).not.toBeInTheDocument();
     expect(mocks.request.mock.calls.some(([action]) => action === "remote.connect")).toBe(false);
     expect(mocks.request.mock.calls.filter(([action]) => action === "remote.save")).toHaveLength(1);
   });
@@ -671,8 +673,8 @@ describe("remote instance UX", () => {
       : action === "remote.fingerprint" ? { fingerprint: "SHA256:verified-test", challenge: "nonce" } : {});
     await addAndInspect();
     await screen.findByText("SHA256:verified-test");
-    fireEvent.click(screen.getByRole("button", { name: "Fingerprint matches · Connect" }));
-    expect(await screen.findByRole("textbox", { name: /config path/ })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Connect to verified host" }));
+    expect(await screen.findByRole("textbox", { name: "Config path" })).toBeVisible();
     expect(mocks.inspect).toHaveBeenCalledTimes(2);
     expect(mocks.request.mock.calls.some(([action]) => action === "remote.connect")).toBe(false);
   });
@@ -708,7 +710,7 @@ describe("remote instance UX", () => {
     const switcher = await screen.findByRole("button", { name: "Switch host" });
     expect(screen.queryByRole("button", { name: "Remote connections" })).not.toBeInTheDocument();
     expect(switcher).toHaveClass("w-8", "h-8");
-    expect(switcher).toHaveAttribute("title", expect.stringContaining("Xubin-Mac"));
+    expect(within(switcher).getByRole("status")).toHaveTextContent("Xubin-Mac");
     await openDirectory();
   });
 
@@ -754,7 +756,7 @@ describe("remote instance UX", () => {
     message({ type: "surface", theme: "dark", rect: { left: 272, top: 0, width: 900, height: 800 } });
     expect(document.documentElement).not.toHaveClass("dark");
     message({ type: "open", anchor: { left: 40, top: 500, width: 150, height: 32 } });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Manage connections…" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Manage connections" }));
     const panel = screen.getByTestId("remote-management-surface");
     expect(panel).toHaveStyle({ left: "272px" });
     expect(document.documentElement).toHaveClass("dark");
@@ -783,8 +785,8 @@ describe("remote instance UX", () => {
     await openDirectory();
     fireEvent.click(screen.getByRole("button", { name: /^连接远程 / }));
     chooseExistingSSH();
-    expect(screen.getByRole("heading", { name: "连接服务器" })).toBeInTheDocument();
-    expect(screen.getByRole("dialog", { name: "连接服务器" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "添加连接" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "添加连接" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(screen.getByRole("heading", { name: "远程连接" })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "SSH 地址" })).not.toBeInTheDocument();
@@ -798,7 +800,7 @@ describe("remote instance UX", () => {
     expect(frame).toHaveAttribute("src", connection.url);
     expect(frame).toHaveAttribute("sandbox", expect.not.stringContaining("allow-top-navigation"));
     expect(document.querySelector('[data-host-view="local"]')).toHaveAttribute("inert");
-    expect(screen.getByRole("button", { name: "Switch host" })).toHaveAttribute("title", expect.stringContaining("Team server · team-host"));
+    expect(within(screen.getByRole("button", { name: "Switch host" })).getByRole("status")).toHaveTextContent("Team server, team-host");
     expect(mocks.request).toHaveBeenCalledWith("remote.connect", { id: profile.id }, 65_000);
     expect(window.sessionStorage.getItem("nanobot.remote-instance")).not.toContain("secret");
     expect(readRecentRemotes()).toEqual([profile.id]);
@@ -864,13 +866,13 @@ describe("remote instance UX", () => {
     const frame = await readyRemote();
     await openDirectory();
     fireEvent.pointerDown(screen.getByRole("button", { name: "Manage Team server" }), { button: 0, ctrlKey: false });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Forget server" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Remove connection" }));
     const dialog = await screen.findByRole("dialog", { name: "Forget Team server?" });
     mocks.request.mockImplementation(async (action: string) => {
       if (action === "remote.remove") throw new Error("local_io_error");
       return {};
     });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Forget server" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove connection" }));
     await within(dialog).findByRole("alert");
     expect(readSelectedRemote()?.id).toBe(profile.id);
     expect(frame).toBeInTheDocument();
@@ -878,7 +880,7 @@ describe("remote instance UX", () => {
 
     mocks.request.mockResolvedValue({ available: true, profiles: [] });
     mocks.read.mockRejectedValue(new Error("directory_unavailable"));
-    fireEvent.click(within(dialog).getByRole("button", { name: "Forget server" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove connection" }));
     await waitFor(() => expect(frame).not.toBeInTheDocument());
     expect(readSelectedRemote()).toBeNull();
     expect(screen.queryByRole("button", { name: "Manage Team server" })).not.toBeInTheDocument();
@@ -897,10 +899,10 @@ describe("remote instance UX", () => {
     rememberSelectedRemote(connection);
     mocks.request.mockRejectedValue(new Error("ssh_unreachable"));
     view();
-    await screen.findByText("Server connection lost");
+    await screen.findByRole("region", { name: "Server connection lost" });
     expect(screen.queryByText("Local conversations")).not.toBeVisible();
     expect(screen.getByRole("button", { name: "Reconnect" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /^Back to local / }));
+    fireEvent.click(screen.getByRole("button", { name: "Back to local" }));
     await screen.findByText("Local conversations");
   });
 
@@ -924,8 +926,8 @@ describe("remote instance UX", () => {
     rememberSelectedRemote(connection);
     mocks.request.mockRejectedValue(new Error("ssh_unreachable"));
     view();
-    await screen.findByText("Server connection lost");
-    fireEvent.click(screen.getByRole("button", { name: /^Back to local / }));
+    await screen.findByRole("region", { name: "Server connection lost" });
+    fireEvent.click(screen.getByRole("button", { name: "Back to local" }));
     await screen.findByText("Local conversations");
     mocks.request.mockResolvedValue(connection);
     await openDirectory();
@@ -999,7 +1001,7 @@ describe("remote instance UX", () => {
     expect(mocks.request).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Connection options" }));
     expect(screen.getByRole("spinbutton", { name: "SSH port" })).toHaveValue(2222);
-    expect(screen.getByRole("textbox", { name: "Private key path (optional)" })).toHaveValue("~/.ssh/team key");
+    expect(screen.getByRole("textbox", { name: "Private key path" })).toHaveValue("~/.ssh/team key");
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     await readyRemote();
     expect(mocks.request).toHaveBeenCalledWith("remote.save", {
@@ -1063,7 +1065,7 @@ describe("remote instance UX", () => {
     await waitFor(() => expect(finish).toBeDefined());
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await act(async () => { finish?.(connection); });
-    expect(screen.queryByRole("dialog", { name: "Connect to a server" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Add connection" })).not.toBeInTheDocument();
     expect(screen.queryByTitle(/ on Team server$/)).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(readSelectedRemote()).toBeNull();
@@ -1105,7 +1107,7 @@ describe("remote instance UX", () => {
     await waitFor(() => expect(finish).toBeDefined());
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await act(async () => { finish?.({ fingerprint: "SHA256:example", challenge: "one-use" }); });
-    expect(screen.queryByRole("dialog", { name: "Connect to a server" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Add connection" })).not.toBeInTheDocument();
     expect(screen.queryByText("SHA256:example")).not.toBeInTheDocument();
   });
 
@@ -1132,14 +1134,14 @@ describe("remote instance UX", () => {
     fireEvent.click(screen.getByRole("button", { name: /Connect to remote / }));
     chooseExistingSSH();
     const host = screen.getByRole("textbox", { name: "SSH address" });
-    const dialog = screen.getByRole("dialog", { name: "Connect to a server" });
+    const dialog = screen.getByRole("dialog", { name: "Add connection" });
     expect(dialog).toContainElement(host);
     expect(host).toHaveFocus();
     expect(within(dialog).getAllByRole("textbox")).toHaveLength(1);
     expect(screen.getByRole("button", { name: /Connect to remote /, hidden: true })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Connect to a server" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add connection" })).not.toBeInTheDocument());
     expect(screen.getByRole("button", { name: /Connect to remote / })).toHaveFocus();
     expect(screen.getByRole("heading", { name: "Remote connections" })).toBeVisible();
   });
@@ -1149,7 +1151,7 @@ describe("remote instance UX", () => {
     mocks.request.mockImplementation(() => new Promise<RemoteConnection>((resolve) => { finish = resolve; }));
     view(); await openDirectory();
     fireEvent.click(screen.getByRole("button", { name: "Team server ubuntu@example.test" }));
-    fireEvent.click(screen.getByRole("button", { name: "Back", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
     await act(async () => { finish?.(connection); });
     expect(screen.getByText("Local conversations")).toBeVisible();
     expect(screen.queryByTitle(/ on Team server$/)).not.toBeInTheDocument();
@@ -1166,7 +1168,7 @@ describe("remote instance UX", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "SSH address" }), { target: { value: "ubuntu@example.test" } });
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    fireEvent.click(screen.getByRole("button", { name: "Back", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
     await act(async () => { finish?.({ id: profile.id }); });
     expect(mocks.request).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Local conversations")).toBeVisible();
@@ -1196,12 +1198,12 @@ describe("remote instance UX", () => {
     view();
     const identity = await screen.findByRole("button", { name: "Switch host" });
     expect(identity).toHaveTextContent("Local");
-    expect(identity).toHaveAttribute("title", expect.stringContaining("Xubin-Mac"));
+    expect(within(identity).getByRole("status")).toHaveTextContent("Xubin-Mac");
     expect(screen.getByRole("navigation", { name: "Sidebar navigation" })).toContainElement(identity);
     expect(document.querySelector("header")).toBeNull();
     fireEvent.pointerDown(identity, { button: 0, ctrlKey: false });
     expect(await screen.findByRole("menuitem", { name: /Local .* Xubin-Mac/ })).toBeVisible();
-    expect(screen.getByRole("menuitem", { name: "Manage connections…" })).toBeVisible();
+    expect(screen.getByRole("menuitem", { name: "Manage connections" })).toBeVisible();
   });
 
   it("discovers and filters SSH aliases without connecting, then inherits the selected config", async () => {
@@ -1237,9 +1239,9 @@ describe("remote instance UX", () => {
     chooseExistingSSH();
     fireEvent.click(screen.getByRole("button", { name: "Connection options" }));
     mocks.discover.mockResolvedValue({ hosts: [{ host: "team", source: "/team/ssh_config", ssh_config: "/team/ssh_config" }], files: ["/team/ssh_config"], incomplete: false });
-    fireEvent.change(screen.getByRole("textbox", { name: "SSH config file (optional)" }), { target: { value: "/team/ssh_config" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "SSH config" }), { target: { value: "/team/ssh_config" } });
     fireEvent.click(await screen.findByRole("button", { name: "Use team" }));
-    expect(screen.getByRole("textbox", { name: "SSH config file (optional)" })).toHaveValue("/team/ssh_config");
+    expect(screen.getByRole("textbox", { name: "SSH config" })).toHaveValue("/team/ssh_config");
     expect(screen.getByRole("spinbutton", { name: "SSH port" })).toHaveValue(null);
     expect(mocks.discover).toHaveBeenCalledWith({ ssh_config: "/team/ssh_config" });
     expect(screen.queryByRole("button", { name: "Read hosts" })).not.toBeInTheDocument();
@@ -1268,7 +1270,7 @@ describe("remote instance UX", () => {
     chooseExistingSSH();
     await waitFor(() => expect(finishOld).toBeDefined());
     fireEvent.click(screen.getByRole("button", { name: "Connection options" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "SSH config file (optional)" }), { target: { value: "/team/config" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "SSH config" }), { target: { value: "/team/config" } });
     await screen.findByRole("button", { name: "Use custom-team" });
     await act(async () => { finishOld?.({ hosts: [{ host: "stale-host", source: "/default", ssh_config: "" }], files: ["/default"], incomplete: false }); });
     expect(screen.queryByRole("button", { name: "Use stale-host" })).not.toBeInTheDocument();
@@ -1300,27 +1302,33 @@ describe("remote instance UX", () => {
     await screen.findByText("SHA256:example");
     expect(mocks.request.mock.calls.some(([action]) => action === "remote.trust")).toBe(false);
     mocks.request.mockImplementation(async (action: string) => action === "remote.connect" ? connection : {});
-    fireEvent.click(screen.getByRole("button", { name: "Fingerprint matches · Connect" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connect to verified host" }));
     await readyRemote();
     expect(mocks.request).toHaveBeenCalledWith("remote.trust", { id: profile.id, challenge: "one-use" }, 65_000);
   });
 
   it("tolerates transient health failures and covers, rather than reloads, the remote frame", async () => {
     let tick: (() => void) | undefined;
-    vi.spyOn(window, "setInterval").mockImplementation((callback, delay) => { if (delay === 5_000) tick = callback as () => void; return 1; });
+    const setInterval = globalThis.setInterval;
+    vi.spyOn(window, "setInterval").mockImplementation((callback, delay) => {
+      if (delay === 5_000) tick = callback;
+      const timer = setInterval(callback, delay);
+      globalThis.clearInterval(timer);
+      return timer;
+    });
     view(); await openDirectory();
     fireEvent.click(screen.getByRole("button", { name: "Team server ubuntu@example.test" }));
     const frame = await readyRemote();
     fireEvent.load(frame);
     await act(async () => { tick?.(); });
-    expect(screen.queryByText("Server connection lost")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Server connection lost" })).not.toBeInTheDocument();
     await act(async () => { tick?.(); });
-    await screen.findByText("Server connection lost");
+    await screen.findByRole("region", { name: "Server connection lost" });
     expect(screen.getByTitle(/ on Team server$/)).toBeInTheDocument();
     expect(frame.parentElement).toHaveAttribute("inert");
     expect(document.querySelector('[data-host-view="local"]')).toHaveAttribute("inert");
     fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
-    await waitFor(() => expect(screen.queryByText("Server connection lost")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Server connection lost" })).not.toBeInTheDocument());
     expect(screen.queryByText("Opening your server…")).not.toBeInTheDocument();
     expect(screen.getByTitle(/ on Team server$/)).toBe(frame);
     expect(frame.parentElement).not.toHaveAttribute("inert");
@@ -1336,11 +1344,11 @@ describe("remote instance UX", () => {
     expect(mocks.read).toHaveBeenCalledTimes(1);
     await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
     expect(mocks.read).toHaveBeenCalledTimes(2);
-    await screen.findByText("Server connection lost");
+    await screen.findByRole("region", { name: "Server connection lost" });
     mocks.read.mockResolvedValue({ available: true, profiles: [{ ...profile, connected: true }] });
     await act(async () => { window.dispatchEvent(new Event("pageshow")); });
     expect(mocks.read).toHaveBeenCalledTimes(3);
-    expect(screen.queryByText("Server connection lost")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Server connection lost" })).not.toBeInTheDocument();
     expect(screen.getByTitle(/ on Team server$/)).toBe(frame);
     expect(readSelectedRemote()?.id).toBe(profile.id);
     expect(mocks.request.mock.calls.filter(([action]) => action === "remote.connect")).toHaveLength(1);
@@ -1378,7 +1386,7 @@ describe("remote instance UX", () => {
     await act(async () => { window.dispatchEvent(new Event("pageshow")); });
     expect(screen.getByText(i18n.t(`remote.errors.${code}`))).toBeVisible();
     expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Manage connections…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Manage connections" }));
     expect(readSelectedRemote()?.id).toBe(profile.id);
     expect(screen.getByRole("region", { name: "Remote connections" })).toBeVisible();
     expect(mocks.request.mock.calls.filter(([action]) => action === "remote.disconnect")).toHaveLength(0);
@@ -1388,11 +1396,11 @@ describe("remote instance UX", () => {
     rememberSelectedRemote(connection);
     mocks.request.mockRejectedValue(new Error("ssh_unreachable"));
     view();
-    await screen.findByText("Server connection lost");
+    await screen.findByRole("region", { name: "Server connection lost" });
     fireEvent.pointerDown(screen.getByRole("button", { name: "Switch host" }), { button: 0, ctrlKey: false });
     fireEvent.click(await screen.findByRole("button", { name: "Close" }));
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
-    expect(screen.getByText("Server connection lost")).toBeVisible();
+    expect(screen.getByRole("region", { name: "Server connection lost" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Reconnect" })).toBeVisible();
     expect(screen.queryByText("Opening your server…")).not.toBeInTheDocument();
   });

@@ -9,11 +9,13 @@ from collections import defaultdict
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 from websockets.asyncio.server import ServerConnection
 from websockets.http11 import Request as WsRequest
 
+from nanobot.runtime_admission import RuntimeMaintenanceError
 from nanobot.webui.gateway_tokens import GatewayTokenStore
 from nanobot.webui.http_utils import (
     is_trusted_proxy_authenticated_request,
@@ -75,6 +77,10 @@ class WebUIGatewayEndpoint:
         is_allowed: Callable[[str], bool],
     ) -> Any:
         """Route one listener request to a WS handshake or the HTTP application."""
+        try:
+            self._http.bus.admission.check()
+        except RuntimeMaintenanceError:
+            return connection.respond(HTTPStatus.SERVICE_UNAVAILABLE, "Gateway update is being verified. Retry shortly.\n")
         got, query = parse_request_path(request.path)
         expected_ws = normalize_config_path(self._config.path)
         if got == expected_ws and is_websocket_upgrade(request):

@@ -7,17 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import {
-  Activity,
-  Check,
-  ChevronRight,
-  CircleAlert,
-  Clock3,
-  Copy,
-  Link2,
-  Quote,
-  Wrench,
-} from "lucide-react";
+import { Activity, Check, ChevronRight, CircleAlert, Clock3, Copy, Quote, Wrench } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { DisclosureContent } from "@/components/ui/disclosure";
 
@@ -29,20 +19,15 @@ import { InlineImageProvider, useInlineImages } from "@/components/InlineImageCo
 import { MarkdownText } from "@/components/MarkdownText";
 import { SlashCommandText } from "@/components/SlashCommandText";
 import { ReasoningRow } from "@/components/thread/activity/ReasoningRow";
+import { StreamingLabelSheen } from "@/components/ui/streaming-label-sheen";
 import { ContextCompactionNotice } from "@/components/thread/ContextCompactionNotice";
 import { UserMessageText } from "@/components/UserMessageText";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { HoverHint } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { copyTextToClipboard } from "@/lib/clipboard";
-import { formatMessageEndTime } from "@/lib/format";
+import { formatMessageEndTime } from "@/lib/format-time";
 import { toMediaAttachment } from "@/lib/media";
 import { matchingSlashCommand } from "@/lib/slash-command";
-import { sessionHandleColor } from "@/lib/session-handle";
 import { parseQuotedUserMessage } from "@/lib/user-message-quote";
 import type {
   CliAppInfo,
@@ -134,18 +119,18 @@ export function MessageCopyButton({ message, className }: { message: UIMessage; 
   const content = messageCopyContent(message, t);
   const { copied, label, onCopy } = useMessageCopy(content);
   if (!content.trim()) return null;
-  return <TooltipProvider><Tooltip><TooltipTrigger asChild><button type="button" data-message-block-copy-action
+  return <HoverHint content={label} side="top" align="center"><button type="button" data-message-block-copy-action
     data-assistant-copy-action={message.role === "assistant" || undefined}
     onClick={onCopy} aria-label={label}
     className={cn(
       "inline-flex h-[var(--message-block-control-size)] w-[var(--message-block-action-width)] items-center justify-center rounded-control",
-      "text-muted-foreground transition-[color,background-color,scale] hover:bg-muted/70 hover:text-foreground active:scale-[0.96]",
+      "text-muted-foreground transition-[color] hover:text-foreground",
       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transform-none",
       className,
     )}>
     {copied ? <Check className="h-3.5 w-3.5" strokeWidth={1.75} aria-hidden />
       : <Copy className="h-3.5 w-3.5" strokeWidth={1.75} aria-hidden />}
-  </button></TooltipTrigger><TooltipContent side="top" align="center">{label}</TooltipContent></Tooltip></TooltipProvider>;
+  </button></HoverHint>;
 }
 
 interface MessageBlockMenuActivity {
@@ -160,7 +145,6 @@ interface MessageBlockMenuActionsProps {
   isTurnStreaming?: boolean;
   onForkFromHere?: () => void;
   activity?: MessageBlockMenuActivity;
-  onViewLinks?: () => void;
   sheet?: boolean;
 }
 
@@ -170,7 +154,6 @@ export function MessageBlockMenuActions({
   isTurnStreaming = false,
   onForkFromHere,
   activity,
-  onViewLinks,
   sheet = false,
 }: MessageBlockMenuActionsProps) {
   const { t } = useTranslation();
@@ -195,7 +178,6 @@ export function MessageBlockMenuActions({
     : "";
 
   return (
-    <TooltipProvider>
       <div
         data-message-block-menu-actions
         className={cn("flex max-w-full flex-col items-start gap-1", sheet ? "w-full" : "w-max")}
@@ -209,8 +191,7 @@ export function MessageBlockMenuActions({
               <div className="flex min-h-[var(--message-block-control-size)] items-center gap-0.5">
                 {!sheet && hasText ? <MessageCopyButton message={message} /> : null}
                 {showFork ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
+                  <HoverHint content={t("message.forkFromHere")} side="top" align="center">
                       <button
                         type="button"
                         data-message-block-fork-action
@@ -219,8 +200,8 @@ export function MessageBlockMenuActions({
                         aria-label={t("message.forkFromHere")}
                         className={cn(
                           "inline-flex h-[var(--message-block-control-size)] w-[var(--message-block-action-width)] items-center justify-center rounded-control",
-                          "text-muted-foreground transition-[color,background-color,scale]",
-                          "hover:bg-muted/70 hover:text-foreground active:scale-[0.96]",
+                          "text-muted-foreground transition-colors",
+                          "hover:text-foreground",
                           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                           "motion-reduce:transform-none",
                           sheet && "w-full justify-start gap-2 px-2 text-sm",
@@ -229,11 +210,7 @@ export function MessageBlockMenuActions({
                         <ForkArrowIcon className="h-3.5 w-3.5" />
                         {sheet ? <span>{t("message.forkFromHere")}</span> : null}
                       </button>
-                    </TooltipTrigger>
-                    <TooltipContent side="top" align="center">
-                      {t("message.forkFromHere")}
-                    </TooltipContent>
-                  </Tooltip>
+                  </HoverHint>
                 ) : null}
               </div>
             ) : null}
@@ -256,8 +233,7 @@ export function MessageBlockMenuActions({
                   data-message-block-activity-icon
                   className={cn(
                     "inline-flex h-[var(--message-block-control-size)] w-[var(--message-block-action-width)] shrink-0 items-center justify-center rounded-control",
-                    "transition-[background-color,box-shadow,scale]",
-                    "group-hover:bg-muted/70 group-active:scale-[0.96]",
+                    "transition-colors",
                     "group-focus-visible:ring-2 group-focus-visible:ring-ring",
                     "motion-reduce:transform-none",
                     sheet && "w-3.5",
@@ -270,10 +246,6 @@ export function MessageBlockMenuActions({
             ) : null}
           </div>
         ) : null}
-        {onViewLinks ? <button type="button" data-message-links-trigger onClick={onViewLinks}
-          className="flex min-h-[var(--message-block-control-size)] w-full items-center gap-2 rounded-control px-2 py-1.5 text-[13px] text-muted-foreground hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-          <Link2 className="h-3.5 w-3.5" aria-hidden />{t("webPreview.viewLinks")}
-        </button> : null}
         <FallbackResponseSources
           sources={message.role === "assistant" ? message.responseSources : undefined}
           className="min-h-[var(--message-block-control-size)] gap-1"
@@ -282,7 +254,7 @@ export function MessageBlockMenuActions({
         {timestampLabel || automationSourceLabel ? (
           <div
             data-message-block-metadata
-            className={cn("mt-0.5 w-full border-t border-border/45 px-1.5 pt-1 leading-4", sheet ? "px-2 text-xs text-muted-foreground" : "text-[10px] text-muted-foreground/45")}
+            className={cn("mt-0.5 w-full border-t border-border/45 px-1.5 pt-1 leading-4 text-muted-foreground", sheet ? "px-2 text-xs" : "text-[10px]")}
           >
             {timestampLabel ? (
               <time
@@ -300,15 +272,15 @@ export function MessageBlockMenuActions({
             {automationSourceLabel ? (
               <span
                 data-automation-trigger
-                className="flex min-h-[var(--message-block-control-size)] items-center break-words"
+                className="flex min-h-[var(--message-block-control-size)] flex-wrap items-baseline gap-x-2 break-words"
               >
-                {t("message.automationTriggered")} · {automationSourceLabel}
+                <span>{t("message.automationTriggered")}</span>{" "}
+                <span>{automationSourceLabel}</span>
               </span>
             ) : null}
           </div>
         ) : null}
       </div>
-    </TooltipProvider>
   );
 }
 
@@ -365,8 +337,15 @@ function UserDeliveryStatus({
   const { title, body } = deliveryErrorCopy(errorKind, t);
   return (
     <>
-      <Tooltip>
-        <TooltipTrigger asChild>
+      <HoverHint
+        side="top"
+        align="end"
+        contentClassName="max-w-72 px-3 py-2.5 text-left"
+        content={<>
+          <p className="font-medium text-popover-foreground">{title}</p>
+          <p className="mt-1 leading-relaxed text-muted-foreground">{body}</p>
+        </>}
+      >
           <button
             type="button"
             aria-label={`${label}: ${title}`}
@@ -380,16 +359,7 @@ function UserDeliveryStatus({
             <CircleAlert className="h-3.5 w-3.5" aria-hidden />
             {label}
           </button>
-        </TooltipTrigger>
-        <TooltipContent
-          side="top"
-          align="end"
-          className="max-w-72 px-3 py-2.5 text-left"
-        >
-          <p className="font-medium text-popover-foreground">{title}</p>
-          <p className="mt-1 leading-relaxed text-muted-foreground">{body}</p>
-        </TooltipContent>
-      </Tooltip>
+      </HoverHint>
       <span role="alert" aria-live="assertive" className="sr-only">
         {title}. {body}
       </span>
@@ -407,23 +377,18 @@ function IncomingSessionMessage({
   onOpenFilePreview?: (path: string) => void;
 }) {
   const handle = message.sessionMessage!.session;
-  const color = sessionHandleColor(handle.id);
   const handleName = `@${handle.name}`;
 
   return (
     <div
       data-session-message
-      className="group relative w-full text-[15px]"
-      style={{ lineHeight: "var(--cjk-line-height)" }}
+      className="group relative mr-auto w-fit min-w-0 max-w-[min(85%,36rem)] text-reading"
     >
-      {contextMenu}
-      <div
-        className="min-w-0 rounded-es-[16px] border-s-2 bg-background pb-1 ps-2.5"
-        style={{ borderInlineStartColor: color }}
-      >
-        <div className="mb-1.5 flex items-center text-[12px] text-muted-foreground">
-          <SessionHandleLabel id={handle.id}>{handleName}</SessionHandleLabel>
-        </div>
+      <div className="mb-1.5 flex items-center px-4 text-[12px] text-muted-foreground">
+        <SessionHandleLabel id={handle.id}>{handleName}</SessionHandleLabel>
+      </div>
+      <div className="relative min-w-0 rounded-floating bg-secondary/70 px-4 py-2">
+        {contextMenu}
         <div data-assistant-selectable="true" className="min-w-0">
           <MarkdownText
             preserveStreamingLayout
@@ -507,13 +472,12 @@ export function MessageBubble({
     );
     return (
       <div
-        data-user-text-bubble={hasText && !hasImages && !hasMedia && !quotedContext || undefined}
         className="group relative ml-auto flex w-fit max-w-[min(85%,36rem)] flex-col items-end gap-1.5"
       >
-        {contextMenu}
+        {!hasText ? contextMenu : null}
         {hasImages ? <ImageGallery images={images} align="right" size="compact" /> : null}
         {!hasImages && hasMedia ? (
-          <MessageMedia media={media} align="right" />
+          <MessageMedia media={media} align="right" pending={message.deliveryStatus === "sending"} />
         ) : null}
         {quotedContext ? (
           <UserQuotedContext
@@ -522,28 +486,29 @@ export function MessageBubble({
           />
         ) : null}
         {hasText ? (
-          <p
-            data-temporary-message={temporary ? "true" : undefined}
-            className={cn(
-              "ml-auto w-fit max-w-full min-w-0 rounded-floating px-4 py-2",
-              "text-left text-[16px]/[1.75] whitespace-pre-wrap [overflow-wrap:anywhere]",
-              temporary
-                ? "border border-dashed border-muted-foreground/40 bg-transparent"
-                : "bg-secondary/70",
-            )}
-          >
-            {messageText}
-          </p>
+          <div data-user-text-bubble className="relative ml-auto w-fit max-w-full min-w-0">
+            {contextMenu}
+            <p
+              data-temporary-message={temporary ? "true" : undefined}
+              className={cn(
+                "ml-auto w-fit max-w-full min-w-0 rounded-floating px-4 py-2",
+                "text-left text-reading whitespace-pre-wrap [overflow-wrap:anywhere]",
+                temporary
+                  ? "border border-dashed border-muted-foreground/40 bg-transparent"
+                  : "bg-secondary/70",
+              )}
+            >
+              {messageText}
+            </p>
+          </div>
         ) : null}
         {showDeliveryStatus ? (
-          <TooltipProvider>
             <div className="flex min-h-8 items-center justify-end gap-1.5 text-muted-foreground">
               <UserDeliveryStatus
                 status={message.deliveryStatus}
                 errorKind={message.deliveryErrorKind}
               />
             </div>
-          </TooltipProvider>
         ) : null}
       </div>
     );
@@ -562,8 +527,7 @@ export function MessageBubble({
   return (
     <div
       data-assistant-message
-      className="group/assistant relative w-full text-[15px]"
-      style={{ lineHeight: "var(--cjk-line-height)" }}
+      className="group/assistant relative w-full text-reading"
     >
       {contextMenu}
       {hasReasoning ? (
@@ -604,7 +568,7 @@ function UserQuotedContext({ text, label }: { text: string; label: string }) {
       aria-label={label}
     >
       <Quote className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-      <p className="min-w-0 line-clamp-3 whitespace-pre-wrap text-[13px]/[1.45] [overflow-wrap:anywhere]">
+      <p className="min-w-0 line-clamp-3 whitespace-pre-wrap text-reading-small [overflow-wrap:anywhere]">
         {text}
       </p>
     </blockquote>
@@ -677,9 +641,11 @@ function mergeCliMentionApps(
 function MessageMedia({
   media,
   align,
+  pending = false,
 }: {
   media: UIMediaAttachment[];
   align: "left" | "right";
+  pending?: boolean;
 }) {
   const inlineImages = useInlineImages();
   if (media.length === 0) return null;
@@ -709,7 +675,7 @@ function MessageMedia({
         <ImageGallery images={images} align={align} size={align === "left" ? "large" : "compact"} />
       ) : null}
       {nonImages.map((item, i) => (
-        <AttachmentTile key={`${item.url ?? item.name ?? item.kind}-${i}`} attachment={item} />
+        <AttachmentTile key={`${item.kind}-${i}`} attachment={item} pending={pending} />
       ))}
     </div>
   );
@@ -726,35 +692,6 @@ function ThinkingState() {
       <StreamingLabelSheen active>
         {t("message.reasoningStreaming", { defaultValue: "Thinking…" })}
       </StreamingLabelSheen>
-    </span>
-  );
-}
-
-/** L→R sheen on the glyphs themselves; inactive labels stay solid muted text. */
-export function StreamingLabelSheen({
-  children,
-  active,
-  className,
-}: {
-  children: ReactNode;
-  active: boolean;
-  className?: string;
-}) {
-  const sheenText =
-    typeof children === "string" || typeof children === "number"
-      ? String(children)
-      : undefined;
-  return (
-    <span className={cn("block min-w-0 overflow-hidden py-px", className)}>
-      <span
-        data-sheen-text={active ? sheenText : undefined}
-        className={cn(
-          "block w-fit max-w-full truncate pr-0.5 font-medium leading-normal",
-          active ? "streaming-text-sheen after:pr-0.5" : "text-muted-foreground",
-        )}
-      >
-        {children}
-      </span>
     </span>
   );
 }

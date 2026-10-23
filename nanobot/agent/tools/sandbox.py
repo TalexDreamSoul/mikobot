@@ -1,4 +1,9 @@
-"""Sandbox backends for shell command execution."""
+"""Sandbox backends for shell command execution.
+
+To add a backend, match the callable signature of _bwrap and _seatbelt,
+including keyword-only sandbox_ro_binds and sandbox_rw_binds, and register
+it in _BACKENDS below.
+"""
 
 from __future__ import annotations
 
@@ -103,7 +108,14 @@ def _bwrap(
     member: bool = False,
     member_ro_files: Iterable[str | Path] | None = None,
 ) -> str:
-    """Wrap a command in Bubblewrap; member calls get a closed filesystem policy."""
+    """Wrap command in a bubblewrap sandbox (requires bwrap in container).
+
+    The workspace is bind-mounted read-write; its parent directory is hidden
+    behind a fresh tmpfs. Owner calls mount media read-only for uploaded
+    attachments, and explicit sandbox_ro_binds and sandbox_rw_binds add
+    read-only and read-write roots. Member calls get a closed filesystem policy:
+    only exact authorized files are bound read-only besides the workspace.
+    """
     ws = Path(workspace).resolve()
     if ws == ws.parent:
         raise ValueError("sandbox workspace cannot be the filesystem root")
