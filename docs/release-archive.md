@@ -6,6 +6,13 @@ For this fork's tagged releases, see [GitHub Releases](https://github.com/TalexD
 
 ## Unreleased
 
+### 0.9.0 — GG deployment, 2026-10-23
+
+- Full canonical upstream integration through `a8873bb5657d20ef4278a0cfcb51fd18153cd0f3`: per-namespace SQLite session store with strict JSONL importers (available through 0.9.x, removed in upstream 1.0.0), asynchronous session state, the body-capable HTTP bridge, runtime-context providers and the refreshed WebUI and TUI.
+- Mikobot projects, collaboration schema 14, ConversationScope, King authority, private member roots, per-project allowlists, Weixin instance controls, OIDC settings and the Chinese-first copy are preserved. New upstream surfaces pass the same member and owner gates, and recovery continuations re-authorize members from persisted provenance.
+- `nanobot/distribution.py` keeps upstream's updater from installing its `nanobot-ai` over this fork: CLI `update` exits 1, WebUI update actions are refused and the client keeps the update flow disabled.
+- GG runs the accepted exact platform wheel from commit `628bb8ac0c3858514e3ac4bf8523e5f4ec579735`; code/state rollback and dependencies are preserved. Production is ready with zero service restarts, 71 JSONL sessions imported into SQLite with the legacy files retained, and schema 14. No tag or hosted GitHub release was created.
+
 ### 0.8.0 — GG deployment, 2026-10-06
 
 - Full canonical upstream integration through `9dc0abae4f7e2b015c56881d4eb4f3500b15e529`, preserving Mikobot projects, private session provenance, member isolation and revocation-safe tools.
