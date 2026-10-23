@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -122,6 +123,25 @@ async def test_webui_admission_executes_with_the_routed_session(runtime: _Runtim
         display = await runtime.sessions.state.read_metadata(f"websocket:{chat_id}")
         assert display is not None and display["metadata"]["webui"] is True
     assert runtime.provider.calls == 2
+
+
+async def test_member_principal_never_joins_the_hosts_shared_session(
+    runtime: _Runtime, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        type(runtime.channel.gateway), "can_access_webui_session", AsyncMock(return_value=True),
+    )
+    await runtime.channel._dispatch_envelope(
+        runtime.connection,
+        "webui-client",
+        {"type": "message", "chat_id": "chat-member", "content": "hello", "webui": True},
+        trusted_principal="proxy:member",
+    )
+    message = await runtime.bus.consume_inbound()
+
+    assert message.sender_id == "proxy:member"
+    assert message.session_key_override is None
+    assert message.session_key == "websocket:chat-member"
 
 
 @pytest.mark.parametrize("operation", ["reset", "delete"])

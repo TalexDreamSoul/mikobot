@@ -870,11 +870,14 @@ class WebUICommandRouter:
             if temporary_policy is not None
             else webui_session_key(chat_id)
         )
+        # The shared session is the host owner's history; members keep their own chat session.
+        shares_host_session = trusted_principal is None and can_attach_local
         execution_session_key = (
             temporary_policy.session_key
             if temporary_policy is not None
             else session_key_for_channel(
-                "websocket", chat_id, unified_session=self.gateway.unified_session,
+                "websocket", chat_id,
+                unified_session=self.gateway.unified_session and shares_host_session,
             )
         )
         session_generation: str | None = None
