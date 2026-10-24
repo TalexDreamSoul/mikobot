@@ -1997,3 +1997,83 @@ async def test_mcp_proxy_mutation_persists_reloads_and_keeps_oauth_credentials(
         reload.assert_awaited_once()
     finally:
         await gateway.http.settings_routes.close()
+
+
+@pytest.mark.asyncio
+async def test_member_settings_read_withholds_credentials_and_host_locations(tmp_path) -> None:
+    from nanobot.config.loader import save_config
+    from nanobot.config.schema import Config
+
+    config_path = tmp_path / "config.json"
+    save_config(Config.model_validate({
+        "agents": {"defaults": {"workspace": str(tmp_path / "workspace")}},
+        "providers": {
+            "custom": {"apiBase": "https://provider-login:provider-secret@llm.example.com/v1"},
+            "openai": {"apiBase": "https://openai-login:openai-secret@gateway.example.com/v1"},
+        },
+        "network": {"proxy": "http://proxy-login:proxy-secret@proxy.example.com:3128"},
+    }), config_path)
+    router = _router(config_path=config_path)
+
+    admin = await router.dispatch(
+        None, _read_request("/api/settings", host_admin=True), "/api/settings",
+    )
+    member = await router.dispatch(
+        None, _read_request("/api/settings", host_admin=False), "/api/settings",
+    )
+
+    assert admin is not None and member is not None
+    admin_text, member_text = admin.body.decode(), member.body.decode()
+    for leak in (
+        "provider-login", "provider-secret", "openai-login", "openai-secret",
+        "proxy-login", "proxy-secret",
+    ):
+        assert leak in admin_text
+        assert leak not in member_text
+    for location in (str(tmp_path), str(tmp_path.resolve())):
+        assert location in admin_text
+        assert location not in member_text
+
+    body = json.loads(member.body)
+    rows = {row["name"]: row for row in body["providers"]}
+    assert rows["custom"]["api_base"] == "https://llm.example.com/v1"
+    assert rows["openai"]["api_base"] == "https://gateway.example.com/v1"
+    assert body["runtime_config"]["network.proxy"] == "http://proxy.example.com:3128"
+    assert {"config_path", "workspace_path", "gateway_host", "gateway_port"}.isdisjoint(body["runtime"])
+    assert {"gateway.host", "gateway.port", "api.host"}.isdisjoint(body["runtime_config"])
+    assert {"host", "port"}.isdisjoint(body["api"])
+    assert "workspace_root" not in body["advanced"]["workspace_sandbox"]
+    assert body["runtime"]["heartbeat"] == json.loads(admin.body)["runtime"]["heartbeat"]
+    assert "commit" not in body["version"] and "environment" not in body
+
+
+def test_member_settings_payload_strips_only_url_userinfo_and_leaves_its_input_alone() -> None:
+    import copy
+
+    from nanobot.webui.settings_routes import _member_settings_payload
+
+    payload = {
+        "providers": [{"api_base": "https://a:b@host.example/v1", "label": "ops@example.com"}],
+        "runtime_config": {
+            "network.proxy": "http://user%40x:pw@more@proxy.example:3128",
+            "placeholder": "${PROXY}",
+            "path_at": "https://host.example/path@segment",
+        },
+        "version": {"current": "1.0", "commit": "abc"},
+        "environment": {"os": "Linux"},
+    }
+    original = copy.deepcopy(payload)
+
+    result = _member_settings_payload(payload)
+
+    assert payload == original
+    assert result == {
+        "providers": [{"api_base": "https://host.example/v1", "label": "ops@example.com"}],
+        "runtime_config": {
+            "network.proxy": "http://proxy.example:3128",
+            "placeholder": "${PROXY}",
+            "path_at": "https://host.example/path@segment",
+        },
+        "version": {"current": "1.0"},
+    }
+    assert _member_settings_payload({}) == {}

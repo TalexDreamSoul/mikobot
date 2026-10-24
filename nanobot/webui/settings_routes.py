@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
-from urllib.parse import urlsplit
 
 from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
@@ -158,19 +158,47 @@ _SYSTEM_ROUTES = {
     },
 }
 
+_URL_USERINFO = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#]*@")
+
+# Where the host keeps its files and listens; a member has no use for these.
+_HOST_LOCATION_FIELDS: tuple[tuple[str, ...], ...] = (
+    ("runtime", "config_path"),
+    ("runtime", "workspace_path"),
+    ("runtime", "gateway_host"),
+    ("runtime", "gateway_port"),
+    ("runtime_config", "gateway.host"),
+    ("runtime_config", "gateway.port"),
+    ("runtime_config", "api.host"),
+    ("api", "host"),
+    ("api", "port"),
+    ("advanced", "workspace_sandbox", "workspace_root"),
+)
+
+
+def _without_url_credentials(value: Any) -> Any:
+    """Copy a payload, dropping the userinfo (login and credential) from every URL string in it."""
+    if isinstance(value, str):
+        return _URL_USERINFO.sub(r"\1", value)
+    if isinstance(value, dict):
+        return {key: _without_url_credentials(item) for key, item in cast(dict[str, Any], value).items()}
+    if isinstance(value, list):
+        return [_without_url_credentials(item) for item in cast(list[Any], value)]
+    return value
+
+
+def _drop_field(payload: dict[str, Any], path: tuple[str, ...]) -> None:
+    node: Any = payload
+    for key in path[:-1]:
+        node = cast(dict[str, Any], node).get(key) if isinstance(node, dict) else None
+    if isinstance(node, dict):
+        cast(dict[str, Any], node).pop(path[-1], None)
+
+
 def _member_settings_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Withhold proxy credentials and the host build fingerprint from non-administrators."""
-    result = dict(payload)
-    runtime_config = result.get("runtime_config")
-    if isinstance(runtime_config, dict):
-        runtime_config = dict(cast(dict[str, Any], runtime_config))
-        proxy = runtime_config.get("network.proxy")
-        if isinstance(proxy, str) and "@" in proxy:
-            parts = urlsplit(proxy)
-            runtime_config["network.proxy"] = parts._replace(
-                netloc=parts.netloc.rpartition("@")[2]
-            ).geturl()
-        result["runtime_config"] = runtime_config
+    """Withhold URL credentials, host locations and the host build fingerprint from non-administrators."""
+    result = cast(dict[str, Any], _without_url_credentials(payload))
+    for path in _HOST_LOCATION_FIELDS:
+        _drop_field(result, path)
     version = result.get("version")
     if isinstance(version, dict):
         result["version"] = {
