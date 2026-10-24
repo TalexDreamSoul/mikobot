@@ -28,7 +28,7 @@ export function SkeletonFixture({ surface, loading }: { surface: string; loading
   const [previewLoading, setPreviewLoading] = useState(loading);
   const feature: NanobotFeatureInfo = {
     name: "telegram", display_name: "Telegram", type: "channel", enabled: true, installed: true,
-    configured: true, ready: true, install_supported: true, status: "enabled", requires_restart: false,
+    configured: true, ready: true, install_supported: true, requires_restart: false,
   };
   return <main className="settings-grid mx-auto w-full max-w-4xl p-4" data-testid="skeleton-fixture">
     {surface === "workspace" ? <WorkspaceProjectPicker isHero scope={{ project_path: "/srv/workspace", access_mode: "restricted" }}

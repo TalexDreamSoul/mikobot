@@ -115,7 +115,7 @@ function SkeletonSurface() {
   const density = params.has("compact") ? "compact" : "comfortable";
   const dark = params.has("dark");
   useLayoutEffect(() => { document.documentElement.classList.toggle("dark", dark); }, [dark]);
-  const controller = useSettingsController({ initialSection: section, initialSettings: previewSettings, onModelNameChange: noop });
+  const controller = useSettingsController({ initialSection: section, enabled: true, initialSettings: previewSettings, onModelNameChange: noop });
   detailState = state;
   const loading = state === "loading" || state === "refresh";
   const empty = state === "loading" || state === "error";
@@ -129,7 +129,7 @@ function SkeletonSurface() {
           automationsError: state === "error" ? "Preview read failed" : null,
         },
       }}
-        theme={dark ? "dark" : "light"} showSidebar mainNavigationExpanded={false} onToggleTheme={noop} onBackToChat={noop}
+        theme={dark ? "dark" : "light"} isAdmin restrictedNotice={false} showSidebar mainNavigationExpanded={false} onToggleTheme={noop} onBackToChat={noop}
         skills={empty ? [] : [skill]} skillsLoading={loading && empty} skillsError={state === "error"} isRestarting={false} hostChromeInset={false} /></div>
         : <main className="settings-grid mx-auto w-full p-4" style={surface === "automations" ? { maxWidth: 960 } : undefined}>
           {surface === "chats" ? <div style={{ height: 440, width: 280, maxWidth: "100%" }} className="bg-sidebar"><ChatList sessions={empty ? [] : sessions} activeKey={null} loading={loading} density={density}
