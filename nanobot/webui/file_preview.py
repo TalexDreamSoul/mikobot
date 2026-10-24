@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import base64
+import json
+import os
 import re
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import unquote, urlparse
 
 from nanobot.config.paths import get_media_dir
 from nanobot.security.workspace_access import WorkspaceScope
-from nanobot.security.workspace_policy import WorkspaceBoundaryError, resolve_allowed_path
+from nanobot.security.workspace_policy import (
+    WorkspaceBoundaryError,
+    is_path_within,
+    resolve_allowed_path,
+    resolve_path,
+)
 
 MAX_FILE_PREVIEW_BYTES = 384 * 1024
 MAX_IMAGE_PREVIEW_BYTES = 8 * 1024 * 1024
@@ -38,9 +47,67 @@ class WebUIFilePreviewError(ValueError):
         self.message = message
 
 
-def file_reference_payload(raw_path: str | None, *, scope: WorkspaceScope) -> dict[str, str | None]:
+@dataclass(frozen=True)
+class PreviewMedia:
+    """Media a member may preview beyond the project workspace.
+
+    Host owners pass ``None`` instead and keep the whole shared media directory.
+    """
+
+    roots: tuple[Path, ...] = ()
+    # Stored messages of the previewed session; read only when a shared-media path is asked for.
+    session_messages: Callable[[], Iterable[object] | None] | None = None
+
+
+def _shared_media_references(messages: Iterable[object]) -> list[Path]:
+    """Shared-media files that a session's own records point at.
+
+    Only fields the runtime writes qualify: ``media`` lists and the artifact paths
+    ``generate_image`` reported. Message text never does, because a member can type
+    or coax any path into a conversation.
+    """
+    media_root = get_media_dir()
+    files: dict[Path, None] = {}
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        message = cast(dict[str, object], item)
+        candidates: list[object] = []
+        media = message.get("media")
+        if isinstance(media, list):
+            candidates.extend(cast(list[object], media))
+        if message.get("role") == "tool" and message.get("name") == "generate_image":
+            candidates.extend(_artifact_paths(message.get("content")))
+        for candidate in candidates:
+            if (
+                isinstance(candidate, str)
+                and os.path.isabs(candidate)
+                and is_path_within(candidate, media_root)
+            ):
+                files[Path(candidate)] = None
+    return list(files)
+
+
+def _artifact_paths(content: object) -> list[object]:
+    try:
+        payload = json.loads(content) if isinstance(content, str) else None
+    except ValueError:
+        return []
+    artifacts = cast(dict[str, object], payload).get("artifacts") if isinstance(payload, dict) else None
+    if not isinstance(artifacts, list):
+        return []
+    return [
+        cast(dict[str, object], artifact).get("path")
+        for artifact in cast(list[object], artifacts)
+        if isinstance(artifact, dict)
+    ]
+
+
+def file_reference_payload(
+    raw_path: str | None, *, scope: WorkspaceScope, media: PreviewMedia | None = None,
+) -> dict[str, str | None]:
     """Resolve copyable paths through the preview policy without reading file contents."""
-    resolved = resolve_file_path(raw_path, scope=scope)
+    resolved = resolve_file_path(raw_path, scope=scope, media=media)
     try:
         relative = resolved.relative_to(scope.project_path).as_posix()
     except ValueError:
@@ -53,10 +120,11 @@ def file_preview_payload(
     *,
     scope: WorkspaceScope,
     max_bytes: int = MAX_FILE_PREVIEW_BYTES,
+    media: PreviewMedia | None = None,
 ) -> dict[str, Any]:
     """Return a bounded source or raster preview within the session workspace scope."""
 
-    resolved = resolve_file_path(raw_path, scope=scope)
+    resolved = resolve_file_path(raw_path, scope=scope, media=media)
 
     try:
         with open(resolved, "rb") as f:
@@ -107,10 +175,11 @@ def file_preview_availability_payload(
     raw_path: str | None,
     *,
     scope: WorkspaceScope,
+    media: PreviewMedia | None = None,
 ) -> dict[str, bool]:
     """Probe a readable source or raster candidate without loading it fully."""
 
-    resolved = resolve_file_path(raw_path, scope=scope)
+    resolved = resolve_file_path(raw_path, scope=scope, media=media)
     try:
         with open(resolved, "rb") as f:
             prefix = f.read(4096)
@@ -126,7 +195,11 @@ def file_preview_availability_payload(
 
 
 def resolve_file_path(
-    raw_path: str | None, *, scope: WorkspaceScope, literal: bool = False,
+    raw_path: str | None,
+    *,
+    scope: WorkspaceScope,
+    literal: bool = False,
+    media: PreviewMedia | None = None,
 ) -> Path:
     path = (raw_path or "").strip() if literal else _clean_preview_path(raw_path)
     if not path:
@@ -135,14 +208,16 @@ def resolve_file_path(
         raise WebUIFilePreviewError(400, "path is too long")
 
     try:
-        extra_roots = [get_media_dir()] if scope.restrict_to_workspace else None
-        resolved = resolve_allowed_path(
-            path,
-            workspace=scope.project_path,
-            allowed_root=scope.project_path if scope.restrict_to_workspace else None,
-            extra_allowed_roots=extra_roots,
-            strict=True,
-        )
+        extra_roots = None
+        if scope.restrict_to_workspace:
+            extra_roots = [get_media_dir()] if media is None else list(media.roots)
+        try:
+            resolved = _resolve_in_scope(path, scope, extra_roots)
+        except WorkspaceBoundaryError:
+            recorded = _recorded_media(path, scope, media)
+            if not recorded:
+                raise
+            resolved = _resolve_in_scope(path, scope, extra_roots, recorded)
     except FileNotFoundError as e:
         raise WebUIFilePreviewError(404, "file not found") from e
     except WorkspaceBoundaryError as e:
@@ -155,6 +230,31 @@ def resolve_file_path(
     if not resolved.is_file():
         raise WebUIFilePreviewError(404, "file not found")
     return resolved
+
+
+def _resolve_in_scope(
+    path: str,
+    scope: WorkspaceScope,
+    extra_roots: list[Path] | None,
+    extra_files: list[Path] | None = None,
+) -> Path:
+    return resolve_allowed_path(
+        path,
+        workspace=scope.project_path,
+        allowed_root=scope.project_path if scope.restrict_to_workspace else None,
+        extra_allowed_roots=extra_roots,
+        extra_allowed_files=extra_files,
+        strict=True,
+    )
+
+
+def _recorded_media(path: str, scope: WorkspaceScope, media: PreviewMedia | None) -> list[Path]:
+    """Exact shared-media files a member's session recorded, read only for shared-media paths."""
+    if media is None or media.session_messages is None:
+        return []
+    if not is_path_within(resolve_path(path, scope.project_path), get_media_dir()):
+        return []
+    return _shared_media_references(media.session_messages() or ())
 
 
 def _clean_preview_path(raw_path: str | None) -> str:
