@@ -271,3 +271,67 @@ async def test_video_upload_limit_explains_size_before_reading_body(tmp_path):
     assert "20 MiB" in str(error.value)
     assert "20,971,521" in str(error.value)
     assert not list(tmp_path.iterdir())
+
+
+async def test_one_owner_cannot_exhaust_the_pending_file_quota_of_others(tmp_path):
+    store = AttachmentStore(tmp_path, max_pending=4, max_pending_per_owner=2)
+    mine = [await upload(store, owner="member") for _ in range(2)]
+    with pytest.raises(AttachmentUploadError, match="Too many pending"):
+        await upload(store, owner="member")
+    assert await upload(store, owner="king")
+    assert await upload(store, owner="other")
+    store.commit(mine[:1], owner="member")
+    assert await upload(store, owner="member")
+
+
+async def test_one_owner_cannot_exhaust_the_pending_byte_quota_of_others(tmp_path):
+    store = AttachmentStore(tmp_path, max_pending_bytes=20, max_pending_bytes_per_owner=10)
+    mine = await upload(store, b"1234567890", owner="member")
+    with pytest.raises(AttachmentUploadError, match="storage is full"):
+        await upload(store, b"1", owner="member")
+    assert await upload(store, b"1234567890", owner="king")
+    with pytest.raises(AttachmentUploadError, match="storage is full"):
+        await upload(store, b"1", owner="third")
+    store.discard([mine], owner="member")
+    assert await upload(store, b"1234567890", owner="member")
+
+
+async def test_inflight_upload_counts_against_its_owner_only(tmp_path):
+    store = AttachmentStore(tmp_path, max_pending_per_owner=1)
+    entered = asyncio.Event()
+
+    async def slow():
+        entered.set()
+        await asyncio.Event().wait()
+        yield b"1"
+
+    task = asyncio.create_task(store.upload(slow(), owner="member", mime="image/png", size=1))
+    await entered.wait()
+    with pytest.raises(AttachmentUploadError, match="Too many pending"):
+        await upload(store, owner="member")
+    assert await upload(store, owner="king")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await upload(store, owner="member")
+
+
+def test_default_owner_share_is_below_the_global_quota_but_fits_a_full_message(tmp_path):
+    from nanobot.channels.websocket.attachment_policy import MAX_VIDEO_BYTES, MAX_VIDEOS_PER_MESSAGE
+
+    store = AttachmentStore(tmp_path)
+    assert store.max_pending_per_owner < store.max_pending
+    assert store.max_pending_bytes_per_owner < store.max_pending_bytes
+    assert store.max_pending_per_owner >= store.limits.max_count + MAX_VIDEOS_PER_MESSAGE
+    assert store.max_pending_bytes_per_owner >= store.limits.max_total_bytes + MAX_VIDEO_BYTES
+
+
+async def test_expiry_and_disconnect_return_the_owners_share(tmp_path):
+    store = AttachmentStore(tmp_path, ttl_seconds=0.01, max_pending_per_owner=1)
+    await upload(store, owner="member")
+    await asyncio.sleep(0.05)
+    await upload(store, owner="member")
+    store.discard_owner("member")
+    await upload(store, owner="member")
+    store.clear()
+    assert not store._owner_files and not store._owner_bytes
