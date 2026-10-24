@@ -234,9 +234,13 @@ class TestPairingCommandDispatch:
         msg.metadata = {}
         return msg
 
+    @pytest.fixture()
+    def host_loop(self) -> MagicMock:
+        return MagicMock(is_host_conversation=AsyncMock(return_value=True))
+
     @pytest.mark.asyncio
     async def test_pairing_list_dispatched(
-        self, router: CommandRouter, fake_msg: MagicMock, monkeypatch,
+        self, router: CommandRouter, fake_msg: MagicMock, host_loop: MagicMock, monkeypatch,
     ) -> None:
         monkeypatch.setattr(
             "nanobot.pairing.store.list_pending",
@@ -251,7 +255,7 @@ class TestPairingCommandDispatch:
         )
         ctx = CommandContext(
             msg=fake_msg, session=None,
-            key="telegram:chat1", raw="/pairing list", args="list", loop=MagicMock(),
+            key="telegram:chat1", raw="/pairing list", args="list", loop=host_loop,
         )
         result = await router.dispatch(ctx)
         assert result is not None
@@ -260,7 +264,7 @@ class TestPairingCommandDispatch:
 
     @pytest.mark.asyncio
     async def test_pairing_approve_dispatched(
-        self, router: CommandRouter, fake_msg: MagicMock, monkeypatch,
+        self, router: CommandRouter, fake_msg: MagicMock, host_loop: MagicMock, monkeypatch,
     ) -> None:
         monkeypatch.setattr(
             "nanobot.pairing.store.approve_code",
@@ -270,7 +274,7 @@ class TestPairingCommandDispatch:
         ctx = CommandContext(
             msg=fake_msg, session=None,
             key="telegram:chat1", raw="/pairing approve ABCD-EFGH",
-            args="approve ABCD-EFGH", loop=MagicMock(),
+            args="approve ABCD-EFGH", loop=host_loop,
         )
         result = await router.dispatch(ctx)
         assert result is not None
@@ -282,7 +286,7 @@ class TestPairingCommandDispatch:
 
     @pytest.mark.asyncio
     async def test_pairing_revoke_dispatched(
-        self, router: CommandRouter, fake_msg: MagicMock, monkeypatch,
+        self, router: CommandRouter, fake_msg: MagicMock, host_loop: MagicMock, monkeypatch,
     ) -> None:
         monkeypatch.setattr(
             "nanobot.pairing.store.revoke",
@@ -292,10 +296,33 @@ class TestPairingCommandDispatch:
         ctx = CommandContext(
             msg=fake_msg, session=None,
             key="telegram:chat1", raw="/pairing revoke 123",
-            args="revoke 123", loop=MagicMock(),
+            args="revoke 123", loop=host_loop,
         )
         result = await router.dispatch(ctx)
         assert result is not None
         assert "Revoked" in result.content
         assert result.content == "Revoked 123 from telegram"
         assert result.metadata.get("_pairing_command") is True
+
+    @pytest.mark.asyncio
+    async def test_pairing_is_refused_outside_the_host_without_touching_the_store(
+        self, router: CommandRouter, fake_msg: MagicMock, monkeypatch,
+    ) -> None:
+        def untouched(*_args: object) -> None:
+            raise AssertionError("pairing store was reached")
+
+        for name in ("list_pending", "approve_code", "deny_code", "revoke"):
+            monkeypatch.setattr(f"nanobot.pairing.store.{name}", untouched)
+        stranger = MagicMock(is_host_conversation=AsyncMock(return_value=False))
+        fake_msg.content = "/pairing approve ABCD-EFGH"
+        ctx = CommandContext(
+            msg=fake_msg, session=None,
+            key="telegram:chat1", raw="/pairing approve ABCD-EFGH",
+            args="approve ABCD-EFGH", loop=stranger,
+        )
+
+        result = await router.dispatch(ctx)
+
+        assert result is not None
+        assert result.content == "This command is only available to the host owner."
+        assert result.metadata.get("_pairing_command") is not True
