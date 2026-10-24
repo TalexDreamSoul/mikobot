@@ -98,6 +98,9 @@ _COMMANDS = [
     ("cmd_dream_prompt", "/dream-prompt init", False),
     ("cmd_evaluator_prompt", "/evaluator-prompt", False),
     ("cmd_evaluator_prompt", "/evaluator-prompt init", False),
+    ("cmd_pairing", "/pairing", False),
+    ("cmd_pairing", "/pairing list", False),
+    ("cmd_pairing", "/pairing approve abc123", False),
 ]
 
 
