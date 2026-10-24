@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -301,6 +302,7 @@ async def test_member_shell_rejects_host_shell_startup_before_spawn(
     spawn.assert_not_awaited()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Member execution launches /bin/sh under Linux bwrap")
 @pytest.mark.asyncio
 async def test_member_shell_removes_host_secrets_from_the_process_environment(
     tmp_path: Path,
