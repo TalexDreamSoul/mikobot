@@ -30,6 +30,11 @@ from nanobot.agent.tools.exec_session import (
     clamp_session_int,
     format_session_poll,
 )
+from nanobot.agent.tools.member_access import (
+    current_member_attachment_files,
+    current_member_scope,
+    current_member_tool_scope,
+)
 from nanobot.agent.tools.sandbox import SandboxUnavailableError, wrap_command
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -39,11 +44,6 @@ from nanobot.agent.tools.schema import (
 )
 from nanobot.agent.tools.shell_config import ExecToolConfig
 from nanobot.config.paths import get_media_dir
-from nanobot.security.member_access import (
-    current_member_attachment_files,
-    current_member_scope,
-    current_member_tool_scope,
-)
 from nanobot.security.workspace_access import current_scope_allows_loopback, current_tool_workspace
 from nanobot.security.workspace_policy import is_path_within
 

@@ -178,7 +178,7 @@ export function RuntimeSettings({
     }
   };
   return (
-    <div className="space-y-7">
+    <div className="settings-stack">
       <NanobotFeatureInstallDialog
         feature={apiInstallConfirm}
         installing={apiServiceAction === "start"}

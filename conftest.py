@@ -41,11 +41,16 @@ def _isolate_nanobot_log_activation() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _isolate_home_and_runtime_config(
     tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:
     """Keep implicit config and home-derived runtime state inside each test."""
-    home = tmp_path.parent / f"{tmp_path.name}-home"
-    home.mkdir()
+    # With tmp_path_retention_policy=failed a passed test's tmp_path is removed and its
+    # name is reused, so a fixed "<name>-home" sibling would collide; mktemp numbers it.
+    home = tmp_path_factory.mktemp(f"{tmp_path.name}-home")
+    if sys.platform == "win32":
+        # Known-folder lookups expand beneath USERPROFILE and fail when the folder is missing.
+        (home / "AppData" / "Local").mkdir(parents=True)
     config_path = home / ".nanobot" / "config.json"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))

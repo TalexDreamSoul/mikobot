@@ -23,7 +23,7 @@ for (const width of [412, 1440]) {
         expect(await shell.getByRole("textbox").count()).toBe(0);
         expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
         const status = shell.getByRole("status");
-        await expect(status).toHaveText("Loading nanobot…");
+        await expect(status).toHaveText("Loading Mikobot…");
         expect(await status.evaluate((element) => element.getBoundingClientRect().width)).toBe(1);
       });
     }
@@ -39,7 +39,7 @@ for (const width of [412, 1440]) {
       const shell = page.locator(".startup-shell");
       await expect(shell).toHaveAttribute("data-startup-surface", "skills");
       await expect(shell).toHaveAttribute("data-sidebar-expanded", "false");
-      await expect(shell.getByRole("status")).toHaveText("正在加载 nanobot…");
+      await expect(shell.getByRole("status")).toHaveText("正在加载 Mikobot…");
       await expect(page.locator("html")).toHaveClass(/dark/);
       if (width === 1440) expect((await shell.locator(".startup-navigation").boundingBox())!.width).toBe(56);
     });

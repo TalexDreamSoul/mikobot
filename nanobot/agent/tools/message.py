@@ -12,16 +12,16 @@ from loguru import logger
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import ToolContext, current_request_context
+from nanobot.agent.tools.member_access import (
+    current_member_attachment_files,
+    current_member_scope,
+    current_member_tool_scope,
+)
 from nanobot.agent.tools.path_utils import resolve_workspace_path
 from nanobot.agent.tools.schema import ArraySchema, StringSchema, tool_parameters_schema
 from nanobot.bus.delivery import DeliveryRequest
 from nanobot.bus.events import OutboundMessage
 from nanobot.config.paths import get_workspace_path
-from nanobot.security.member_access import (
-    current_member_attachment_files,
-    current_member_scope,
-    current_member_tool_scope,
-)
 from nanobot.security.workspace_access import current_tool_workspace
 
 _CURRENT_MESSAGE_SENDS: ContextVar[set[tuple[str, str]] | None] = ContextVar(
