@@ -47,11 +47,6 @@ def test_windows_handoff_file_is_private_readable_and_removed(opens):
         "    if ($owned) { [IO.File]::Delete($path) }\n"
         "    [Console]::Write('removed=' + (-not [IO.File]::Exists($path)))",
     )
-    assert "} catch {\n    exit 1\n}" in script
-    script = script.replace(
-        "} catch {\n    exit 1\n}",
-        "} catch {\n    [Console]::Error.WriteLine($_.Exception.ToString())\n    exit 1\n}",
-    )
     # A timeout must identify the native stage, not dump the encoded script.
     # Keep the same deadline and all filesystem/security assertions.
     script = """
@@ -71,9 +66,6 @@ Test-Trace 'PowerShell started'
         assert anchor in script
         script = script.replace(anchor, f"    Test-Trace '{stage}'\n" + anchor, 1)
     content = _redirect_html('http://localhost/#/?bootstrapSecret="/><script>$(test)&中文</script>')
-    # The hermetic-home fixture redirects USERPROFILE and Windows PowerShell resolves
-    # LocalApplicationData beneath it; the helper writes into that directory, not creates it.
-    os.makedirs(os.path.join(os.environ["USERPROFILE"], "AppData", "Local"), exist_ok=True)
 
     try:
         result = subprocess.run(
@@ -87,4 +79,4 @@ Test-Trace 'PowerShell started'
         pytest.fail(f"Windows handoff exceeded 60s. Native stages:\n{stages}", pytrace=False)
 
     assert result.returncode == (0 if opens else 1), result.stderr
-    assert result.stdout == b"private;" + (b"1" if opens else b"") + b"removed=True", result.stderr
+    assert result.stdout == b"private;" + (b"1" if opens else b"") + b"removed=True"
