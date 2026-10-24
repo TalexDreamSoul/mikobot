@@ -54,6 +54,10 @@ class TestSeatbeltBackend:
     platform — the profile is only ever executed on macOS.
     """
 
+    @pytest.fixture(autouse=True)
+    def _host_independent_policy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_sandbox, "ensure_sandbox_available", lambda _name: None)
+
     @staticmethod
     def _profile(cmd: str) -> str:
         """Return the SBPL profile from a wrapped command."""
