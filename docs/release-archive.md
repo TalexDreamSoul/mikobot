@@ -6,11 +6,16 @@ For this fork's tagged releases, see [GitHub Releases](https://github.com/TalexD
 
 ## Unreleased
 
+### 0.9.2 — GG deployment, 2026-10-24
+
+- Patch release on 0.9.1. `/pairing` is limited to the host owner like the other host-only commands; pending attachment uploads are capped per owner (32 files, 64 MiB) on top of the global cap; the member settings view withholds URL credentials, configuration and workspace paths, and listen addresses (the owner's view is unchanged); the CI fixtures are repaired and the `member_access` module moved to `nanobot/agent/tools/`.
+- GG runs the accepted exact platform wheel from commit `245a01777611b3e140c84526dd4ee140ae1b894a`; code/state rollback and dependencies are preserved. Production is ready with zero service restarts after about two minutes without service, the same 71 sessions in SQLite, and schema 14.
+
 ### 0.9.1 — GG deployment, 2026-10-24
 
 - Patch release on the 0.9.0 integration; no new upstream commits. Member, OIDC and trusted-proxy WebUI turns no longer route into the host's shared `unified:default` session when `unifiedSession` is on.
 - Authorization gaps closed: `/api/settings*` authenticates a request before it resolves or persists a collaboration identity, `skill.update` requires a system administrator, `/restart` is limited to the host owner and system administrators, and `/dream-log`, `/dream-restore`, `/dream-prompt` and `/evaluator-prompt`, which act on the host's own memory, are limited to the host owner. Any other sender gets a short refusal and the handler never runs.
-- GG runs the accepted exact platform wheel from commit `2cab8d58d487835eda3e300d4a3fb43de8a2361a`; code/state rollback and dependencies are preserved. Production is ready with zero service restarts after about two minutes without service, the same 71 sessions in SQLite, and schema 14. No tag or hosted GitHub release was created.
+- GG runs the accepted exact platform wheel from commit `2cab8d58d487835eda3e300d4a3fb43de8a2361a`; code/state rollback and dependencies are preserved. Production is ready with zero service restarts after about two minutes without service, the same 71 sessions in SQLite, and schema 14. Tagged `v0.9.1`; no hosted GitHub release was created.
 
 ### 0.9.0 — GG deployment, 2026-10-23
 
