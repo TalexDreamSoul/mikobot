@@ -2031,8 +2031,9 @@ async def test_member_settings_read_withholds_credentials_and_host_locations(tmp
         assert leak in admin_text
         assert leak not in member_text
     for location in (str(tmp_path), str(tmp_path.resolve())):
-        assert location in admin_text
-        assert location not in member_text
+        needle = json.dumps(location, ensure_ascii=False)[1:-1]
+        assert needle in admin_text
+        assert needle not in member_text
 
     body = json.loads(member.body)
     rows = {row["name"]: row for row in body["providers"]}
