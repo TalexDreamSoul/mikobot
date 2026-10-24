@@ -635,7 +635,7 @@ export function SettingsPage({
   };
   const sectionReady = settings !== null || activeSection === "skills" || activeSection === "apps"
     || activeSection === "channels" || activeSection === "automations"
-    || activeSection === "appearance" || activeSection === "notifications";
+    || (!loading && (activeSection === "appearance" || activeSection === "notifications"));
 
   return (
     <DialogLayoutContext.Provider value={dialogLayoutAnchor}>
