@@ -44,7 +44,9 @@ class AttachmentStore:
     """Single-event-loop staging store with disk, count, and lifetime bounds.
 
     A whole file's declared size is reserved before awaiting its first chunk,
-    so concurrent slow uploads cannot bypass the global disk quota. ``prune``
+    so concurrent slow uploads cannot bypass the global disk quota. Each owner
+    is also capped below the global quota, so one account cannot fill the
+    staging area and lock everyone else out until its uploads expire. ``prune``
     should also be called periodically by the owning gateway. Committed files
     leave this store and are managed by the existing session media lifecycle.
     """
@@ -56,23 +58,47 @@ class AttachmentStore:
         limits: AttachmentIngressLimits | None = None,
         max_pending: int = 128,
         max_pending_bytes: int = 128 * 1024 * 1024,
+        max_pending_per_owner: int = 32,
+        max_pending_bytes_per_owner: int = 64 * 1024 * 1024,
         ttl_seconds: float = 600,
         upload_timeout: float = UPLOAD_TIMEOUT_SECONDS,
         upload_idle_timeout: float = UPLOAD_IDLE_TIMEOUT_SECONDS,
     ) -> None:
-        if min(max_pending, max_pending_bytes, ttl_seconds, upload_timeout, upload_idle_timeout) <= 0:
+        if min(
+            max_pending, max_pending_bytes, max_pending_per_owner, max_pending_bytes_per_owner,
+            ttl_seconds, upload_timeout, upload_idle_timeout,
+        ) <= 0:
             raise ValueError("Attachment store bounds must be positive")
         self.media_dir = media_dir
         self.limits = limits or AttachmentIngressLimits()
         self.max_pending = max_pending
         self.max_pending_bytes = max_pending_bytes
+        self.max_pending_per_owner = max_pending_per_owner
+        self.max_pending_bytes_per_owner = max_pending_bytes_per_owner
         self.ttl_seconds = ttl_seconds
         self.upload_timeout = upload_timeout
         self.upload_idle_timeout = upload_idle_timeout
         self._entries: dict[str, StagedAttachment] = {}
         self._reserved_bytes = 0
+        self._owner_files: dict[str, int] = {}
+        self._owner_bytes: dict[str, int] = {}
         self._active = 0
         self._journal = media_dir / ".pending-attachments"
+
+    def _reserve(self, owner: str, size: int) -> None:
+        self._reserved_bytes += size
+        self._owner_files[owner] = self._owner_files.get(owner, 0) + 1
+        self._owner_bytes[owner] = self._owner_bytes.get(owner, 0) + size
+
+    def _release(self, owner: str, size: int) -> None:
+        self._reserved_bytes -= size
+        files = self._owner_files.get(owner, 0) - 1
+        if files > 0:
+            self._owner_files[owner] = files
+            self._owner_bytes[owner] = self._owner_bytes.get(owner, 0) - size
+        else:
+            self._owner_files.pop(owner, None)
+            self._owner_bytes.pop(owner, None)
 
     async def upload(
         self,
@@ -98,12 +124,18 @@ class AttachmentStore:
             validate_upload_size(mime, size, limits=self.limits)
         except ValueError as exc:
             raise AttachmentUploadError(str(exc)) from exc
-        if self._active + len(self._entries) >= self.max_pending:
+        if (
+            self._active + len(self._entries) >= self.max_pending
+            or self._owner_files.get(owner, 0) >= self.max_pending_per_owner
+        ):
             raise AttachmentUploadError("Too many pending attachments")
-        if self._reserved_bytes + size > self.max_pending_bytes:
+        if (
+            self._reserved_bytes + size > self.max_pending_bytes
+            or self._owner_bytes.get(owner, 0) + size > self.max_pending_bytes_per_owner
+        ):
             raise AttachmentUploadError("Pending attachment storage is full")
         self._active += 1
-        self._reserved_bytes += size
+        self._reserve(owner, size)
         path: Path | None = None
         stored = False
         created = False
@@ -144,7 +176,7 @@ class AttachmentStore:
         finally:
             self._active -= 1
             if not stored:
-                self._reserved_bytes -= size
+                self._release(owner, size)
                 if path is not None:
                     if created:
                         path.unlink(missing_ok=True)
@@ -181,9 +213,9 @@ class AttachmentStore:
         """
         paths = self.resolve(references, owner=owner)
         for reference in references:
-            entry = self._entries[reference]
+            entry = self._entries.pop(reference)
             (self._journal / entry.path.name).unlink(missing_ok=True)
-            self._reserved_bytes -= self._entries.pop(reference).size
+            self._release(entry.owner, entry.size)
         return paths
 
     def discard_owner(self, owner: str) -> None:
@@ -195,7 +227,7 @@ class AttachmentStore:
             if entry is not None and entry.owner == owner:
                 entry.path.unlink(missing_ok=True)
                 (self._journal / entry.path.name).unlink(missing_ok=True)
-                self._reserved_bytes -= entry.size
+                self._release(entry.owner, entry.size)
                 del self._entries[reference]
 
     def prune(self) -> None:
@@ -211,7 +243,7 @@ class AttachmentStore:
             if entry.expires <= now:
                 entry.path.unlink(missing_ok=True)
                 (self._journal / entry.path.name).unlink(missing_ok=True)
-                self._reserved_bytes -= entry.size
+                self._release(entry.owner, entry.size)
                 del self._entries[reference]
 
     def clear(self) -> None:
@@ -221,5 +253,5 @@ class AttachmentStore:
         for reference, entry in list(self._entries.items()):
             entry.path.unlink(missing_ok=True)
             (self._journal / entry.path.name).unlink(missing_ok=True)
-            self._reserved_bytes -= entry.size
+            self._release(entry.owner, entry.size)
             del self._entries[reference]
