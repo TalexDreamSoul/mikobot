@@ -6,6 +6,12 @@ For this fork's tagged releases, see [GitHub Releases](https://github.com/TalexD
 
 ## Unreleased
 
+### 0.9.1 — GG deployment, 2026-10-24
+
+- Patch release on the 0.9.0 integration; no new upstream commits. Member, OIDC and trusted-proxy WebUI turns no longer route into the host's shared `unified:default` session when `unifiedSession` is on.
+- Authorization gaps closed: `/api/settings*` authenticates a request before it resolves or persists a collaboration identity, `skill.update` requires a system administrator, `/restart` is limited to the host owner and system administrators, and `/dream-log`, `/dream-restore`, `/dream-prompt` and `/evaluator-prompt`, which act on the host's own memory, are limited to the host owner. Any other sender gets a short refusal and the handler never runs.
+- GG runs the accepted exact platform wheel from commit `2cab8d58d487835eda3e300d4a3fb43de8a2361a`; code/state rollback and dependencies are preserved. Production is ready with zero service restarts after about two minutes without service, the same 71 sessions in SQLite, and schema 14. No tag or hosted GitHub release was created.
+
 ### 0.9.0 — GG deployment, 2026-10-23
 
 - Full canonical upstream integration through `a8873bb5657d20ef4278a0cfcb51fd18153cd0f3`: per-namespace SQLite session store with strict JSONL importers (available through 0.9.x, removed in upstream 1.0.0), asynchronous session state, the body-capable HTTP bridge, runtime-context providers and the refreshed WebUI and TUI.
