@@ -12,6 +12,7 @@ from loguru import logger
 
 from nanobot.agent.tools.base import Tool, ToolResult
 from nanobot.agent.tools.context import current_request_context, current_request_session_key
+from nanobot.agent.tools.member_access import current_member_scope
 from nanobot.agent.tools.runtime_control import (
     RUNTIME_COMMAND_KEYS,
     RUNTIME_SNAPSHOT_KEYS,
@@ -20,7 +21,6 @@ from nanobot.agent.tools.runtime_control import (
     RuntimeSnapshot,
 )
 from nanobot.agent.tools.self_config import MyToolConfig
-from nanobot.security.member_access import current_member_scope
 
 if TYPE_CHECKING:
     from nanobot.agent.tools.context import ToolContext

@@ -12,6 +12,7 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.context import RequestContext, request_context
 from nanobot.agent.tools.filesystem import FileToolsConfig
+from nanobot.agent.tools.member_access import current_member_tool_scope
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.subagent import SubagentTool
 from nanobot.bus.queue import MessageBus
@@ -19,7 +20,6 @@ from nanobot.collaboration.models import ConversationScope, ConversationScopeKin
 from nanobot.config.schema import ToolsConfig
 from nanobot.llm_usage.context import llm_usage_source
 from nanobot.providers.base import GenerationSettings, LLMProvider, LLMResponse, ToolCallRequest
-from nanobot.security.member_access import current_member_tool_scope
 from nanobot.security.workspace_access import (
     bind_workspace_scope,
     build_workspace_scope,

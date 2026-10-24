@@ -9,6 +9,7 @@ from pathlib import Path
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.cli_apps_config import CliAppsToolConfig
 from nanobot.agent.tools.context import RequestContext, ToolContext
+from nanobot.agent.tools.member_access import current_member_scope, current_member_tool_scope
 from nanobot.agent.tools.schema import (
     ArraySchema,
     BooleanSchema,
@@ -20,7 +21,6 @@ from nanobot.apps.cli import CliAppError, CliAppManager, CliAppsRuntimeConfig
 from nanobot.apps.cli.utils import runtime_lines_for_request
 from nanobot.collaboration.models import ConversationScope
 from nanobot.runtime_context import RuntimeContextBlock, wrap_runtime_context_lines
-from nanobot.security.member_access import current_member_scope, current_member_tool_scope
 from nanobot.security.workspace_access import current_tool_workspace
 
 
