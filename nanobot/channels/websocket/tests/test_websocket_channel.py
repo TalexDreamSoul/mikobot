@@ -484,6 +484,46 @@ async def test_temporary_file_preview_is_owned_restricted_and_not_cached(bus, tm
 
 
 @pytest.mark.asyncio
+async def test_temporary_file_preview_keeps_shared_media_for_the_host_only(
+    bus, tmp_path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("project notes")
+    media = tmp_path / "media"
+    media.mkdir()
+    shared = media / "9f2c41d7-upload.txt"
+    shared.write_text("shared upload")
+    monkeypatch.setattr("nanobot.webui.file_preview.get_media_dir", lambda: media)
+    gateway = _basic_handler(
+        bus, session_manager=SessionManager(workspace), workspace_path=workspace,
+        default_restrict_to_workspace=False,
+    )
+    channel = WebSocketChannel({"enabled": True, "allowFrom": ["*"]}, bus, gateway=gateway)
+    host, member = AsyncMock(), AsyncMock()
+    host_chat = await _new_temporary_chat(channel, host)
+    member_chat = await _new_temporary_chat(channel, member)
+    monkeypatch.setattr(
+        gateway.http, "workspace_project_selection_available", lambda connection: connection is host,
+    )
+
+    async def preview(connection, chat_id, path, **flags):
+        await channel._dispatch_envelope(connection, "webui-client", {
+            "type": "webui_request", "request_id": "shared-preview",
+            "action": "temporary_chat.file_preview",
+            "payload": {"chat_id": chat_id, "path": path, **flags},
+        })
+        return json.loads(connection.send.await_args.args[0])
+
+    assert (await preview(host, host_chat, str(shared)))["result"]["content"] == "shared upload"
+    assert (await preview(host, host_chat, str(shared), probe=True))["result"] == {"available": True}
+    assert (await preview(member, member_chat, "notes.txt"))["result"]["content"] == "project notes"
+    assert (await preview(member, member_chat, str(shared)))["error"]["status"] == 403
+    assert (await preview(member, member_chat, str(shared), metadata=True))["error"]["status"] == 403
+    assert (await preview(member, member_chat, str(shared), probe=True))["result"] == {"available": False}
+
+
+@pytest.mark.asyncio
 async def test_attach_exposes_the_session_canonical_model_preset(bus, tmp_path) -> None:
     sessions = SessionManager(tmp_path)
     session = sessions.get_or_create("websocket:pinned-model")

@@ -48,6 +48,7 @@ from nanobot.cron.binding import CronBindingError, binding_revision
 from nanobot.cron.session_turns import is_bound_cron_job
 from nanobot.cron.types import CronJob, CronSchedule
 from nanobot.runtime_admission import RuntimeMaintenanceError
+from nanobot.security.private_media import user_private_media_root
 from nanobot.security.workspace_access import (
     WORKSPACE_SCOPE_METADATA_KEY,
     WorkspaceScope,
@@ -81,6 +82,7 @@ from nanobot.webui.collaboration_api import (
     user_payload,
 )
 from nanobot.webui.file_preview import (
+    PreviewMedia,
     WebUIFilePreviewError,
     file_preview_availability_payload,
     file_preview_payload,
@@ -2993,6 +2995,24 @@ class GatewayHTTPHandler:
             extra_headers=_NO_STORE_HEADERS,
         )
 
+    async def _preview_media(self, request: WsRequest, session_key: str) -> PreviewMedia | None:
+        """Keep the host owner's reach; members get their own media and what their session recorded."""
+        try:
+            identity = await self._collaboration_identity(request)
+        except (CollaborationStoreError, ValueError):
+            identity = None
+        if identity is not None and identity[1]:
+            return None
+        roots: tuple[Path, ...] = ()
+        if identity is not None:
+            project_id = self._session_project_id(await self._session_metadata(session_key), identity[0])
+            try:
+                if project_id is not None:
+                    roots = (user_private_media_root(identity[0].id, project_id=project_id),)
+            except (OSError, ValueError):
+                pass
+        return PreviewMedia(roots=roots, session_messages=lambda: self._read_session_messages(session_key))
+
     async def _handle_file_preview(self, request: WsRequest, key: str) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
@@ -3007,14 +3027,15 @@ class GatewayHTTPHandler:
         path = _query_first(query, "path")
         is_probe = _query_first(query, "probe") == "1"
         metadata_only = _query_first(query, "metadata") == "1"
+        media = await self._preview_media(request, decoded_key)
         try:
             scope = self.workspaces.scope_for_session_key(decoded_key)
             if metadata_only:
-                payload = file_reference_payload(path, scope=scope)
+                payload = file_reference_payload(path, scope=scope, media=media)
             elif is_probe:
-                payload = file_preview_availability_payload(path, scope=scope)
+                payload = file_preview_availability_payload(path, scope=scope, media=media)
             else:
-                payload = file_preview_payload(path, scope=scope)
+                payload = file_preview_payload(path, scope=scope, media=media)
         except WebUIFilePreviewError as e:
             if is_probe and not metadata_only and e.status in {400, 403, 404, 413, 415}:
                 return _http_json_response({"available": False}, extra_headers=_NO_STORE_HEADERS)

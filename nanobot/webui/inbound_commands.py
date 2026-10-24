@@ -45,6 +45,7 @@ from nanobot.utils.prompt_templates import render_template
 from nanobot.webui.attachments import inspect_local_attachment
 from nanobot.webui.cli_apps_api import normalize_cli_app_mentions
 from nanobot.webui.file_preview import (
+    PreviewMedia,
     WebUIFilePreviewError,
     file_preview_availability_payload,
     file_preview_payload,
@@ -1146,12 +1147,20 @@ class WebUICommandRouter:
                 policy = self._temporary_chats.message_policy(connection, chat_id, "")
                 if policy is None:
                     raise TemporaryChatError("temporary_chat_unavailable")
+                # A temporary chat records nothing durable, so a member keeps only the project.
+                media = None if self.workspace_project_selection_available(connection) else PreviewMedia()
                 if metadata_only:
-                    result = file_reference_payload(path, scope=policy.workspace_scope)
+                    result = file_reference_payload(
+                        path, scope=policy.workspace_scope, media=media,
+                    )
                 elif probe:
-                    result = file_preview_availability_payload(path, scope=policy.workspace_scope)
+                    result = file_preview_availability_payload(
+                        path, scope=policy.workspace_scope, media=media,
+                    )
                 else:
-                    result = file_preview_payload(path, scope=policy.workspace_scope)
+                    result = file_preview_payload(
+                        path, scope=policy.workspace_scope, media=media,
+                    )
             except TemporaryChatError as exc:
                 await self.send_webui_response(
                     connection, request_id, status=404, message=exc.detail,
